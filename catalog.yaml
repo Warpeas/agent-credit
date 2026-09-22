@@ -1,0 +1,363 @@
+version: 1
+claim_threshold_ratio: 0.3
+notes: "P1 登录即领且当日过期的软件不自动唤醒。每日必签走本机 UI（不解密登录态）。AutoClaw 每日签到 200，无明确过期。"
+
+calendar:
+  - id: lobster_gift
+    account: lobsterai
+    date: "2026-09-29"
+    note: "LobsterAI 新用户 300 赠送到期"
+  - id: kimi_reset
+    account: kimi
+    date: "2026-10-14"
+    note: "Kimi Work 使用周期重置"
+  - id: joycode_expiry
+    account: joycode
+    date: "2026-10-16"
+    note: "JoyCode 10000 积分到期，确认是否续期"
+  - id: qclaw_monthly
+    account: qclaw
+    date: "monthly-01"
+    note: "QClaw 每月登录领 500（不自动启动客户端）"
+
+accounts:
+  - id: workbuddy
+    name: WorkBuddy
+    aliases: [wb, 腾讯workbuddy]
+    vendor: 腾讯
+    unit: credit
+    grant_type: accumulating
+    daily_amount: 100
+    validity_days: 30
+    cap: null
+    claim_policy: always
+    claim_mode: external
+    command: set WORKBUDDY_AUTH_FILE=C:\Users\Hunter\AppData\Local\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info&& set WORKBUDDY_BUDGET_SECONDS=50&& python "C:\Users\Hunter\Documents\Warpeas\agent-credit\vendor\workbuddy-auto-signin\signin.py" auto
+    streak:
+      cycle_days: 7
+      bonus_on: [7]
+      bonus_amount: 1000
+      mode: extra
+    capabilities: [coding, office, docs]
+    open_when_needed: false
+    notes: "API 直签（vendor/workbuddy-auto-signin，MIT）。客户端模拟点击被 isTrusted 过滤，external 是唯一可靠路线；auto 附带成长中心（派 Buddy/盲盒/任务）。"
+    models_note: "混元、DeepSeek、GLM、Kimi、MiniMax"
+
+  - id: minimax
+    name: MiniMax Code
+    aliases: [mm, minimaxcode]
+    vendor: MiniMax
+    unit: credit
+    grant_type: accumulating
+    daily_amount: 400
+    validity_days: 30
+    cap: null
+    claim_policy: always
+    claim_mode: manual
+    command: ""
+    streak:
+      cycle_days: 7
+      bonus_on: [4, 7]
+      bonus_amount: 1000
+      mode: set_daily
+    capabilities: [coding, multimodal]
+    open_when_needed: false
+    notes: "签到卡在主页左下角（每日签到/今天@400/第4天@1000）。模拟点击被 isTrusted 过滤（实测两次无效），OCR 定位本身正常（logs/minimax_ocr_dump.txt），待逆向 API 或官方开放后转 external。"
+    models_note: "MiniMax-M3 / M2.7 / H3"
+
+  - id: traework
+    name: TraeWork
+    aliases: [trae, 字节trae]
+    vendor: 字节跳动
+    unit: credit
+    grant_type: accumulating
+    daily_amount: 150
+    validity_days: 31
+    cap: null
+    claim_policy: always
+    claim_mode: ui
+    command: ""
+    extra_monthly: 500
+    capabilities: [coding]
+    open_when_needed: false
+    notes: "签到入口：桌面端左下角头像（网页/手机端无签到入口）。免费用户每日 150，会员（¥29.9/月）每日 200。客户端模拟点击疑似被 isTrusted 过滤（实测外部点击无效）；TraeWork 自带 computer-use 能力且左侧栏有「自动化」入口，可探索让其自签。"
+    models_note: "16+ 模型，CUE / MCP"
+
+  - id: autoclaw
+    name: AutoClaw 智谱
+    aliases: [claw, 智谱, zhipu]
+    vendor: 智谱 AI
+    unit: credit
+    grant_type: accumulating
+    daily_amount: 200
+    validity_days: null
+    cap: null
+    claim_policy: always
+    claim_mode: ui
+    command: ""
+    capabilities: [coding, local]
+    open_when_needed: false
+    models_note: "Pony-Alpha-2 / GLM / DeepSeek / Kimi / MiniMax"
+
+  - id: lobsterai
+    name: LobsterAI
+    aliases: [lobster, 有道龙虾]
+    vendor: 网易有道
+    unit: credit
+    grant_type: accumulating
+    daily_amount: 100
+    validity_days: 30
+    cap: null
+    claim_policy: always
+    claim_mode: ui
+    command: ""
+    capabilities: [office, coding, local]
+    open_when_needed: false
+    models_note: "GPT-4o / Claude / Gemini / DeepSeek 等 10+"
+
+  - id: dumate
+    name: DuMate 百度搭子
+    aliases: [搭子, baidu]
+    vendor: 百度
+    unit: credit
+    grant_type: accumulating
+    daily_amount: 500
+    validity_days: 30
+    cap: 0
+    claim_policy: below_threshold
+    claim_mode: manual
+    command: ""
+    capabilities: [search, office, docs]
+    open_when_needed: false
+    notes: "有领取上限。cap=0 表示尚未测出上限，一期默认不自动领。"
+
+  - id: todesk
+    name: ToDesk AI
+    aliases: [todesk]
+    vendor: ToDesk
+    unit: credit
+    grant_type: accumulating
+    daily_amount: 100
+    validity_days: 30
+    cap: 0
+    claim_policy: below_threshold
+    claim_mode: manual
+    command: ""
+    streak:
+      cycle_days: 7
+      bonus_on: [7]
+      bonus_amount: 600
+      mode: extra
+    capabilities: [remote]
+    open_when_needed: false
+    notes: "有领取上限。cap 未测出前不自动领。"
+
+  - id: qclaw
+    name: QClaw 小龙虾
+    aliases: [小龙虾]
+    vendor: 腾讯电脑管家
+    unit: credit
+    grant_type: monthly
+    daily_amount: 0
+    monthly_amount: 500
+    validity_days: 30
+    cap: null
+    claim_policy: monthly
+    claim_mode: never
+    command: ""
+    capabilities: [remote, local]
+    open_when_needed: true
+    notes: "每月登录即领，不自动启动。"
+
+  - id: joycode
+    name: JoyCode 京东
+    aliases: [京东joycode]
+    vendor: 京东云
+    unit: credit
+    grant_type: one_shot
+    daily_amount: 0
+    validity_days: null
+    expires_on: "2026-10-16"
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [coding]
+    open_when_needed: true
+
+  - id: kimi
+    name: Kimi Work
+    aliases: [kimiwork, 月之暗面]
+    vendor: 月之暗面
+    unit: credit
+    grant_type: monthly
+    daily_amount: 0
+    validity_days: null
+    next_reset: "2026-10-14"
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [office, docs]
+    open_when_needed: true
+    models_note: "Kimi K3 / 100万上下文"
+
+  - id: catpaw
+    name: CatPaw 美团
+    aliases: [美团猫爪]
+    vendor: 美团
+    unit: credit
+    grant_type: one_shot
+    daily_amount: 0
+    validity_days: 365
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [coding]
+    open_when_needed: true
+    notes: "新用户 1000，无每日签到。"
+
+  - id: mavis
+    name: Mavis 腾讯
+    aliases: [腾讯mavis]
+    vendor: 腾讯
+    unit: token
+    grant_type: daily_expire
+    daily_amount: 10000000
+    validity_days: 0
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [coding, office, local, remote]
+    open_when_needed: true
+    notes: "登录即领 1000 万 Token，当日清零。用时再开。"
+
+  - id: monkeycode_token
+    name: MonkeyCode Token
+    aliases: [mc, monkeycode]
+    vendor: 长亭百川
+    unit: token
+    grant_type: daily_expire
+    daily_amount: 10000000
+    validity_days: 0
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [coding]
+    open_when_needed: true
+    notes: "10M Token 登录即领、当日清零。用时再开。"
+
+  - id: monkeycode_credit
+    name: MonkeyCode 积分
+    aliases: [mc积分]
+    vendor: 长亭百川
+    unit: credit
+    grant_type: accumulating
+    daily_amount: 100
+    validity_days: null
+    cap: null
+    claim_policy: always
+    claim_mode: manual
+    command: ""
+    capabilities: [coding]
+    open_when_needed: false
+    notes: "100 积分需手动签到，有效期以客户端为准。"
+
+  - id: loomy
+    name: 讯飞 Loomy
+    aliases: [讯飞, loomy]
+    vendor: 科大讯飞
+    unit: credit
+    grant_type: daily_expire
+    daily_amount: 5000
+    validity_days: 0
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [office, search, docs]
+    open_when_needed: true
+    notes: "每日 5000 当日清零；另有永久 6500。用时再开。"
+
+  - id: coze
+    name: 扣子 Coze
+    aliases: [扣子, coze]
+    vendor: 字节跳动
+    unit: credit
+    grant_type: daily_expire
+    daily_amount: 1500
+    validity_days: 0
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [multimodal, search, office]
+    open_when_needed: true
+    notes: "每日 1500 当日清零。用时再开。"
+
+  - id: xiaohuanxiong
+    name: 商汤小浣熊
+    aliases: [小浣熊]
+    vendor: 商汤科技
+    unit: credit
+    grant_type: daily_expire
+    daily_amount: 300
+    validity_days: 0
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [office, docs]
+    open_when_needed: true
+    notes: "每日 300 当日清零。用时再开。"
+
+  - id: qwenwork
+    name: 千问办公
+    aliases: [千问, qwen]
+    vendor: 阿里巴巴
+    unit: credit
+    grant_type: daily_expire
+    daily_amount: 100
+    validity_days: 0
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [office, docs]
+    open_when_needed: true
+    notes: "每日 100 当日过期。用时再开。"
+
+  - id: accio
+    name: Accio Work
+    aliases: [accio]
+    vendor: 阿里国际
+    unit: credit
+    grant_type: daily_expire
+    daily_amount: 200
+    validity_days: 0
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [ecommerce]
+    open_when_needed: true
+    notes: "每日 200 当日清零。用时再开。"
+
+  - id: stepfun
+    name: 阶跃 AI
+    aliases: [阶跃, step]
+    vendor: 阶跃星辰
+    unit: credit
+    grant_type: daily_expire
+    daily_amount: 20
+    validity_days: 0
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [coding]
+    open_when_needed: true
+    notes: "每日 20 当日过期。用时再开。"

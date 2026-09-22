@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+data/ledger.json
+data/*.tmp
+logs/
+.pytest_cache/

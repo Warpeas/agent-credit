@@ -1,7 +1,10 @@
 ﻿# MiniMax Code daily check-in via screenshot+OCR+click. ASCII code only.
 # The check-in card ("每日签到 / 今天 @400") sits on the home sidebar, no navigation needed.
+# On success: restores the previously focused window, and closes the client if
+# this script was the one that started it (-NoClose to opt out).
 param(
-    [string]$OutFile = ""
+    [string]$OutFile = "",
+    [switch]$NoClose
 )
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -44,7 +47,47 @@ function Await($WinRtOp, $ResultType) {
     return $netTask.Result
 }
 
+$script:SavedHwnd = [IntPtr]::Zero
+$script:CloseAllowed = $false
+
+function Save-Foreground {
+    # Remember what the user was actually using, so we can hand focus back.
+    # If MiniMax is already in front there is nothing to restore.
+    if ($script:SavedHwnd -ne [IntPtr]::Zero) { return }
+    $cur = [Cap32]::GetForegroundWindow()
+    if ($cur -ne [IntPtr]::Zero -and $cur -ne $hwnd) { $script:SavedHwnd = $cur }
+}
+
+function Restore-Foreground {
+    if ($script:SavedHwnd -eq [IntPtr]::Zero) { return }
+    [Cap32]::SetForegroundWindow($script:SavedHwnd) | Out-Null
+    $script:SavedHwnd = [IntPtr]::Zero
+}
+
+function Stop-LaunchedApp {
+    # Only ever close what *we* started. If any MiniMax process was already
+    # alive when the script began, we touch nothing.
+    if ($NoClose) { return }
+    if (-not $script:CloseAllowed) { return }
+
+    Start-Sleep -Seconds 3
+    $procs = @(Get-Process -Name $AppProcess -ErrorAction SilentlyContinue)
+    if ($procs.Count -eq 0) { return }
+
+    foreach ($p in $procs) {
+        try { $p.CloseMainWindow() | Out-Null } catch { }
+    }
+    Start-Sleep -Seconds 8
+    foreach ($p in @(Get-Process -Name $AppProcess -ErrorAction SilentlyContinue)) {
+        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
 function Out-Json([string]$status, [string]$detail) {
+    # On success give the window back, then close the client if we launched it.
+    # On failure keep it open -- the human needs to look at it.
+    if ($status -eq "ok" -or $status -eq "already") { Stop-LaunchedApp }
+    Restore-Foreground
     $payload = @{ status = $status; detail = $detail } | ConvertTo-Json -Compress
     if ($OutFile) {
         [System.IO.File]::WriteAllText($OutFile, $payload, (New-Object System.Text.UTF8Encoding($false)))
@@ -57,6 +100,19 @@ function Out-Json([string]$status, [string]$detail) {
 $null = [Cap32]::SetProcessDPIAware()
 
 $exe = 'C:\Users\Hunter\AppData\Local\Programs\MiniMax Code\MiniMax Code.exe'
+$AppProcess = 'MiniMax Code'
+
+# KNOWN GAP (2026-09-23): the cold-start path below is UNVERIFIED. Launching the
+# client from an automated context produced no process and no log entry at all
+# (Roaming\MiniMax\logs stayed at its previous mtime), while the same context can
+# launch notepad fine. So either the app or the host blocks it. If cold start
+# never works, Stop-LaunchedApp can never fire -- it only closes what we started.
+
+# Snapshot before we touch anything. If the client was ALREADY running we must
+# never close it -- the user may be mid-session. Only a client we start ourselves
+# is ours to shut down.
+$preexisting = @(Get-Process -Name $AppProcess -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+$script:CloseAllowed = ($preexisting.Count -eq 0)
 
 function Find-AppWindow {
     $script:BestHwnd = [IntPtr]::Zero
@@ -97,6 +153,7 @@ if ($hwnd -eq [IntPtr]::Zero) {
 }
 
 function Wait-Foreground {
+    Save-Foreground
     if ([Cap32]::GetForegroundWindow() -eq $hwnd) { return $true }
     [Cap32]::SetForegroundWindow($hwnd) | Out-Null
     Start-Sleep -Milliseconds 800

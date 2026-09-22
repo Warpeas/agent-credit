@@ -44,6 +44,16 @@ python C:\Users\Hunter\Documents\Warpeas\agent-credit\credit.py <命令>
 7. WorkBuddy 客户端会丢弃模拟点击（isTrusted 过滤），`claim_mode=external`（API 直签）是它唯一可靠路线，不要改回 ui。
 8. AutoClaw 走提权 OCR 路线（scripts/ui_claim_autoclaw.ps1），签到成功后自动关客户端；手动跑会弹 1 次 UAC。
 
+## 补齐自动化路线
+
+某家还没打通自动签到时，不要从外部硬逆向（容易被 `isTrusted` 挡且随版本失效）。
+用 `research/` 里的自述调研流程，让那家软件自己交代：
+
+1. 读 `research/prompts/<id>.md`，把围栏里的整段粘进该软件的对话框
+2. 把它按 `research/ANSWER-SCHEMA.md` 的回答存进 `research/answers/<id>.md`
+3. 跑 `python scripts\check_research_answers.py` 确认没混进 token 明文
+4. `reliability: 已实测` 才改 `catalog.yaml`，顺手把失效条件写进 `notes`
+
 ## 流程
 
 签到：

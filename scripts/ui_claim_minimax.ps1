@@ -178,10 +178,13 @@ $lines = Get-OcrLinesSafe
 if ($null -eq $lines) { Out-Json "pending" "MiniMax Code 未在前台（请点击其窗口后重试）" }
 
 # Anchor: the "每日签到" card on the home sidebar.
+# NOTE: once today's claim succeeds the card is REMOVED from the sidebar, so a
+# missing card most often means "already claimed", not "layout broken". We still
+# return pending -- claiming success we did not observe would silently skip a day.
 $anchor = Find-Line $lines "每日签到"
 if (-not $anchor) {
     $peek = ($lines | Select-Object -First 8 | ForEach-Object { $_.text }) -join "/"
-    Out-Json "pending" ("未找到「每日签到」卡片，当前页面: " + $peek)
+    Out-Json "pending" ("未找到「每日签到」卡片（今日已签后卡片会收起），当前页面: " + $peek)
 }
 
 # Already-checked markers on/near the card.
@@ -200,11 +203,15 @@ $btn = $null
 foreach ($l in $lines) {
     if ($l.y -le $anchor.y) { continue }
     if ($l.y -gt ($anchor.y + 700)) { continue }
-    if ($l.text -match "签到得|领取|领积分|签到领") { $btn = $l; break }
+    if ($l.text -match "连续签到") { continue }
+    if ($l.text -match "签到得|领取|领积分|签到领") {
+        if ($null -eq $btn -or $l.y -gt $btn.y) { $btn = $l }
+    }
 }
-if (-not $btn) { $btn = Find-Line $lines "今天" }
 if (-not $btn) {
-    Out-Json "pending" ("找到签到卡但未见签到按钮，锚点 @ " + $anchor.x + "," + $anchor.y)
+    # Geometric fallback: the action button sits at a FIXED offset from the
+    # "每日签到" title -- measured (+207, +373) across two different window sizes.
+    $btn = @{ text = "(fallback-offset)"; x = ($anchor.x + 114); y = ($anchor.y + 360); w = 185; h = 26 }
 }
 $btnX = $btn.x + [int]($btn.w / 2)
 $btnY = $btn.y + [int]($btn.h / 2)

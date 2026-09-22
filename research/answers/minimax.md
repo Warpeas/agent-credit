@@ -31,7 +31,7 @@ status:
   unit: credit
 
 automation:
-  claim_mode: manual          # 自述原值为 never；见下方「处置」，不采纳，保留 manual
+  claim_mode: ui             # 2026-09-23 实测通过后由 manual 升级；自述原值 never 不采纳
   command: ""
   status_command: "C:\\Users\\Hunter\\.minimax\\bin\\mcode-tools.cmd auth status"   # 仅鉴权态，不是积分余额
   blockers:
@@ -68,8 +68,12 @@ catalog_patch:
 
 ## 处置
 
-**不改 `catalog.yaml`。** 自述建议的 `claim_mode: never` 也不采纳——`never` 会把 MiniMax 从
-`due` / `checkin` 里彻底摘掉，而它仍是每日必签中额度最大的一家。保持 `manual`。
+**`catalog.yaml` 已改：`claim_mode: manual` → `ui`**（2026-09-23 实测通过后）。
+`agent_credit/ui_claim.py` 新增 `_claim_minimax()`，走验证过的 OCR+OS 注入脚本，
+不再走那条会被过滤的通用 UIA 路线。
+
+自述里建议的 `claim_mode: never` 不采纳 —— `never` 会把 MiniMax 从 `due` / `checkin`
+里彻底摘掉，而它仍是每日必签中额度最大的一家（400/天）。
 
 ## 关于「isTrusted 过滤」这条 blocker
 
@@ -113,6 +117,33 @@ async claimSignin()    { let {data:e} = await <axios>.post("/minimax-cloud/api/v
 把它带的项目目录里根本没有 `app.asar`，而它也没想到去安装目录翻自己的 bundle。
 这说明「让各家 Agent 自述」这条路对 Electron 应用价值有限 —— 它们不认识自己的打包产物。
 
+## 实测（2026-09-23 01:57，已跑通）
+
+修完脚本后实跑，结果：
+
+```
+{"detail":"签到成功: 今日已签到","status":"ok"}
+```
+
+**OS 级模拟点击对 MiniMax Code 有效**，「isTrusted 过滤」这条 blocker 正式作废。
+
+定位的关键常量（两次不同窗口尺寸下实测一致）：
+
+| 元素 | 相对「每日签到」标题的偏移 |
+|---|---|
+| 「今天」格子 | (+29, +120) |
+| 7 天格子区 | y +120 ~ +280 |
+| **签到按钮** | **(+207, +373)**，尺寸 185×26 |
+
+踩到的坑：按钮文本 OCR 会飘（`签到得@400` → `雷签到得@羽0`），而卡片里的说明文字
+「连续签到得更多积分」也含「签到得」且在按钮上方，正则会先命中它。
+修法：排除 `连续签到`，命中项取**最靠下**的，再加一层几何回退（锚点 +207/+373）。
+
+另一条实测观察：**签到成功后卡片会从侧边栏移除**。所以「找不到签到卡」通常意味着
+今天已签，不是布局坏了。脚本仍保守返回 `pending` —— 谎报成功会静默漏掉一整天。
+
+已入账：`credit record minimax claimed 400` → 剩余 400，连签 1 天。
+
 ## 下一步
 
 1. **[已完成]** 修 `ui_claim_minimax.ps1`：点击目标从「今天」标签改为真正的按钮「签到得@400」（y≈1882）；
@@ -120,6 +151,10 @@ async claimSignin()    { let {data:e} = await <axios>.post("/minimax-cloud/api/v
    旧代码的校验窗口是「锚点 ±200」= y 1309~1709，按钮在 1882，**根本没被覆盖**。
 2. **[已完成]** 端点逆向：从 `app.asar` 直接拿到 `/minimax-cloud/api/v1/signin/{status,claim}`。
    这一步证实 MiniMax 客户端的自述（"api: unknown / 需抓 network"）是**调研不足**，不是做不到。
-3. 待定夺：`external` 路线需复用登录态 token（读本机 Local Storage）。属凭据复用，有封号与泄露风险，
-   **需要主人明确授权才做**。未经授权前，MiniMax 继续走修好的 UI 路线。
-4. 跑一次修好的 UI 脚本实测（需 MiniMax Code 在前台），确认按钮点击真的能签到。
+3. **[已完成]** `catalog.yaml` 中 minimax 的 `claim_mode` 由 `manual` 改为 `ui`；
+   `agent_credit/ui_claim.py` 新增 `_claim_minimax()` 分支，走验证过的 OCR 脚本，
+   不再走会被过滤的通用 UIA 路线。
+4. 待定夺：`external` 路线需复用登录态 token（读本机 Local Storage）。属凭据复用，有封号与泄露风险，
+   **需要主人明确授权才做**。
+5. 稳定性观察：OCR 点击依赖窗口在前台、依赖 OCR 识别率。建议先连跑 3 天，
+   出现 ≥1 次 pending 就退回 `manual` + 人工兜底。

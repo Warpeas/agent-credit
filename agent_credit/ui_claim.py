@@ -14,6 +14,7 @@ from .paths import LOG_DIR
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "ui_claim.ps1"
 SCRIPT_AUTOCLAW_OCR = ROOT / "scripts" / "ui_claim_autoclaw.ps1"
+SCRIPT_MINIMAX_OCR = ROOT / "scripts" / "ui_claim_minimax.ps1"
 
 DEFAULT_CLICK = ("签到", "立即签到", "立即领取", "打卡")
 DEFAULT_ALREADY = ("已签到", "今日已签", "已领取", "已打卡")
@@ -75,10 +76,64 @@ def _claim_autoclaw() -> tuple[bool, str]:
     return False, "提权签到超时（180s），请查看客户端窗口状态"
 
 
+def _claim_minimax() -> tuple[bool, str]:
+    """MiniMax Code route: screenshot + OCR + OS-level click.
+
+    The generic UIA route cannot touch it: InvokePattern.Invoke() is script-layer
+    dispatch (isTrusted=false) and gets filtered by the frontend. This script uses
+    SetCursorPos + mouse_event, which enters the OS input queue (isTrusted=true).
+    Verified working 2026-09-23: {"status":"ok","detail":"签到成功: 今日已签到"}.
+
+    Note: needs the window in the foreground. The script brings it forward itself.
+    """
+    if not SCRIPT_MINIMAX_OCR.is_file():
+        return False, f"缺少 {SCRIPT_MINIMAX_OCR}"
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    result_path = LOG_DIR / "minimax_claim.json"
+    if result_path.exists():
+        result_path.unlink()
+
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(SCRIPT_MINIMAX_OCR),
+        "-OutFile",
+        str(result_path),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        return False, "MiniMax OCR 签到超时（180s）"
+
+    payload = _last_json(proc.stdout)
+    if not payload:
+        err = (proc.stderr or proc.stdout or "").strip()[:300]
+        return False, f"MiniMax 脚本无结果 {err or proc.returncode}"
+
+    status = str(payload.get("status") or "")
+    detail = str(payload.get("detail") or status)
+    if status in ("ok", "already"):
+        return True, detail
+    return False, detail
+
+
 def claim(account_id: str) -> tuple[bool, str]:
     """Drive the installed desktop client. True only if UI reports claimed/already."""
     if account_id == "autoclaw":
         return _claim_autoclaw()
+    if account_id == "minimax":
+        return _claim_minimax()
     recipe = RECIPES.get(account_id)
     if recipe is None:
         return False, "无 UI 配方"

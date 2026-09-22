@@ -40,7 +40,7 @@ accounts:
       mode: extra
     capabilities: [coding, office, docs]
     open_when_needed: false
-    notes: "API 直签（vendor/workbuddy-auto-signin，MIT）。客户端模拟点击被 isTrusted 过滤，external 是唯一可靠路线；auto 附带成长中心（派 Buddy/盲盒/任务）。"
+    notes: "API 直签（vendor/workbuddy-auto-signin，MIT），稳定可靠。早期记录称「客户端模拟点击被 isTrusted 过滤」，该结论只适用于 UIA InvokePattern 路线，未经 OS 级注入复测；既然 external 可用，不做 UI 路线。auto 附带成长中心（派 Buddy/盲盒/任务）。"
     models_note: "混元、DeepSeek、GLM、Kimi、MiniMax"
 
   - id: minimax
@@ -53,7 +53,7 @@ accounts:
     validity_days: 30
     cap: null
     claim_policy: always
-    claim_mode: manual
+    claim_mode: ui
     command: ""
     streak:
       cycle_days: 7
@@ -62,7 +62,7 @@ accounts:
       mode: set_daily
     capabilities: [coding, multimodal]
     open_when_needed: false
-    notes: "签到卡在主页左下角（每日签到/今天@400/第4天@1000）。模拟点击被 isTrusted 过滤（实测两次无效），OCR 定位本身正常（logs/minimax_ocr_dump.txt），待逆向 API 或官方开放后转 external。"
+    notes: "签到卡在主页左下角（每日签到/今天@400/第4天@1000）。2026-09-23 实测：OS 级模拟点击（SetCursorPos+mouse_event）有效，已自动签到成功（logs/minimax_claim.json）。此前「isTrusted 过滤」的结论是错的——那条只适用于 UIA InvokePattern 路线。OCR 点击脚本需窗口在前台（脚本自己拉前台）。端点已逆向到 /minimax-cloud/api/v1/signin/{status,claim}，但鉴权头由主进程注入，转 external 需复用登录态，待授权。"
     models_note: "MiniMax-M3 / M2.7 / H3"
 
   - id: traework

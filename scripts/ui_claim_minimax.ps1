@@ -185,16 +185,26 @@ if (-not $anchor) {
 }
 
 # Already-checked markers on/near the card.
+# NOTE: the action button ("签到得@400") sits ~370px BELOW the "每日签到" title,
+# so the window must extend far down from the anchor, not +/-120.
 foreach ($l in $lines) {
-    if (($l.text.Contains("已签") -or $l.text.Contains("已领")) -and [Math]::Abs($l.y - $anchor.y) -lt 120 -and $l.x -lt ($anchor.x + 500)) {
+    if (($l.text.Contains("已签") -or $l.text.Contains("已领")) -and
+        $l.y -ge ($anchor.y - 60) -and $l.y -le ($anchor.y + 700) -and $l.x -lt ($anchor.x + 500)) {
         Out-Json "already" ("今日已签（" + $l.text + "）")
     }
 }
 
-# Button: the "今天" cell of the check-in strip (text like 今天@400).
-$btn = Find-Line $lines "今天"
+# Button: prefer the real action button ("签到得@400"), fall back to the "今天" cell.
+# Clicking the "今天" label was the historical bug -- it is not clickable.
+$btn = $null
+foreach ($l in $lines) {
+    if ($l.y -le $anchor.y) { continue }
+    if ($l.y -gt ($anchor.y + 700)) { continue }
+    if ($l.text -match "签到得|领取|领积分|签到领") { $btn = $l; break }
+}
+if (-not $btn) { $btn = Find-Line $lines "今天" }
 if (-not $btn) {
-    Out-Json "pending" ("找到签到卡但未见「今天」按钮，锚点 @ " + $anchor.x + "," + $anchor.y)
+    Out-Json "pending" ("找到签到卡但未见签到按钮，锚点 @ " + $anchor.x + "," + $anchor.y)
 }
 $btnX = $btn.x + [int]($btn.w / 2)
 $btnY = $btn.y + [int]($btn.h / 2)
@@ -221,13 +231,14 @@ foreach ($wait in @(1500, 2500, 3500)) {
     $a2 = Find-Line $after "每日签到"
     if (-not $a2) { continue }
     foreach ($l in $after) {
-        if (($l.text.Contains("成功") -or $l.text.Contains("已领") -or $l.text.Contains("已签")) -and [Math]::Abs($l.y - $a2.y) -lt 200 -and $l.x -lt ($a2.x + 600)) {
+        if (($l.text.Contains("成功") -or $l.text.Contains("已领") -or $l.text.Contains("已签")) -and
+            [Math]::Abs($l.y - $btnY) -lt 300 -and $l.x -lt ($a2.x + 600)) {
             if ($l.text -notmatch "连续签到得") { $okHit = $l; break }
         }
     }
     if ($okHit) { break }
     foreach ($l in $after) {
-        if ($l.text.Contains("已签") -and [Math]::Abs($l.y - $a2.y) -lt 120 -and $l.x -lt ($a2.x + 500)) {
+        if ($l.text.Contains("已签") -and [Math]::Abs($l.y - $btnY) -lt 300 -and $l.x -lt ($a2.x + 500)) {
             $alreadyHit = $l; break
         }
     }
@@ -235,4 +246,4 @@ foreach ($wait in @(1500, 2500, 3500)) {
 }
 if ($okHit) { Out-Json "ok" ("签到成功: " + $okHit.text) }
 if ($alreadyHit) { Out-Json "already" ("点击后显示: " + $alreadyHit.text) }
-Out-Json "pending" "已点击「今天」签到格，未检测到成功提示"
+Out-Json "pending" ("已点击签到按钮「" + $btn.text + "」@ " + $btnX + "," + $btnY + "，未检测到成功提示")

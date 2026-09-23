@@ -16,7 +16,7 @@
   - 今日已签 : null 或 HTTP 400 + {"code":10001,"msg":"今天已签到，请明天再来"}
                幂等，两种形态都按"已签"处理，不计失败
   - 业务错误 : {"code": ..., "msg": ...}
-  - 登录失效 : HTTP 401/403，需重新登录桌面端
+  - 认证拒绝 : HTTP 401；HTTP 403 单独作为权限/业务拒绝处理
 
 凭据文件由桌面端登录后自动写入；脚本按平台自动探测，或用环境变量
 WORKBUDDY_AUTH_FILE 指定。任何模式下都不会打印令牌，可安全分享。
@@ -27,24 +27,36 @@ WORKBUDDY_AUTH_FILE 指定。任何模式下都不会打印令牌，可安全分
   python signin.py growth         # 仅成长中心（不签到）
   python signin.py silent-poll    # 轮询：补签（未签才签）+ 成长中心，空跑不写日志
   python signin.py silent-growth  # silent-poll 的旧名，行为完全相同（老计划任务仍可用）
+  python signin.py doctor         # 离线检查凭据格式与运行时能力，不解密、不联网
   python signin.py status         # 仅查签到状态（调试）
   python signin.py claim          # 仅领取签到（调试，幂等）
   python signin.py all            # 查签到状态 + 领取（调试）
 """
 
+import base64
 import json
 import math
 import os
+import plistlib
+import re
 import ssl
+import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
 from datetime import datetime
 
 DEFAULT_ENDPOINT = "https://copilot.tencent.com"
 AUTH_BASENAME = os.path.join("CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
+# Linux 没有桌面端，入口是 CodeBuddy CLI；它写出的凭据文件名不同、放在 XDG 数据目录
+# （issue #4 实测：~/.local/share/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info，
+#  JSON 结构与桌面端一致，签到/成长中心接口全部照常工作）
+CLI_AUTH_BASENAME = os.path.join("CodeBuddyExtension", "Data", "Public", "auth",
+                                 "Tencent-Cloud.coding-copilot.info")
 
 # 伪 HTTP 码：区分"没拿到响应"的两种原因
 CODE_NO_NETWORK = -1   # 连不上/超时
@@ -80,6 +92,370 @@ _config_warning = None   # 配置非法时的告警，由 emit 统一带进输�
 # 轮询类命令：预算更短，且空跑不落盘。silent-growth 是 silent-poll 的旧名，
 # 已安装的计划任务还在用它，必须继续认。
 POLL_ACTIONS = ("silent-poll", "silent-growth")
+
+AUTH_HELPER_TIMEOUT = 10.0
+AUTH_INPUT_LIMIT = 65536
+AUTH_OUTPUT_LIMIT = 65536
+TOKEN_LIMIT = 32768
+_sensitive_values = set()
+AUTH_REASONS = {
+    "INVALID_FORMAT": "登录凭据格式无效，请检查凭据来源和客户端版本",
+    "UNSUPPORTED_ENVELOPE": "尚不支持此加密凭据格式，请更新脚本；重新登录不会改变加密格式",
+    "RUNTIME_NOT_FOUND": "未找到 WorkBuddy 客户端，请用 WORKBUDDY_EXE 指定其可执行文件",
+    "INVALID_RUNTIME_PATH": "WORKBUDDY_EXE 不是可用的可执行文件，请核对路径",
+    "RUNTIME_UNAVAILABLE": "客户端运行时不支持所需的原生存储接口，请检查客户端和脚本版本",
+    "KEY_MISMATCH": "凭据与所选客户端的密钥不匹配，请用 WORKBUDDY_EXE 指定对应客户端",
+    "DECRYPT_FAILED": "加密凭据认证失败，请检查客户端版本及凭据是否完整",
+    "HELPER_TIMEOUT": "凭据处理超时，已停止子进程，请稍后重试",
+    "HELPER_PROTOCOL": "客户端凭据助手返回无效结果，请检查客户端和脚本版本",
+}
+
+# Fixed code only in argv; the encrypted field travels over stdin. Build material
+# never leaves this process. Only sym-v1 / field / suite 1 is supported.
+AUTH_HELPER_JS = r"""
+'use strict';
+const crypto = require('crypto');
+const inputLimit = 65536;
+const failure = reason => { throw {reason}; };
+const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
+function base64(value, length) {
+  if (typeof value !== 'string' || value.length > inputLimit) failure('INVALID_FORMAT');
+  const bytes = Buffer.from(value, 'base64');
+  if (bytes.toString('base64') !== value || (length !== undefined && bytes.length !== length))
+    failure('INVALID_FORMAT');
+  return bytes;
+}
+function utf8(bytes) {
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) failure('INVALID_FORMAT');
+  return text;
+}
+function decode(value) {
+  if (!object(value) || Object.keys(value).sort().join(',') !== '$wbEncrypted,envelope' || value.$wbEncrypted !== 1)
+    failure('UNSUPPORTED_ENVELOPE');
+  let envelope;
+  try { envelope = JSON.parse(utf8(base64(value.envelope))); }
+  catch (e) { failure(e.reason || 'INVALID_FORMAT'); }
+  if (!object(envelope) || !Number.isInteger(envelope.suite)) failure('INVALID_FORMAT');
+  if (envelope.suite !== 1) failure('UNSUPPORTED_ENVELOPE');
+  if (Object.keys(envelope).sort().join(',') !== 'authTag,ciphertext,keyId,nonce,suite' ||
+      typeof envelope.keyId !== 'string' || !/^[0-9a-f]{16}$/.test(envelope.keyId)) failure('INVALID_FORMAT');
+  return {keyId: envelope.keyId, nonce: base64(envelope.nonce, 12),
+    tag: base64(envelope.authTag, 16), ciphertext: base64(envelope.ciphertext)};
+}
+function nativeStorage() {
+  try {
+    const storage = process._linkedBinding('electron_browser_workbuddy_storage');
+    if (typeof storage.loggerGet !== 'function') failure('RUNTIME_UNAVAILABLE');
+    return storage;
+  } catch (_) { failure('RUNTIME_UNAVAILABLE'); }
+}
+function decrypt(envelope) {
+  let payload;
+  try { payload = JSON.parse(nativeStorage().loggerGet()); }
+  catch (_) { failure('RUNTIME_UNAVAILABLE'); }
+  let key;
+  let plaintext;
+  try {
+    if (!object(payload) || payload.version !== 1) failure('RUNTIME_UNAVAILABLE');
+    let secret;
+    try { secret = base64(payload.atRestSecretKey, 32); }
+    catch (_) { failure('RUNTIME_UNAVAILABLE'); }
+    const empty = secret.every(b => b === 0);
+    secret.fill(0);
+    if (empty) failure('RUNTIME_UNAVAILABLE');
+    key = crypto.createHash('sha256').update(payload.atRestSecretKey, 'utf8').digest();
+    payload = null;
+    if (crypto.createHash('sha256').update(key).digest('hex').slice(0, 16) !== envelope.keyId)
+      failure('KEY_MISMATCH');
+    const lp = s => {
+      const bytes = Buffer.from(s, 'utf8');
+      const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
+      return Buffer.concat([length, bytes]);
+    };
+    const aad = Buffer.concat([Buffer.from('WB-AAD\0', 'ascii'), Buffer.from([1]),
+      lp('WBEV1'), lp('sym-v1'), Buffer.from([0, 0, 0, 1]), lp(envelope.keyId), Buffer.from([2, 0, 0])]);
+    try {
+      const cipher = crypto.createDecipheriv('aes-256-gcm', key, envelope.nonce, {authTagLength: 16});
+      cipher.setAAD(aad); cipher.setAuthTag(envelope.tag);
+      plaintext = Buffer.concat([cipher.update(envelope.ciphertext), cipher.final()]);
+    } catch (_) { failure('DECRYPT_FAILED'); }
+    const token = utf8(plaintext);
+    if (!token.length || token.length > 32768 || !/^[A-Za-z0-9._~+\/-]+=*$/.test(token))
+      failure('INVALID_FORMAT');
+    return token;
+  } finally {
+    if (key) key.fill(0);
+    if (plaintext) plaintext.fill(0);
+  }
+}
+let chunks = [], size = 0;
+function reply(value) {
+  process.stdout.write(JSON.stringify({version: 1, ...value}), () => process.exit(value.ok ? 0 : 1));
+}
+process.stdin.on('data', chunk => {
+  size += chunk.length;
+  if (size > inputLimit) reply({ok: false, reason: 'INVALID_FORMAT'});
+  else chunks.push(chunk);
+});
+process.stdin.on('error', () => reply({ok: false, reason: 'HELPER_PROTOCOL'}));
+process.stdin.on('end', () => {
+  try {
+    const request = JSON.parse(utf8(Buffer.concat(chunks))); chunks = [];
+    if (!object(request) || request.version !== 1) failure('HELPER_PROTOCOL');
+    if (request.operation === 'probe') {
+      nativeStorage();
+      if (!crypto.getCiphers().includes('aes-256-gcm')) failure('RUNTIME_UNAVAILABLE');
+      reply({ok: true, electron: process.versions.electron || 'unknown'});
+    } else if (request.operation === 'decrypt') {
+      reply({ok: true, accessToken: decrypt(decode(request.value))});
+    } else failure('HELPER_PROTOCOL');
+  } catch (e) {
+    const reasons = ['INVALID_FORMAT','UNSUPPORTED_ENVELOPE','RUNTIME_UNAVAILABLE',
+      'KEY_MISMATCH','DECRYPT_FAILED','HELPER_PROTOCOL'];
+    reply({ok: false, reason: reasons.includes(e.reason) ? e.reason : 'HELPER_PROTOCOL'});
+  }
+});
+"""
+
+
+class AuthError(Exception):
+    """Only fixed, non-sensitive messages may cross the credential boundary."""
+
+    def __init__(self, reason, result="AUTH_ERROR"):
+        self.reason = reason
+        self.result = result
+        super().__init__(AUTH_REASONS.get(reason, "本地未找到有效登录会话，请先登录客户端"))
+
+    def output(self):
+        return {"result": self.result, "reason": self.reason,
+                "report": str(self), "needs_attention": True}
+
+
+def _valid_token(token):
+    return (isinstance(token, str) and 0 < len(token) <= TOKEN_LIMIT
+            and re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token) is not None)
+
+
+def _validate_session(session):
+    if not isinstance(session, dict):
+        raise AuthError("INVALID_FORMAT")
+    for field in ("auth", "account"):
+        if session.get(field) is None:
+            raise AuthError("MISSING_SESSION", "NO_SESSION")
+        if not isinstance(session[field], dict):
+            raise AuthError("INVALID_FORMAT")
+    if session["auth"].get("accessToken") in (None, "") or session["account"].get("uid") in (None, ""):
+        raise AuthError("MISSING_SESSION", "NO_SESSION")
+    for source, fields in ((session["account"], ("uid", "enterpriseId")),
+                           (session["auth"], ("domain",))):
+        for field in fields:
+            value = source.get(field)
+            if value not in (None, "") and (not isinstance(value, str) or
+                                      re.fullmatch(r"[\x21-\x7e]{1,2048}", value) is None):
+                raise AuthError("INVALID_FORMAT")
+    endpoint = session["auth"].get("endpoint")
+    if endpoint in (None, ""):
+        endpoint = DEFAULT_ENDPOINT
+    if not isinstance(endpoint, str) or re.search(r"[\s\x00-\x1f\x7f]", endpoint):
+        raise AuthError("INVALID_FORMAT")
+    try:
+        parsed = urllib.parse.urlsplit(endpoint)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError()
+        parsed.port  # Validate an explicitly supplied port without logging the URL.
+    except ValueError:
+        raise AuthError("INVALID_FORMAT") from None
+
+
+def _token_format(value):
+    if isinstance(value, str):
+        if not _valid_token(value):
+            raise AuthError("INVALID_FORMAT")
+        return "plaintext"
+    if not isinstance(value, dict):
+        raise AuthError("INVALID_FORMAT")
+    if (set(value) != {"$wbEncrypted", "envelope"} or
+            type(value.get("$wbEncrypted")) is not int or value["$wbEncrypted"] != 1):
+        raise AuthError("UNSUPPORTED_ENVELOPE")
+    try:
+        encoded = value["envelope"]
+        if not isinstance(encoded, str) or not 0 < len(encoded) <= AUTH_INPUT_LIMIT - 1024:
+            raise ValueError()
+        raw = base64.b64decode(encoded, validate=True)
+        if base64.b64encode(raw).decode("ascii") != encoded:
+            raise ValueError()
+        envelope = json.loads(raw.decode("utf-8"))
+        if not isinstance(envelope, dict) or type(envelope.get("suite")) is not int:
+            raise ValueError()
+        if envelope["suite"] != 1:
+            raise AuthError("UNSUPPORTED_ENVELOPE")
+        if set(envelope) != {"suite", "keyId", "nonce", "authTag", "ciphertext"}:
+            raise ValueError()
+        if not isinstance(envelope["keyId"], str) or not re.fullmatch(r"[0-9a-f]{16}", envelope["keyId"]):
+            raise ValueError()
+        for field, length in (("nonce", 12), ("authTag", 16), ("ciphertext", None)):
+            data = envelope[field]
+            if not isinstance(data, str):
+                raise ValueError()
+            decoded = base64.b64decode(data, validate=True)
+            if base64.b64encode(decoded).decode("ascii") != data or (length is not None and len(decoded) != length):
+                raise ValueError()
+        return "sym-v1"
+    except (ValueError, TypeError, KeyError):
+        raise AuthError("INVALID_FORMAT") from None
+
+
+def _mac_runtime(bundle):
+    try:
+        with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as f:
+            name = plistlib.load(f).get("CFBundleExecutable")
+        if not isinstance(name, str) or not name or name in (".", "..") or "/" in name or "\\" in name:
+            return None
+        return os.path.join(bundle, "Contents", "MacOS", name)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def find_workbuddy_runtime():
+    override = os.environ.get("WORKBUDDY_EXE")
+    if override:
+        path = os.path.abspath(os.path.expanduser(override))
+        if not os.path.isfile(path) or (os.name != "nt" and not os.access(path, os.X_OK)):
+            raise AuthError("INVALID_RUNTIME_PATH")
+        return path
+    home = os.path.expanduser("~")
+    candidates = []
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        candidates.append(os.path.join(local, "Programs", "WorkBuddy", "WorkBuddy.exe"))
+        for name in ("ProgramFiles", "ProgramFiles(x86)"):
+            if os.environ.get(name):
+                candidates.append(os.path.join(os.environ[name], "WorkBuddy", "WorkBuddy.exe"))
+    elif sys.platform == "darwin":
+        candidates = [_mac_runtime(os.path.join(root, "WorkBuddy.app"))
+                      for root in ("/Applications", os.path.join(home, "Applications"))]
+    for path in candidates:
+        if path and os.path.isfile(path) and (os.name == "nt" or os.access(path, os.X_OK)):
+            return os.path.abspath(path)
+    raise AuthError("RUNTIME_NOT_FOUND")
+
+
+def _run_auth_helper(exe, request):
+    """Bound every pipe and deadline; never include captured data in exceptions."""
+    data = json.dumps(dict(request, version=1), ensure_ascii=True).encode("ascii")
+    if len(data) > AUTH_INPUT_LIMIT:
+        raise AuthError("INVALID_FORMAT")
+    timeout = min(AUTH_HELPER_TIMEOUT, _budget_left())
+    if timeout <= 0:
+        raise AuthError("HELPER_TIMEOUT")
+    env = {key: value for key, value in os.environ.items()
+           if not key.upper().startswith(("NODE_", "ELECTRON_", "WORKBUDDY_"))}
+    env["ELECTRON_RUN_AS_NODE"] = "1"
+    try:
+        process = subprocess.Popen([exe, "-e", AUTH_HELPER_JS], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env=env, shell=False,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError:
+        raise AuthError("RUNTIME_UNAVAILABLE") from None
+    output = {}
+    failed = threading.Event()
+
+    def read_pipe(name, pipe, limit):
+        try:
+            captured = pipe.read(limit + 1)
+            if len(captured) > limit:
+                failed.set()
+                process.kill()
+            else:
+                output[name] = captured
+        except OSError:
+            failed.set()
+
+    def write_pipe():
+        try:
+            process.stdin.write(data)
+            process.stdin.close()
+        except OSError:
+            failed.set()
+
+    workers = [threading.Thread(target=read_pipe, args=("stdout", process.stdout, AUTH_OUTPUT_LIMIT), daemon=True),
+               threading.Thread(target=read_pipe, args=("stderr", process.stderr, 8192), daemon=True),
+               threading.Thread(target=write_pipe, daemon=True)]
+    deadline = time.monotonic() + timeout
+    try:
+        for worker in workers:
+            worker.start()
+        try:
+            process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise AuthError("HELPER_TIMEOUT") from None
+        for worker in workers:
+            worker.join(max(0, deadline - time.monotonic()))
+        if any(worker.is_alive() for worker in workers):
+            raise AuthError("HELPER_TIMEOUT")
+        if failed.is_set():
+            raise AuthError("HELPER_PROTOCOL")
+        try:
+            reply = json.loads(output.get("stdout", b"").decode("utf-8"))
+        except (ValueError, UnicodeError):
+            raise AuthError("HELPER_PROTOCOL") from None
+        if not isinstance(reply, dict) or type(reply.get("version")) is not int or reply["version"] != 1:
+            raise AuthError("HELPER_PROTOCOL")
+        if reply.get("ok") is False and process.returncode == 1:
+            reason = reply.get("reason")
+            raise AuthError(reason if isinstance(reason, str) and reason in AUTH_REASONS else "HELPER_PROTOCOL")
+        if reply.get("ok") is not True or process.returncode != 0:
+            raise AuthError("HELPER_PROTOCOL")
+        if request["operation"] == "decrypt":
+            if set(reply) != {"version", "ok", "accessToken"} or not _valid_token(reply.get("accessToken")):
+                raise AuthError("HELPER_PROTOCOL")
+        elif (set(reply) != {"version", "ok", "electron"} or not isinstance(reply.get("electron"), str)
+              or re.fullmatch(r"[0-9A-Za-z.+-]{1,64}", reply["electron"]) is None):
+            raise AuthError("HELPER_PROTOCOL")
+        return reply
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        for worker in workers:
+            if worker.ident is not None:
+                worker.join(1)
+        # Avoid blocking on a pipe held by an incompatible runtime's descendant.
+        if not any(worker.is_alive() for worker in workers):
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                pipe.close()
+
+
+def resolve_session(session):
+    _validate_session(session)
+    token = session["auth"]["accessToken"]
+    if _token_format(token) != "plaintext":
+        token = _run_auth_helper(find_workbuddy_runtime(), {"operation": "decrypt", "value": token})["accessToken"]
+    _sensitive_values.add(token)
+    return dict(session, auth=dict(session["auth"], accessToken=token))
+
+
+def run_doctor(session):
+    _validate_session(session)
+    kind = _token_format(session["auth"]["accessToken"])
+    out = {"result": "AUTH_READY", "credential_format": kind, "needs_attention": False,
+           "report": "本地凭据格式有效；未验证服务端登录状态", "online_checked": False}
+    if kind == "sym-v1":
+        runtime = find_workbuddy_runtime()
+        probe = _run_auth_helper(runtime, {"operation": "probe"})
+        out.update(runtime=runtime, electron_version=probe["electron"],
+                   report="已识别加密凭据，运行时具备解密能力；未提取密钥、未验证解密或服务端登录状态")
+    return out
+
+
+def _auth_failure(code):
+    if code == 401:
+        return {"result": "AUTH_REJECTED", "http": code, "needs_attention": True,
+                "report": "服务端拒绝认证（HTTP 401），请检查客户端登录状态、凭据对应的服务地址及脚本版本"}
+    return {"result": "FORBIDDEN", "http": code, "needs_attention": True,
+            "report": "服务端拒绝此操作（HTTP 403），请检查账号权限或活动条件；不能据此判断登录过期"}
 
 
 def _parse_budget(default=DEFAULT_BUDGET_SECONDS, maximum=MAX_BUDGET_SECONDS):
@@ -145,10 +521,12 @@ def find_auth_file():
         return (override if os.path.exists(override) else None), [override]
     home = os.path.expanduser("~")
     local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+    xdg_data = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
     candidates = [
-        os.path.join(local, AUTH_BASENAME),                                  # Windows
-        os.path.join(home, "Library", "Application Support", AUTH_BASENAME),  # macOS
-        os.path.join(home, ".config", AUTH_BASENAME),                        # Linux
+        os.path.join(local, AUTH_BASENAME),                                  # Windows 桌面端
+        os.path.join(home, "Library", "Application Support", AUTH_BASENAME),  # macOS 桌面端
+        os.path.join(xdg_data, CLI_AUTH_BASENAME),                           # Linux CodeBuddy CLI
+        os.path.join(home, ".config", AUTH_BASENAME),                        # Linux（旧猜测，保留）
         os.path.join(home, ".workbuddy", "auth", "workbuddy-desktop.info"),  # 兜底
     ]
     for c in candidates:
@@ -181,12 +559,13 @@ def load_session_retry(auth_file, attempts=3, delay=2.0):
 
 
 def build_headers(session):
+    _validate_session(session)
     auth = session.get("auth") or {}
     account = session.get("account") or {}
     token = auth.get("accessToken")
     uid = account.get("uid")
-    if not token or not uid:
-        raise ValueError("NO_SESSION: 本地未找到有效登录会话")
+    if not _valid_token(token):
+        raise AuthError("INVALID_FORMAT")
     headers = {
         "Accept": "application/json",
         "Authorization": "Bearer %s" % token,
@@ -327,15 +706,32 @@ def _is_no_chance(msg):
 def _is_unknown_tier(code, body):
     """连登兑换是否因为"tier 这个值本身不认识"被拒——用于判断要不要换一种写法重试。
 
-    /redeem 实测收的是天数（7/14/28），档位名会得到 400 + `unknown tier`。但这一点
-    只在一台机器上验过，接口哪天要是改成只认档位名，脚本就会三档全废且看不出原因。
-    这类 400 是参数校验阶段的拒绝，服务端没兑换任何东西，换个写法重试是安全的；
-    `invalid request`（未解锁）这种业务拒绝不在此列，不能重试。
+    /redeem 的 tier 是**档位标识字符串**（"7d"/"14d"/"28d"），权威来源是
+    GET /streak 的 redemption_status.tiers[].tier。接口哪天改回收天数，脚本就会
+    三档全废且看不出原因，所以保留这条兜底：档位标识被判 unknown tier 时退回天数
+    再试一次。这类 400 发生在参数校验阶段，服务端没兑换任何东西，重试不会重复领取；
+    `invalid request` 这类业务拒绝不在此列，不能重试。
+
+    历史教训：2026-09-11 曾据"传天数返回 invalid request"误判 tier 要收数字，
+    导致兑换模块连坏三个版本——"业务拒绝"的错误文案不能反推参数格式正确，
+    必须拿到一次成功响应才算验证过。
     """
     if code != 400:
         return False
     m = str(dig(body, "msg") or "").lower()
-    return "tier" in m and ("unknown" in m or "invalid" in m or "unsupported" in m)
+    return "tier" in m and ("unknown" in m or "unsupported" in m or "invalid" in m)
+
+
+def _is_tier_locked(code, body):
+    """未解锁档位：403 + 「连续登录天数不足」——这是常态，不是故障。
+
+    不加这条的话，未解锁档位会被计进 failures，轮询每轮都判定"有失败"从而强制
+    落盘，真正有价值的记录会被这类常态信息淹没。
+    """
+    if code != 403:
+        return False
+    m = str(dig(body, "msg") or "")
+    return "天数不足" in m or "不足" in m
 
 
 def dig(obj, key):
@@ -427,21 +823,39 @@ def _client_token(prefix="u"):
 # 连登兑换各档奖励的官方文案（2026-09 活动版本）。兑换成功的汇报优先用
 # 服务端返回的实际明细，挖不到字段时才回落到这里——活动改版时以响应为准。
 _REDEEM_REWARDS = {
-    "starter":   "+2 能量 +1 补登卡 +1 次抽奖",
-    "advanced":  "+50 积分 +3 能量 +1 补登卡 +1 次抽奖",
-    "legendary": "+150 积分 +5 能量 +1 补登卡 +1 次抽奖",
+    "7d":  "+2 能量 +1 补登卡 +1 次抽奖",
+    "14d": "+50 积分 +3 能量 +1 补登卡 +1 次抽奖",
+    "28d": "+150 积分 +5 能量 +1 补登卡 +1 次抽奖",
 }
+
+# 连登兑换三档：(档位标识, /redeem/summary 的状态字段前缀, 展示名, 天数)
+# tier 的口径是档位标识字符串，天数只用于兜底重试时退回旧写法。
+_REDEEM_TIERS = (
+    ("7d",  "starter",   "入门", 7),
+    ("14d", "advanced",  "进阶", 14),
+    ("28d", "legendary", "巅峰", 28),
+)
 
 
 def _redeem_reward_desc(body, tier):
-    """兑换成功的奖励描述：能从响应里挖到积分/能量就拼实际值，否则用官方文案。"""
+    """兑换成功的奖励描述：优先拼服务端实发的 *_granted，挖不到才回落官方文案。
+
+    注意实发字段名带 _granted 后缀（credit_granted / energy_granted /
+    cards_granted / chances_granted）；直接读 `credit` 恒为空，会把兑换所得漏计。
+    """
     bits = []
-    credit = as_int(dig(body, "credit"), 0)
-    energy = as_int(dig(body, "energy"), 0)
+    credit = as_int(dig(body, "credit_granted"), 0)
+    energy = as_int(dig(body, "energy_granted"), 0)
+    cards = as_int(dig(body, "cards_granted"), 0)
+    chances = as_int(dig(body, "chances_granted"), 0)
     if credit:
         bits.append("+%s 积分" % fmt_credit(credit))
     if energy:
         bits.append("+%s 能量" % fmt_credit(energy))
+    if cards:
+        bits.append("+%s 补登卡" % fmt_credit(cards))
+    if chances:
+        bits.append("+%s 次抽奖" % fmt_credit(chances))
     if bits:
         return "（%s）" % " ".join(bits)
     return "（%s）" % _REDEEM_REWARDS.get(tier, "奖励已到账")
@@ -466,9 +880,16 @@ def emit(out, action):
     action 不带 silent 前缀，走 stdout 就等于扔进黑洞，无窗口运行下这次失败再没有
     任何痕迹——正是本脚本想杜绝的"当天日志整条丢失"。
     """
+    if isinstance(out, dict):
+        out = dict(out)
+        out.setdefault("needs_attention", out.get("result") in (
+            "ERROR", "UNKNOWN", "NETWORK", "TIMEOUT", "NO_AUTH", "NO_SESSION",
+            "AUTH_ERROR", "AUTH_REJECTED", "FORBIDDEN"))
     if _config_warning and isinstance(out, dict):
         out = dict(out, config_warning=_config_warning)
     payload = _dumps(out)
+    for value in _sensitive_values:
+        payload = payload.replace(value, "[REDACTED]")
     is_error = isinstance(out, dict) and out.get("result") == "ERROR"
     if not str(action).startswith("silent"):
         try:
@@ -531,7 +952,7 @@ def _already_report(status, via=None):
 def run_growth(headers, endpoint):
     """成长中心自动化：领旅行礼物→派 Buddy→领任务/领取新任务→补登→连登兑换→开盲盒→能量开 Buddy→汇报。
 
-    各子步骤单独 try，一段失败不影响其余领取；任一步遇 401/403 直接升级为 NO_SESSION。
+    各子步骤单独 try，一段失败不影响其余领取；认证或权限拒绝时结束本轮。
     """
     base = endpoint + "/v2/activity/growth"
     parts = []
@@ -541,7 +962,7 @@ def run_growth(headers, endpoint):
     successes = 0
 
     def _check_auth(code):
-        """返回 True 表示需要立即退出（登录态失效）。"""
+        """已知业务 403 由调用方先处理，其余认证/权限拒绝结束本轮。"""
         return code in (401, 403)
 
     def _note_http(code, body, label):
@@ -581,8 +1002,7 @@ def run_growth(headers, endpoint):
             return 1, {"result": "NETWORK",
                        "report": "网络不可达，成长中心跳过（%s）" % (sbody.get("error") or "")}
         if _check_auth(scode):
-            return 1, {"result": "NO_SESSION",
-                       "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+            return 1, _auth_failure(scode)
         travel = dig(sbody, "state") if (200 <= scode < 300) else None
         # 服务端明确给出"今日旅行名额已用完"。读它而不是等 depart 报错，
         # 轮询场景下差别很大：后者会让每一轮都白撞一次墙。
@@ -593,8 +1013,7 @@ def run_growth(headers, endpoint):
             record_id = dig(sbody, "record_id")
             ccode, cbody = post(base + "/buddy/travel/claim", headers, {"record_id": record_id})
             if _check_auth(ccode):
-                return 1, {"result": "NO_SESSION",
-                           "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                return 1, _auth_failure(ccode)
             if 200 <= ccode < 300 and dig(cbody, "reward_credit") is not None:
                 got = as_int(dig(cbody, "reward_credit"))
                 credits_gained += got
@@ -615,16 +1034,14 @@ def run_growth(headers, endpoint):
         elif travel == "idle":
             ccode, cbody = get(base + "/buddy/travel/config", headers)
             if _check_auth(ccode):
-                return 1, {"result": "NO_SESSION",
-                           "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                return 1, _auth_failure(ccode)
             locs = dig(cbody, "locations") if (200 <= ccode < 300) else None
             if locs and isinstance(locs[0], dict):
                 loc = locs[0]
                 dcode, dbody = post(base + "/buddy/travel/depart", headers,
                                     {"location_id": loc.get("id")})
                 if _check_auth(dcode):
-                    return 1, {"result": "NO_SESSION",
-                               "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                    return 1, _auth_failure(dcode)
                 if 200 <= dcode < 300:
                     loc_name = (dig(dbody, "location") or {}).get("name", "?")
                     dur = dig(dbody, "duration_hours") or (dig(dbody, "location") or {}).get("duration_hours", "?")
@@ -652,63 +1069,76 @@ def run_growth(headers, endpoint):
         try:
             tcode, tbody = get(base + "/tasks", headers)
             if _check_auth(tcode):
-                return 1, {"result": "NO_SESSION",
-                           "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                return 1, _auth_failure(tcode)
             if not _note_http(tcode, tbody, "查任务列表"):
                 tasks = dig(tbody, "tasks") or []
-                for t in tasks:
+                # 真实契约（2026-09 从桌面端成长中心 H5 的 growthSpace chunk 读出）：
+                #   accept_status: not_accepted | accepted | in_progress | completed | claimed
+                #   接单 POST /tasks/accept  body {"task_codes": [code, ...]}   ← 复数数组
+                #        （旧的单数 {"task_code": x} 在新服务端一律 400 invalid request）
+                #   领奖 POST /tasks/{task_code}/claim   ← 路径带 code、body 空
+                #        （旧版拿 /tasks/accept 当领奖用，同样 400）
+                titles = {t.get("task_code"): t.get("title", t.get("task_code")) for t in tasks}
+                pending = [t.get("task_code") for t in tasks
+                           if t.get("task_code") and not t.get("locked")
+                           and t.get("accept_status") == "not_accepted"]
+                for i in range(0, len(pending), 20):   # 分批，别把 body 撑大
                     if _budget_left() <= 0:
-                        parts.append("时间预算耗尽，剩余任务下次再领")
+                        parts.append("时间预算耗尽，剩余任务下次再接单")
                         break
-                    try:
-                        # accept_status 三态：None/"" 未领取 · "accepted" 已领取进行中 · "claimed" 已领奖。
-                        # 官方规则：进度从"领取任务"那一刻才开始计，领取前的使用行为不算。
-                        # 所以除了领奖，还得替用户把新出现的任务领下来，否则它永远完不成。
-                        status = t.get("accept_status")
-                        if status == "claimed" or t.get("locked"):
-                            continue
-                        prog = t.get("progress") or {}
-                        target = as_int(prog.get("target"), 1) or 1  # target 为 0/缺失时按 1 处理，避免误判已完成
-                        done = as_int(prog.get("current")) >= target
-                        if not done and status:
-                            continue  # 已领取、还没做完——等用户完成，别重复领取
-                        # claiming=True 才是"领奖"：已领取过 + 已完成。未领取的任务即使
-                        # 进度显示已达标也只当"领取"，因为这一 POST 大概率只是接单而非发奖，
-                        # 按领奖上报会把没到账的积分算进 credits_gained；下一轮再正常领奖。
-                        claiming = bool(done and status)
-                        # 不再拿 has_reward 做前置条件：实测 16 个任务全部为 true，连 14 个
-                        # 已 claimed 的也是——它是"该任务设有奖励"的静态属性，不是"有待领取的
-                        # 奖励"。用它拦截只会把 has_reward=false 却真有奖励的任务永久漏掉。
-                        acode, abody = post(base + "/tasks/accept", headers,
-                                            {"task_code": t.get("task_code")})
-                        if _check_auth(acode):
-                            return 1, {"result": "NO_SESSION",
-                                       "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
-                        title = t.get("title", t.get("task_code"))
-                        if 200 <= acode < 300:
-                            if claiming:
-                                # 优先用服务端实际发放的数值；列表里的 reward_credit
-                                # 只是活动配置，改版时会和实发对不上（旅行礼物、连登兑换
-                                # 都已按响应值上报，这里保持一致）。挖不到才回落到列表值。
-                                rc = _first_int(abody, "credit", t.get("reward_credit"))
-                                re_ = _first_int(abody, "energy", t.get("reward_energy"))
-                                credits_gained += rc
-                                parts.append("领任务奖「%s」+credit%s+energy%s" % (title, rc, re_))
-                            else:
-                                parts.append("领取任务「%s」（进度开始计）" % title)
-                            successes += 1
-                        else:
-                            # 失败必须记：这个 POST 现在每轮都会为未领取的任务发一次，
-                            # 静默吞掉就等于接口坏了也没人知道（轮询下空跑是不写日志的）
-                            msg = dig(abody, "msg") or ""
-                            parts.append("%s「%s」失败：%s" % (
-                                "领任务奖" if claiming else "领取任务",
-                                title, msg or "HTTP %s" % acode))
+                    batch = pending[i:i + 20]
+                    acode, abody = post(base + "/tasks/accept", headers,
+                                        {"task_codes": batch})
+                    if _check_auth(acode):
+                        return 1, _auth_failure(acode)
+                    # 逐条读 results：接单失败必须报出来（常见
+                    # "prerequisite not met: first_buddy (no buddy instance found)"），
+                    # 静默吞掉的话接口坏了也没人知道——轮询空跑是不写日志的。
+                    results = dig(abody, "results")
+                    if not isinstance(results, list):
+                        results = [{"task_code": c,
+                                    "status": "ok" if 200 <= acode < 300 else "error",
+                                    "message": dig(abody, "msg")} for c in batch]
+                    for r in results:
+                        title = titles.get(r.get("task_code"), r.get("task_code"))
+                        if r.get("status") == "error":
+                            parts.append("领取任务「%s」失败：%s" % (
+                                title, r.get("message") or "HTTP %s" % acode))
                             failures += 1
                             hard_failures += _is_hard_failure(acode)
+                        else:
+                            parts.append("领取任务「%s」（进度开始计）" % title)
+                            successes += 1
+                for t in tasks:
+                    if _budget_left() <= 0:
+                        parts.append("时间预算耗尽，剩余任务奖下次再领")
+                        break
+                    if t.get("locked") or t.get("accept_status") != "completed":
+                        continue   # 只有 completed 才发奖，且走独立路径
+                    code = t.get("task_code")
+                    title = titles.get(code, code)
+                    try:
+                        ccode, cbody = post(base + "/tasks/%s/claim" % code, headers, {})
+                        if _check_auth(ccode):
+                            return 1, _auth_failure(ccode)
+                        if 200 <= ccode < 300 and not dig(cbody, "already_claimed"):
+                            # 优先用服务端实发数值；列表里的 reward_credit 只是活动配置，
+                            # 改版时会和实发对不上，挖不到才回落到列表值。
+                            rc = _first_int(cbody, "credit", t.get("reward_credit"))
+                            re_ = _first_int(cbody, "energy", t.get("reward_energy"))
+                            credits_gained += rc
+                            parts.append("领任务奖「%s」+credit%s+energy%s" % (title, rc, re_))
+                            successes += 1
+                        elif 200 <= ccode < 300:
+                            parts.append("任务奖「%s」已领过" % title)
+                        else:
+                            parts.append("领任务奖「%s」失败：%s" % (
+                                title, dig(cbody, "msg") or "HTTP %s" % ccode))
+                            failures += 1
+                            hard_failures += _is_hard_failure(ccode)
                     except Exception as e:
-                        parts.append("任务「%s」异常（%s: %s）" % (
-                            t.get("task_code", "?"), type(e).__name__, e))
+                        parts.append("领任务奖「%s」异常（%s: %s）" % (
+                            code, type(e).__name__, e))
                         failures += 1
                         hard_failures += 1
         except Exception as e:
@@ -730,8 +1160,7 @@ def run_growth(headers, endpoint):
         try:
             mcode, mbody = get(base + "/streak", headers)
             if _check_auth(mcode):
-                return 1, {"result": "NO_SESSION",
-                           "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                return 1, _auth_failure(mcode)
             if not _note_http(mcode, mbody, "查连登状态"):
                 streak_body = mbody
                 # 余额兼容两种形状：{"makeup_cards":{"balance":2}} 与 {"makeup_cards":2}。
@@ -752,8 +1181,7 @@ def run_growth(headers, endpoint):
                         ucode, ubody = post(base + "/makeup-cards/use", headers,
                                             {"target_date": d, "client_token": _client_token()})
                         if _check_auth(ucode):
-                            return 1, {"result": "NO_SESSION",
-                                       "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                            return 1, _auth_failure(ucode)
                         if 200 <= ucode < 300:
                             cards -= 1
                             streak_stale = True
@@ -786,20 +1214,18 @@ def run_growth(headers, endpoint):
         try:
             rcode, rbody = get(base + "/redeem/summary", headers)
             if _check_auth(rcode):
-                return 1, {"result": "NO_SESSION",
-                           "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                return 1, _auth_failure(rcode)
             if not _note_http(rcode, rbody, "查连登兑换"):
-                # tier 传「天数」：实测传 "starter" 这类档位名直接 400 unknown tier，
-                # 传 7/14/28 才被识别（未解锁时回 invalid request，那才是业务拒绝）。
-                # 档位名只用于读 *_status 字段和展示文案。
-                # 这一点只在一台机器上验过，接口若改成只认档位名，下面有兜底重试。
-                for tier, label, days in (("starter", "入门", 7),
-                                          ("advanced", "进阶", 14),
-                                          ("legendary", "巅峰", 28)):
+                # tier 传**档位标识**（"7d"/"14d"/"28d"），不是天数也不是档位名：
+                # 实测传 "starter"/"7"/7 分别得到 unknown tier / unknown tier /
+                # invalid request，只有 "7d" 会 200 兑换成功。权威来源是 GET /streak
+                # 的 redemption_status.tiers[].tier；状态字段仍读 /redeem/summary
+                # 的 starter/advanced/legendary_status，两者一一对应。
+                for tier, status_key, label, days in _REDEEM_TIERS:
                     if _budget_left() <= 0:
                         parts.append("时间预算耗尽，剩余连登兑换下次再领")
                         break
-                    status = dig(rbody, tier + "_status")
+                    status = dig(rbody, status_key + "_status")
                     # 字段缺失（None）同样跳过：接口改版时不该让脚本对三档无脑 POST。
                     # 注意别在这里再加 *_count 之类的"双保险"：实测响应里
                     # starter_count=1 与 total_consumed=0 并存，count 到底是
@@ -807,17 +1233,22 @@ def run_growth(headers, endpoint):
                     if not status or status in ("claimed", "locked"):
                         continue
                     c2code, c2body = post(base + "/redeem", headers,
-                                          {"tier": days, "client_token": _client_token()})
-                    # 天数被判为未知档位时退回档位名再试一次：这类 400 是参数校验阶段
+                                          {"tier": tier, "client_token": _client_token()})
+                    # 档位标识被判为未知时退回天数再试一次：这类 400 是参数校验阶段
                     # 的拒绝，服务端没兑换任何东西，重试不会重复领取
                     if _is_unknown_tier(c2code, c2body):
                         c2code, c2body = post(base + "/redeem", headers,
-                                              {"tier": tier, "client_token": _client_token()})
+                                              {"tier": days, "client_token": _client_token()})
+                    # 403「连登天数不足」是业务常态，必须**先于** _check_auth 判断：
+                    # _check_auth 会结束认证/权限拒绝的流程，若让它先跑，未解锁档位
+                    # 会被当成权限拒绝并直接中止整个成长中心。
+                    if _is_tier_locked(c2code, c2body):
+                        parts.append("连登兑换「%s」未解锁（连登天数不足）" % label)
+                        continue
                     if _check_auth(c2code):
-                        return 1, {"result": "NO_SESSION",
-                                   "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                        return 1, _auth_failure(c2code)
                     if 200 <= c2code < 300:
-                        credits_gained += as_int(dig(c2body, "credit"))
+                        credits_gained += as_int(dig(c2body, "credit_granted"))
                         parts.append("连登兑换「%s」%s" % (label, _redeem_reward_desc(c2body, tier)))
                         successes += 1
                     else:
@@ -837,15 +1268,13 @@ def run_growth(headers, endpoint):
         try:
             lcode, lbody = get(base + "/lottery/chances", headers)
             if _check_auth(lcode):
-                return 1, {"result": "NO_SESSION",
-                           "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                return 1, _auth_failure(lcode)
             chances = 0 if _note_http(lcode, lbody, "查抽奖机会") else as_int(dig(lbody, "balance"))
             if chances > 0:
                 dcode, dbody = post(base + "/lottery/draw", headers,
                                     {"client_token": _client_token()})
                 if _check_auth(dcode):
-                    return 1, {"result": "NO_SESSION",
-                               "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                    return 1, _auth_failure(dcode)
                 if 200 <= dcode < 300:
                     prize = dig(dbody, "prize_name") or dig(dbody, "prize") or "未知"
                     if not isinstance(prize, str):
@@ -883,8 +1312,7 @@ def run_growth(headers, endpoint):
         try:
             qcode, qbody = get(base + "/buddy/quota", headers)
             if _check_auth(qcode):
-                return 1, {"result": "NO_SESSION",
-                           "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                return 1, _auth_failure(qcode)
             if not _note_http(qcode, qbody, "查 Buddy 能量"):
                 affordable = as_int(dig(qbody, "affordable"))
                 max_open = as_int(dig(qbody, "max_open_count"), 1) or 1
@@ -893,8 +1321,7 @@ def run_growth(headers, endpoint):
                     ocode, obody = post(base + "/buddy/open", headers,
                                         {"count": count, "client_token": _client_token()})
                     if _check_auth(ocode):
-                        return 1, {"result": "NO_SESSION",
-                                   "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
+                        return 1, _auth_failure(ocode)
                     if 200 <= ocode < 300:
                         name = dig(obody, "buddy") or dig(obody, "name") or dig(obody, "buddies")
                         if not isinstance(name, str):
@@ -980,20 +1407,8 @@ def run_auto(headers, endpoint):
             "error": sbody.get("error"),
         }
     if scode in (401, 403):
-        return 1, {
-            "result": "NO_SESSION",
-            "report": "登录态已失效（HTTP %s），请重新登录 WorkBuddy 桌面端" % scode,
-            "http": scode,
-        }
+        return 1, _auth_failure(scode)
     if not (200 <= scode < 300):
-        # 401/403 归到 NO_SESSION：客户端没开或登录过期时，签到接口就是这么回的，
-        # 把它当成笼统的 HTTP 异常会让人对着 "HTTP 401" 去猜是接口挂了还是登录过期。
-        if scode in (401, 403):
-            return 1, {
-                "result": "NO_SESSION",
-                "report": "登录态已失效（HTTP %s），请重新登录 WorkBuddy 桌面端" % scode,
-                "http": scode,
-            }
         return 1, {
             "result": "ERROR",
             "report": "签到接口返回异常（HTTP %s），请重新登录客户端或稍后重试" % scode,
@@ -1021,13 +1436,9 @@ def run_auto(headers, endpoint):
                 (cbody.get("error") or "") if isinstance(cbody, dict) else ""),
         }
 
-    # 登录态判定要先于"已签"判定，避免失效时的报错体被误判为已领取
+    # 认证或权限拒绝先于“已签”判断。
     if ccode in (401, 403):
-        return 1, {
-            "result": "NO_SESSION",
-            "report": "登录态已失效（HTTP %s），请重新登录 WorkBuddy 桌面端" % ccode,
-            "http": ccode,
-        }
+        return 1, _auth_failure(ccode)
 
     if _is_already_checked_in(cbody):
         scode2, sbody2 = post(endpoint + "/v2/billing/meter/checkin-activity-status", headers, retry=True)
@@ -1093,14 +1504,16 @@ def run_daily(headers, endpoint):
         out["growth"] = "网络不可达或时间预算耗尽，成长中心跳过"
         out["growth_result"] = out["result"]
         return code, out, False
-    # 登录态已失效时同理：后面每个请求都只会再返回一次 401，白跑且刷屏
-    if out.get("result") == "NO_SESSION":
-        out["growth"] = "登录态已失效，成长中心跳过"
+    # 认证/权限被拒绝时，停止使用同一凭据继续请求。
+    if out.get("result") in ("NO_SESSION", "AUTH_REJECTED", "FORBIDDEN"):
+        out["growth"] = "认证或权限检查未通过，成长中心跳过"
         out["growth_result"] = out["result"]
         return code, out, False
     # 签到后顺带跑成长中心；它出任何问题都不能吞掉签到已成功的事实
     try:
         gcode, gout = run_growth(headers, endpoint)
+    except AuthError as e:
+        gcode, gout = 1, e.output()
     except Exception as e:
         gcode, gout = 1, {"result": "ERROR",
                           "report": "成长中心异常（%s: %s）" % (type(e).__name__, e)}
@@ -1112,6 +1525,7 @@ def run_daily(headers, endpoint):
     # 均返回 0），直接透传即可——之前按 result 枚举漏了 result=GROWTH 的整体失败
     if gcode != 0 and code == 0:
         code = gcode
+    out["needs_attention"] = code != 0
     quiet = out.get("result") in ("ALREADY", "INACTIVE") and bool(gout.get("idle"))
     return code, out, quiet
 
@@ -1121,15 +1535,19 @@ def main():
     action = sys.argv[1] if len(sys.argv) > 1 else "auto"
     try:
         return _run(action)
+    except AuthError as e:
+        emit(e.output(), action)
+        return 1
     except Exception as e:
         # 无窗口运行下任何未捕获异常都会让当天的失败无痕消失，这里是最后一道防线
-        emit({"result": "ERROR", "report": "脚本运行异常（%s: %s）" % (type(e).__name__, e)}, action)
+        emit({"result": "ERROR", "report": "脚本运行异常（%s）" % type(e).__name__,
+              "needs_attention": True}, action)
         return 2
 
 
 def _run(action):
     _start_budget(action)
-    known = ("auto", "silent", "growth", "silent-poll", "silent-growth", "status", "claim", "all")
+    known = ("auto", "silent", "growth", "silent-poll", "silent-growth", "status", "claim", "all", "doctor")
     if action not in known:
         emit({"result": "ERROR",
               "report": "未知命令：%s（可用：%s）" % (action, " / ".join(known))},
@@ -1144,7 +1562,8 @@ def _run(action):
         else:
             report = ("未找到 WorkBuddy 登录凭据。请先在本机登录 WorkBuddy 桌面端；"
                       "或设置环境变量 WORKBUDDY_AUTH_FILE 指向 workbuddy-desktop.info。")
-        emit({"result": "NO_AUTH", "report": report, "looked_in": looked_in}, action)
+        emit({"result": "NO_AUTH", "report": report, "looked_in": looked_in,
+              "needs_attention": True}, action)
         return 2
 
     try:
@@ -1169,9 +1588,13 @@ def _run(action):
         return 2
 
     try:
+        if action == "doctor":
+            emit(run_doctor(session), action)
+            return 0
+        session = resolve_session(session)
         headers = build_headers(session)
-    except ValueError as e:
-        emit({"result": "NO_SESSION", "report": str(e)}, action)
+    except AuthError as e:
+        emit(e.output(), action)
         return 1
 
     endpoint = ((session.get("auth") or {}).get("endpoint") or DEFAULT_ENDPOINT).rstrip("/")
@@ -1197,6 +1620,7 @@ def _run(action):
 
     if action == "growth":
         code, out = run_growth(headers, endpoint)
+        out["needs_attention"] = code != 0
         emit(out, action)
         return code
 
@@ -1204,11 +1628,24 @@ def _run(action):
     # config_warning 同样能带出来（这些命令不会是 silent，仍然打到 stdout）
     if action in ("status", "all"):
         scode, sbody = post(endpoint + "/v2/billing/meter/checkin-activity-status", headers, retry=True)
-        emit({"step": "status", "http": scode, "body": sbody}, action)
+        if scode in (401, 403):
+            emit(dict(_auth_failure(scode), step="status"), action)
+            return 1
+        emit({"step": "status", "http": scode, "body": sbody,
+              "needs_attention": not 200 <= scode < 300}, action)
+        if not 200 <= scode < 300:
+            return 1
 
     if action in ("claim", "all"):
         ccode, cbody = post(endpoint + "/v2/billing/meter/daily-checkin", headers, retry=True)
-        emit({"step": "claim", "http": ccode, "body": cbody}, action)
+        if ccode in (401, 403):
+            emit(dict(_auth_failure(ccode), step="claim"), action)
+            return 1
+        success = 200 <= ccode < 300 or (ccode == 400 and _is_already_checked_in(cbody))
+        emit({"step": "claim", "http": ccode, "body": cbody,
+              "needs_attention": not success}, action)
+        if not success:
+            return 1
 
     return 0
 

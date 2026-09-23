@@ -28,6 +28,7 @@ public static class Cap32 {
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
   public struct RECT { public int Left, Top, Right, Bottom; }
   public delegate bool EnumProc(IntPtr hWnd, IntPtr lp);
 }
@@ -85,6 +86,10 @@ function Restore-Foreground {
         # refuses to take focus until it is shown again.
         [void][Cap32]::ShowWindow($h, 9)
         Start-Sleep -Milliseconds 150
+        # Tap Alt: Windows hands the foreground to whoever owns it, and a process
+        # that does not will have SetForegroundWindow silently ignored otherwise.
+        [Cap32]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+        [Cap32]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
         $scratch = [uint32]0
         $fgThread = [Cap32]::GetWindowThreadProcessId([Cap32]::GetForegroundWindow(), [ref]$scratch)
         [void][Cap32]::AttachThreadInput($myThread, $fgThread, $true)
@@ -191,6 +196,13 @@ if ($hwnd -eq [IntPtr]::Zero) {
 
 function Wait-Foreground {
     Save-Foreground
+    # A window parked in the tray keeps a perfectly good rect but is NOT visible,
+    # so CopyFromScreen photographs whatever sits underneath it. (Confirmed 2026-09-23:
+    # IsWindowVisible=false, yet IVirtualDesktopManager says it IS on the current
+    # desktop -- so this is a hidden window, not a desktop issue.) Force it back
+    # on screen before trusting any screenshot or click.
+    [void][Cap32]::ShowWindow($hwnd, 9)
+    Start-Sleep -Milliseconds 300
     if ([Cap32]::GetForegroundWindow() -eq $hwnd) { return $true }
     [Cap32]::SetForegroundWindow($hwnd) | Out-Null
     Start-Sleep -Milliseconds 800
@@ -335,6 +347,19 @@ foreach ($l in $lines) {
     }
 }
 if (-not $btn) {
+    # Once today's claim goes through the card collapses: the title stays but the
+    # day grid and the button are gone. Clicking anything here is pointless, so
+    # read that shape as "already claimed" instead of firing a blind click.
+    $hasGrid = $false
+    foreach ($l in $lines) {
+        if ($l.y -le $anchor.y) { continue }
+        if ($l.y -gt ($anchor.y + 700)) { continue }
+        if ($l.x -gt ($anchor.x + 500)) { continue }
+        if ($l.text -match "天|@|签到得|领取") { $hasGrid = $true; break }
+    }
+    if (-not $hasGrid) {
+        Out-Json "already" "签到卡只剩标题（日期格与按钮均已收起），判定今日已签"
+    }
     # Geometric fallback: the action button sits at a FIXED offset from the
     # "每日签到" title -- measured (+207, +373) across two different window sizes.
     $btn = @{ text = "(fallback-offset)"; x = ($anchor.x + 114); y = ($anchor.y + 360); w = 185; h = 26 }

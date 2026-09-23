@@ -25,9 +25,23 @@ public static class Cap32 {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   public struct RECT { public int Left, Top, Right, Bottom; }
   public delegate bool EnumProc(IntPtr hWnd, IntPtr lp);
 }
+"@
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("A5CD92FF-29BE-454C-8D04-D82879FB3F1B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IVirtualDesktopManager {
+  int IsWindowOnCurrentVirtualDesktop(IntPtr hWnd, out bool onCurrent);
+}
+[ComImport, Guid("AA509086-5CA9-4C25-8F95-589D3C07B48A")]
+public class CVirtualDesktopManager { }
 "@
 
 $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
@@ -60,7 +74,25 @@ function Save-Foreground {
 
 function Restore-Foreground {
     if ($script:SavedHwnd -eq [IntPtr]::Zero) { return }
-    [Cap32]::SetForegroundWindow($script:SavedHwnd) | Out-Null
+    $h = $script:SavedHwnd
+    # Windows ignores SetForegroundWindow from a process that does not own the
+    # foreground. Attach to the current foreground thread first, which is the
+    # sanctioned way to borrow it, then retry a couple of times.
+    $myThread = [Cap32]::GetCurrentThreadId()
+    $ok = $false
+    for ($i = 0; $i -lt 3; $i++) {
+        # SW_RESTORE first: a window on another virtual desktop is DWM-cloaked and
+        # refuses to take focus until it is shown again.
+        [void][Cap32]::ShowWindow($h, 9)
+        Start-Sleep -Milliseconds 150
+        $scratch = [uint32]0
+        $fgThread = [Cap32]::GetWindowThreadProcessId([Cap32]::GetForegroundWindow(), [ref]$scratch)
+        [void][Cap32]::AttachThreadInput($myThread, $fgThread, $true)
+        $ok = [Cap32]::SetForegroundWindow($h)
+        [void][Cap32]::AttachThreadInput($myThread, $fgThread, $false)
+        if ($ok) { break }
+        Start-Sleep -Milliseconds 300
+    }
     $script:SavedHwnd = [IntPtr]::Zero
 }
 
@@ -124,11 +156,16 @@ function Find-AppWindow {
         param($h, $lp)
         $owner = [uint32]0
         [Cap32]::GetWindowThreadProcessId($h, [ref]$owner) | Out-Null
-        if ($pidSet.ContainsKey($owner) -and [Cap32]::IsWindowVisible($h)) {
+        if ($pidSet.ContainsKey($owner)) {
             $r = New-Object Cap32+RECT
             [Cap32]::GetWindowRect($h, [ref]$r) | Out-Null
             $w = $r.Right - $r.Left
             $hh = $r.Bottom - $r.Top
+            # Do NOT require IsWindowVisible here. An Electron window parked on
+            # another virtual desktop (or DWM-cloaked) reports visible=false
+            # while still holding a real rect -- filtering on it made us miss the
+            # main window entirely and report a bogus "not found". Size is the
+            # reliable discriminator: only the real window is 1400x900-ish.
             if ($w -gt 500 -and $hh -gt 400 -and ($w * $hh) -gt $script:BestArea) {
                 $script:BestHwnd = $h
                 $script:BestArea = $w * $hh
@@ -170,6 +207,18 @@ function Get-OcrLinesSafe {
     if (-not (Wait-Foreground)) { return $null }
     return Get-OcrLines
 }
+
+# A window parked on another virtual desktop still reports a valid rect and even
+# accepts SetForegroundWindow, but CopyFromScreen then captures whatever the
+# CURRENT desktop shows -- we OCR a stranger's window and click into it. Refuse.
+try {
+    $vdm = New-Object CVirtualDesktopManager
+    $onCurrent = $false
+    $hr = $vdm.IsWindowOnCurrentVirtualDesktop($hwnd, [ref]$onCurrent)
+    if ($hr -eq 0 -and -not $onCurrent) {
+        Out-Json "pending" "MiniMax Code 在另一个虚拟桌面，无法安全截图点击（请切到它所在的桌面）"
+    }
+} catch { }
 
 $rect = New-Object Cap32+RECT
 [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
@@ -234,11 +283,30 @@ function Click-At([int]$ax, [int]$ay) {
 $lines = Get-OcrLinesSafe
 if ($null -eq $lines) { Out-Json "pending" "MiniMax Code 未在前台（请点击其窗口后重试）" }
 
-# Anchor: the "每日签到" card on the home sidebar.
-# NOTE: once today's claim succeeds the card is REMOVED from the sidebar, so a
-# missing card most often means "already claimed", not "layout broken". We still
-# return pending -- claiming success we did not observe would silently skip a day.
-$anchor = Find-Line $lines "每日签到"
+# Sanity gate: confirm we actually photographed MiniMax. A top-most window parked
+# over it (or another desktop) still yields a plausible-looking OCR dump -- and we
+# would then click straight into that stranger's window. Its title bar sits at the
+# very top, so require the brand string up there before touching the mouse.
+$confirmed = $false
+foreach ($l in $lines) {
+    if ($l.y -lt 80 -and $l.text -match "(?i)minimax") { $confirmed = $true; break }
+}
+if (-not $confirmed) {
+    $top = ($lines | Where-Object { $_.y -lt 120 } | Select-Object -First 5 | ForEach-Object { $_.text }) -join "/"
+    Out-Json "pending" ("截图未确认是 MiniMax 窗口（顶部无标题，可能被遮挡），已放弃点击。顶部: " + $top)
+}
+
+# Anchor: the "每日签到" card, which lives in the far-LEFT sidebar.
+# A plain text search happily matches the same phrase inside a chat transcript
+# (this project's own conversations contain it), which sent us clicking into the
+# chat column. Take the leftmost hit and reject anything in the right-hand column.
+$anchor = $null
+foreach ($l in $lines) {
+    if ($l.text.Contains("每日签到")) {
+        if ($null -eq $anchor -or $l.x -lt $anchor.x) { $anchor = $l }
+    }
+}
+if ($anchor -and $anchor.x -gt [int]($winW * 0.4)) { $anchor = $null }
 if (-not $anchor) {
     $peek = ($lines | Select-Object -First 8 | ForEach-Object { $_.text }) -join "/"
     Out-Json "pending" ("未找到「每日签到」卡片（今日已签后卡片会收起），当前页面: " + $peek)
@@ -260,6 +328,7 @@ $btn = $null
 foreach ($l in $lines) {
     if ($l.y -le $anchor.y) { continue }
     if ($l.y -gt ($anchor.y + 700)) { continue }
+    if ($l.x -gt ($anchor.x + 400)) { continue }
     if ($l.text -match "连续签到") { continue }
     if ($l.text -match "签到得|领取|领积分|签到领") {
         if ($null -eq $btn -or $l.y -gt $btn.y) { $btn = $l }

@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "ui_claim.ps1"
 SCRIPT_AUTOCLAW_OCR = ROOT / "scripts" / "ui_claim_autoclaw.ps1"
 SCRIPT_MINIMAX_OCR = ROOT / "scripts" / "ui_claim_minimax.ps1"
+SCRIPT_LOBSTERAI_OCR = ROOT / "scripts" / "ui_claim_lobsterai.ps1"
+SCRIPT_TRAEWORK_OCR = ROOT / "scripts" / "ui_claim_traework.ps1"
 
 DEFAULT_CLICK = ("签到", "立即签到", "立即领取", "打卡")
 DEFAULT_ALREADY = ("已签到", "今日已签", "已领取", "已打卡")
@@ -76,56 +78,73 @@ def _claim_autoclaw() -> tuple[bool, str]:
     return False, "提权签到超时（180s），请查看客户端窗口状态"
 
 
+def _run_elevated_ps1(script: Path, result_path: Path, timeout: int = 240) -> tuple[bool, str]:
+    """Run a claim ps1 ELEVATED via UAC and read the JSON result it writes.
+
+    Elevation is mandatory in this environment: a non-elevated launch from the
+    automation session cannot start the GUI client at all (no process appears),
+    and UIPI blocks non-elevated input into an elevated window. Verified 2026-09-27
+    for MiniMax ("今日已签到") and LobsterAI.
+    """
+    if not script.is_file():
+        return False, f"缺少 {script}"
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    if result_path.exists():
+        result_path.unlink()
+
+    args = (
+        "-NoProfile -ExecutionPolicy Bypass -File \""
+        + str(script) + "\" -OutFile \"" + str(result_path) + "\""
+    )
+    ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell", args, None, 0)
+    if ret <= 32:
+        return False, "UAC 未确认：需要提权才能拉起客户端并点击（可手动签到后用 record 入账）"
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if result_path.exists():
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("status"):
+                status = str(payload.get("status") or "")
+                detail = str(payload.get("detail") or status)
+                if status in ("ok", "already"):
+                    return True, detail
+                return False, detail
+        time.sleep(2)
+    return False, f"提权签到超时（{timeout}s），请查看客户端窗口状态"
+
+
 def _claim_minimax() -> tuple[bool, str]:
-    """MiniMax Code route: screenshot + OCR + OS-level click.
+    """MiniMax Code route: launch elevated, screenshot + OCR + OS-level click.
 
     The generic UIA route cannot touch it: InvokePattern.Invoke() is script-layer
     dispatch (isTrusted=false) and gets filtered by the frontend. This script uses
     SetCursorPos + mouse_event, which enters the OS input queue (isTrusted=true).
-    Verified working 2026-09-23: {"status":"ok","detail":"签到成功: 今日已签到"}.
 
-    Note: needs the window in the foreground. The script brings it forward itself.
+    Must run ELEVATED (see _run_elevated_ps1). The ps1 brings the window forward
+    itself and waits for the cold-start render.
     """
-    if not SCRIPT_MINIMAX_OCR.is_file():
-        return False, f"缺少 {SCRIPT_MINIMAX_OCR}"
+    return _run_elevated_ps1(SCRIPT_MINIMAX_OCR, LOG_DIR / "minimax_claim.json")
 
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    result_path = LOG_DIR / "minimax_claim.json"
-    if result_path.exists():
-        result_path.unlink()
 
-    cmd = [
-        "powershell",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(SCRIPT_MINIMAX_OCR),
-        "-OutFile",
-        str(result_path),
-    ]
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except subprocess.TimeoutExpired:
-        return False, "MiniMax OCR 签到超时（180s）"
+def _claim_traework() -> tuple[bool, str]:
+    """TraeWork route: elevated screenshot+OCR+click.
 
-    payload = _last_json(proc.stdout)
-    if not payload:
-        err = (proc.stderr or proc.stdout or "").strip()[:300]
-        return False, f"MiniMax 脚本无结果 {err or proc.returncode}"
+    Uses its own dedicated ps1 (not the generic recipe) because the button text
+    is non-obvious and the menu is a toggle. Needs elevation: a non-elevated
+    launch cannot cold-start the client in this environment.
+    """
+    return _run_elevated_ps1(SCRIPT_TRAEWORK_OCR, LOG_DIR / "traework_claim.json")
 
-    status = str(payload.get("status") or "")
-    detail = str(payload.get("detail") or status)
-    if status in ("ok", "already"):
-        return True, detail
-    return False, detail
+
+def _claim_lobsterai() -> tuple[bool, str]:
+    """LobsterAI route: elevate, wait for the AI engine to finish booting, then
+    click the top-right daily-points card and the follow-up claim button."""
+    return _run_elevated_ps1(SCRIPT_LOBSTERAI_OCR, LOG_DIR / "lobsterai_claim.json")
 
 
 def claim(account_id: str) -> tuple[bool, str]:
@@ -134,6 +153,10 @@ def claim(account_id: str) -> tuple[bool, str]:
         return _claim_autoclaw()
     if account_id == "minimax":
         return _claim_minimax()
+    if account_id == "lobsterai":
+        return _claim_lobsterai()
+    if account_id == "traework":
+        return _claim_traework()
     recipe = RECIPES.get(account_id)
     if recipe is None:
         return False, "无 UI 配方"

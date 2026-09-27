@@ -62,7 +62,7 @@ accounts:
       mode: set_daily
     capabilities: [coding, multimodal]
     open_when_needed: false
-    notes: "签到卡在主页左下角（每日签到/今天@400/第4天@1000）。2026-09-23 实测：OS 级模拟点击（SetCursorPos+mouse_event）有效，已自动签到成功（logs/minimax_claim.json）。此前「isTrusted 过滤」的结论是错的——那条只适用于 UIA InvokePattern 路线。OCR 点击脚本需窗口在前台（脚本自己拉前台）。端点已逆向到 /minimax-cloud/api/v1/signin/{status,claim}，但鉴权头由主进程注入，转 external 需复用登录态，待授权。"
+    notes: "签到卡在主页左下角（每日签到/今天@400/第4天@1000）。【2026-09-26 起改为 external 直签：全自动、不依赖客户端运行、不开窗口】端点 GET/POST /minimax-cloud/api/v1/signin/{status,claim}，host=https://agent.minimax.cn，鉴权 Authorization: Bearer（读本机明文凭据 C:\\Users\\Hunter\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json；token 不进命令行、不进日志、不进输出）。**必须带 timezone_id=Asia/Shanghai**：缺失时 HTTP 仍 200 但业务返回 1406010011 invalid timezone_id；只有 IANA 名有效，8 / +8 / 28800 / Shanghai 全被拒。已签判定用 days 里 is_today 且 status=3(Claimed)，以服务端为准不重复领取（2026-09-26 实测幂等）。【2026-09-27 修正·最终】弃用 UI 路线的旧理由「无法冷启动（只起 updater.exe、主进程不出现）」已被实测推翻；而更早的「打开瞬间关掉/客户端崩溃」是**沙箱内的假象**——在沙箱里用 ShellExecuteW 拉起的进程会在沙箱命令返回后被回收（误判为崩溃），**客户端本身不崩**。真实约束：本自动化会话只能以 runas（提权）拉起 GUI 客户端，非提权从会话启动根本不起进程（与 TraeWork/AutoClaw 同一套路；每次 runas 弹一次 UAC，需主人批准，漏批则静默失败）。真正的大坑是**冷启动渲染延迟**：全新拉起的（提权）MiniMax 主窗口最初是白屏，要等约 12s 内容才渲染出来，过早 OCR/截图只会看到标题栏而找不到「每日签到」卡。修复：窗口出现后 `Start-Sleep 12` 再 OCR/点击（与 GPU、WebGPU 无关，`--disable-gpu` 无效已移除）。external 直签仍被过期 token 阻断（expiresAt 2026-09-26 00:24、无刷新端点记录）；UI/OCR 路线现已可用（2026-09-27 实测 ok 并入账 400）。失效条件：token 过期（脚本会打印剩余小时）、端点改路径、timezone 校验变更、UAC 漏批导致启动失败。此前「isTrusted 过滤」只对 UIA InvokePattern 成立，OS 级注入与 external 都不受影响，不要再拿它当否决理由。"
     models_note: "MiniMax-M3 / M2.7 / H3"
 
   - id: traework
@@ -80,7 +80,7 @@ accounts:
     extra_monthly: 500
     capabilities: [coding]
     open_when_needed: false
-    notes: "签到入口：桌面端左下角头像（网页/手机端无签到入口）。免费用户每日 150，会员（¥29.9/月）每日 200。客户端模拟点击疑似被 isTrusted 过滤（实测外部点击无效）；TraeWork 自带 computer-use 能力且左侧栏有「自动化」入口，可探索让其自签。"
+    notes: "【2026-09-28 起改全自动：claim_mode=ui，由每日计划任务提权跑 scripts/ui_claim_traework.ps1（OCR 定位+点击，9-27 实测 +150 成功）；签完只关闭本次由脚本拉起的实例，主人已开着的保留】TraeWork(TRAE SOLO CN) 与 TraeCode(Trae CN) 是同一套签到：out\\main.js 大小只差 3 字节，共用 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}），主人已确认两者共享积分账户 -> 台账只保留 traework，不新增 traecode，避免重复计数。【规则 2026-09-26 双方自述 + 官方页确认】免费 150/天、会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么是 manual】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按硬规则 6 不解密 -> external 拿不到凭据；本环境冷启动两个客户端都失败（ShellExecuteW 返回 42 但 45s 无进程）-> UI 路线也不可全自动；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且**每次运行自身消耗积分**，日收益 150 未必覆盖，故未启用。入口：桌面端左下角头像 → 菜单「签到」按钮（云端开关 checkinMenuEnabled 控制，网页/手机端无入口）。【OCR 脚本 2026-09-27 实测成功】scripts/ui_claim_traework.ps1 + run_traework_claim.py（提权 runas，--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。**提权才能冷启动客户端**（未提权 ShellExecuteW 起不来，推翻此前"必须手动打开"结论）。四个实测坑：①签到按钮文案是「每日领150积分」不是「签到」，且 OCR 拆成单字（每/日/领/150/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③「每日领150积分」是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏 ~380px（窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「会员¥39」推广卡片。已签态文案「本账号今日已签到，明日再来」。2026-09-27 实测 ok 并入账 150。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。"
     models_note: "16+ 模型，CUE / MCP"
 
   - id: autoclaw
@@ -97,6 +97,7 @@ accounts:
     command: ""
     capabilities: [coding, local]
     open_when_needed: false
+    notes: "2026-09-24 自述调研（v1.19.0，端点自 resources/app.asar 反编译，已本机复核命中）：签到是任务体系，task_id='daily_signin'，端点 /autoclaw-proxy/proxy/autoclaw-task-{list,complete}，host=autoglm-acceleration-api.zhipuai.cn，鉴权 X-Auth-Appid/TimeStamp/Sign + Bearer。token 在 C:\\Users\\Hunter\\AppData\\Roaming\\autoclaw\\auth.json 为 safeStorage 加密（enc: 前缀），external 直调需解密登录态 -> 否决。首页「每日签到」横幅受实验开关 show_checkin_banner 控制（defaultValue off，生产默认不展示），点击只打开「灵感中心」视图，签到动作在灵感中心任务卡片里（i18n：标题「每日签到」/ 副「赚 {{points}} 分/天」/ 已完成「已完成」）。横幅 onClick 是普通 React 事件，无 isTrusted 校验 -> OCR 点击路线可行，此前长期 pending 是入口定位与加载等待问题，不是被过滤。失效条件：v1.19.0 改版、端点改路径、或横幅开关改为默认 on。额度/连签/有效期由服务端下发，代码无硬编码（reliability: 未实测）。2026-09-24 提权实测跑通：入口 = 侧边栏「灵感与活动」→ 赚积分任务首卡「每日签到」→ 卡片内黑色「签到」按钮；已签态 OCR 文案为「已完成 / 已签到N天」，幂等判定靠它；脚本在 ok/already 分支会 taskkill 客户端。日额度 200 主人已确认（卡片副标题「签到得@20 积分」是显示/OCR 误差）。积分并非永久：客户端曾提示「152 积分将于 3 天内到期」，与 points/expiring 端点吻合，但整体有效期天数仍由服务端下发，validity_days 保持 null。"
     models_note: "Pony-Alpha-2 / GLM / DeepSeek / Kimi / MiniMax"
 
   - id: lobsterai
@@ -113,6 +114,7 @@ accounts:
     command: ""
     capabilities: [office, coding, local]
     open_when_needed: false
+    notes: "【2026-09-27 UI 路线打通，claim_mode 改 ui】入口=主窗口右上角「每日积分礼」卡（2316x1442 窗口内 x≈2056,y≈109）。流程：runas 拉起 → 等窗口出现 → 轮询 OCR 直到无『启动中/％』（AI 引擎冷启动约 20s）→ 点卡片 → 多帧捕获（1.5/2/2.5s，期间禁止 SetForegroundWindow，会把弹层关掉）→ 点「立即领取/领取/签到」→ 验证「今日已领/已领/成功」。实测关键结论（2026-09-28 修正）：①【签到反馈信号】此 UI 没有「今日已领」文字——成功=用户面板里「立即领取」按钮消失+积分额度上涨（实测 00:25→00:27：1000→1100，正好 +100）；②【首选路径】点左下角「我的」(约 3%宽,95%高) 展开用户面板 → 点面板内「立即领取」（限 x<35% 窗宽，避免误匹配广告）→ 复查按钮消失；右上角卡片时有时无，只作兜底、不能当已领依据（此前「卡片点击后跨重启消失=已领取」的推断是错的，卡片会再出现）；③【广告弹窗】冷启动后可能弹「新用户专享¥0.01 解锁 1000积分」全屏遮罩（即 desktop_startup_modal placement），必须先关——先 ESC，无效则点窗口 (69%宽,27%高) 处的圆形×；④.ps1 必须 UTF-8 带 BOM，否则 PS5.1 按 GBK 读中文正则直接语法错误且零输出——正文含中文就要 BOM，首行 ASCII 注释救不了；⑤【三段式】launch_lobsterai.py（runas 一次 UAC，经 explorer 降权拉起 → app 以普通权限常驻、不随脚本退出而被终止）→ run_lobsterai_claim.py 默认非提权 + -NoLaunch 反复跑 explore/claim/verify → 最后才退出 app。原 external 路线保留备用：2026-09-26 逆向 + 实测：签到是 client-activities 活动体系。host=https://lobsterai-server.youdao.com；槽位 GET /api/client-activities/slot?placement=desktop_sidebar|desktop_startup_modal&clientVersion=1.0.0&containerApiVersion=1&platform=win32；签到 POST /api/client-activities/daily_check_in/actions/check_in；鉴权 Authorization: Bearer，token 在本机明文 %APPDATA%\\LobsterAI\\lobsterai.sqlite 的 kv 表 auth_tokens（脚本内读取，不入命令行与日志）。**当前服务端未下发任何签到活动**：实测 slot 返回 code 0 但 slotState=empty、activity=null（两个 placement 都一样），context 返回 51100 活动不存在——脚本因此报 [no-activity] 并退出码 2，属正常现象不是故障。活动一旦下发即可自动签到，无需改代码。失效条件：host 变更、活动体系改版、sqlite 里 auth_tokens 结构变化。另有一条 /api/credits-reset-campaign/free-credits/claim（需 campaignCode），对应日历里 9-29 到期的 300 赠送，campaignCode 来源尚未找到。"
     models_note: "GPT-4o / Claude / Gemini / DeepSeek 等 10+"
 
   - id: dumate
@@ -259,12 +261,12 @@ accounts:
     daily_amount: 100
     validity_days: null
     cap: null
-    claim_policy: always
-    claim_mode: manual
+    claim_policy: never_auto
+    claim_mode: never
     command: ""
     capabilities: [coding]
     open_when_needed: false
-    notes: "100 积分需手动签到，有效期以客户端为准。"
+    notes: "【主人 2026-09-28 确认：MonkeyCode 不用签到】原为 always/manual 每天挂在「待手签」，已改为 never_auto + claim_mode never，不再出现在待办里。100 积分若以后恢复签到再改回。"
 
   - id: loomy
     name: 讯飞 Loomy

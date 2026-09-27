@@ -352,14 +352,85 @@ function Find-CheckinAnchor($lines) {
     return $null
 }
 
+# The real claim button is dark-on-dark ("签到" in white on a black pill), which
+# OCR misses entirely - so its position cannot be read from text. Scan the row
+# to the right of the entry label for a dark horizontal run instead.
+function Find-DarkButton([int]$rowY, [int]$x0, [int]$x1) {
+    try {
+        if ($x1 -gt $winW) { $x1 = $winW - 1 }
+        if ($x0 -lt 0) { $x0 = 0 }
+        if ($x1 -le $x0) { return $null }
+        $y = $rowY
+        if ($y -ge $winH) { $y = $winH - 2 }
+        if ($y -lt 0) { $y = 0 }
+        $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $hdc = $g.GetHdc()
+        $pw = [Cap32]::PrintWindow($hwnd, $hdc, 2)
+        $g.ReleaseHdc($hdc)
+        if (-not $pw) { $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size) }
+        $g.Dispose()
+        $best = $null
+        $runStart = -1
+        for ($x = $x0; $x -lt $x1; $x++) {
+            $c = $bmp.GetPixel($x, $y)
+            $dark = ($c.R -lt 90 -and $c.G -lt 90 -and $c.B -lt 90)
+            if ($dark -and $runStart -lt 0) { $runStart = $x }
+            if (-not $dark -and $runStart -ge 0) {
+                $len = $x - $runStart
+                if ($len -ge 25 -and (-not $best -or $len -gt $best.len)) { $best = @{ x = $runStart; len = $len } }
+                $runStart = -1
+            }
+        }
+        if ($runStart -ge 0) {
+            $len = $x1 - $runStart
+            if ($len -ge 25 -and (-not $best -or $len -gt $best.len)) { $best = @{ x = $runStart; len = $len } }
+        }
+        $bmp.Dispose()
+        if ($best) { return [int]($best.x + ($best.len / 2)) }
+    } catch { }
+    return $null
+}
+
 function Click-At([int]$ax, [int]$ay) {
     $sx = $winX + $ax
     $sy = $winY + $ay
 
+    # 1) If we already own the foreground, use REAL input injection. Synthetic
+    #    messages opened the account menu but never triggered the dark button;
+    #    real input is what the app actually reacts to.
+    if ([Cap32]::GetForegroundWindow() -eq $hwnd) {
+        [Cap32]::SetCursorPos($sx, $sy) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+        [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        try {
+            $ln = "$(Get-Date -Format HH:mm:ss) mode=mouse-fg target=$hwnd ax=$ax ay=$ay win=" + $winW + "x" + $winH + "`n"
+            [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
+        } catch { }
+        return
+    }
+
+    # 2) Otherwise deliver the click straight into the window's message queue.
+
     # Resolve the deepest child window under the point: with Electron/CEF the
     # top-level window only forwards input, the renderer child is what really
     # handles a click. Sending to the top-level window alone does nothing.
+    # Prefer the real top-most window at that point: Electron popup menus may be
+    # a separate window rather than a child of the main one, and sending to the
+    # main window then does nothing. Verify it belongs to the same process.
+    $sp = [Cap32+POINT]::new()
+    $sp.X = $sx
+    $sp.Y = $sy
+    $top = [Cap32]::WindowFromPoint($sp)
     $target = $hwnd
+    if ($top -ne [IntPtr]::Zero) {
+        $pidTop = [uint32]0
+        [Cap32]::GetWindowThreadProcessId($top, [ref]$pidTop) | Out-Null
+        $pidMain = [uint32]0
+        [Cap32]::GetWindowThreadProcessId($hwnd, [ref]$pidMain) | Out-Null
+        if ($pidTop -eq $pidMain) { $target = $top }
+    }
     $cp = [Cap32+POINT]::new()
     $cp.X = $sx
     $cp.Y = $sy
@@ -375,10 +446,20 @@ function Click-At([int]$ax, [int]$ay) {
 
     $lp = [IntPtr]((($cp.Y -band 0xFFFF) * 65536) -bor ($cp.X -band 0xFFFF))
     $res = [IntPtr]::Zero
+    # Hover first: Electron only renders the dark "签到" button on hover, so a
+    # bare WM_LBUTTONDOWN at its coordinates lands on nothing.
+    [Cap32]::SendMessageTimeout($target, 0x0200, [UIntPtr]::Zero, $lp, 0, 1000, [ref]$res) | Out-Null
+    Start-Sleep -Milliseconds 200
     $r1 = [Cap32]::SendMessageTimeout($target, 0x0201, [UIntPtr]::new([uint64]1), $lp, 0, 1500, [ref]$res)
     Start-Sleep -Milliseconds 90
     $r2 = [Cap32]::SendMessageTimeout($target, 0x0202, [UIntPtr]::Zero, $lp, 0, 1500, [ref]$res)
-    if ($r1 -ne [IntPtr]::Zero -and $r2 -ne [IntPtr]::Zero) { return }
+    $mode = 'msg-fail'
+    if ($r1 -ne [IntPtr]::Zero -and $r2 -ne [IntPtr]::Zero) { $mode = 'msg-ok' }
+    try {
+        $line = "$(Get-Date -Format HH:mm:ss) mode=$mode target=$target ax=$ax ay=$ay win=" + $winW + "x" + $winH + "`n"
+        [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $line)
+    } catch { }
+    if ($mode -eq 'msg-ok') { return }
 
     [Cap32]::SetCursorPos($sx, $sy) | Out-Null
     Start-Sleep -Milliseconds 120
@@ -448,11 +529,30 @@ function Find-AnyLine($lines, [string[]]$needles) {
 # 拆成单字（每/日/领/150/积/分），Contains 匹配单字必失败。
 # 干扰排除：①「升级会员，每日多领50积分」同样含「每日」；②聊天区里我们自己粘贴的
 # prompt 满屏都是「签到」，必须限制在左侧栏（菜单/入口都在 x < 30% 窗口宽）。
+function Test-MenuOpen($lines) {
+    # 账户菜单展开后才会有这些固定菜单项（首页绝不会出现）
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        if ($l.text -match "退出登录|管理账户|报告问题") { return $true }
+    }
+    return $false
+}
+
 function Find-EntryWord($lines, [string[]]$needles) {
     $xMax = [int]($winW * 0.3)
+    $menuOpen = Test-MenuOpen $lines
     foreach ($n in $needles) {
         $h = Find-WordHit $lines $n
-        if ($h -and ($h.x -lt $xMax) -and $h.text -notmatch "多领|升级|会员|已") { return $h }
+        if (-not $h) { continue }
+        if ($h.x -ge $xMax) { continue }
+        if ($h.text -match "多领|升级|会员|已") { continue }
+        # 侧栏任务列表里的历史任务名（实测「配置Trae每日自动签到」@664,162、
+        # 「查询签到入口与积分规则」@101,1100）同样含「签到」且落在 x<30%，
+        # 会在首页就被误判成入口 -> 脚本跳过「点头像开菜单」直接点错地方。
+        # 「每日领」是菜单独有的强特征，永远优先采信；其余 needle 只有在账户
+        # 菜单确实展开时才认。
+        if ($n -ne "每日领" -and -not $menuOpen) { continue }
+        return $h
     }
     return $null
 }
@@ -593,7 +693,41 @@ if ($DryRun) {
 
 # 「每日领150积分」只是说明文字，真正的签到按钮是它右侧的黑色「签到」。
 # 按钮相对文字行的偏移随窗口宽度略有变化，按 380 → 300 → 450 → 文字本身 轮换试。
+# 按钮相对文字行的偏移：窗口越窄菜单越窄，写死 380 会点到菜单外。
+# 用菜单项的右边界推算——黑色「签到」按钮右对齐在菜单内侧约 60px 处。
 $offsets = @(380, 300, 450, 0)
+$menuRight = 0
+foreach ($l in $lines) {
+    if (-not $l.text) { continue }
+    if ($l.text -match "退出登录|管理账户|报告问题|升级权益|每日领|消息") {
+        $r = $l.x + $l.w
+        if ($r -gt $menuRight) { $menuRight = $r }
+    }
+}
+if ($menuRight -gt 0) {
+    # PowerShell 5.1 会把 @($d, $d - 60, ...) 里的算术解析成数组运算而报错，
+    # 必须先算成独立变量再进数组。
+    $d  = [int]([int]$menuRight - 60 - [int]$bx)
+    $d1 = $d - 60
+    $d2 = $d + 60
+    $offsets = @($d, $d1, $d2, 0)
+}
+
+# 黑底白字的「签到」按钮 OCR 整行漏检，靠像素扫描在入口行右侧找深色块，
+# 命中后以它为主点击点（比按偏移猜可靠得多）。
+$x1 = [int]($winW * 0.3)
+if ($menuRight -gt 0) { $x1 = [int]($menuRight + 40) }
+$btnX = Find-DarkButton $by ([int]([int]$bx + 60)) $x1
+if ($btnX) {
+    $d0 = [int]($btnX - [int]$bx)
+    $dm = $d0 - 40
+    $dp = $d0 + 40
+    $offsets = @($d0, $dm, $dp, 0)
+    try {
+        $ln = "$(Get-Date -Format HH:mm:ss) darkBtn x=$btnX entryX=$bx offsets=" + ($offsets -join ',') + "`n"
+        [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
+    } catch { }
+}
 for ($i = 0; $i -lt $offsets.Count; $i++) {
     Click-At ($bx + $offsets[$i]) $by
     foreach ($sub in 1..2) {

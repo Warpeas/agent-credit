@@ -101,7 +101,7 @@ if($pidSet.Count -gt 0){ $hwnd = Find-AppWindow $pidSet; Log ("existing window="
 
 if($hwnd -eq [IntPtr]::Zero -and $NoLaunch){
     Log "NoLaunch set and app not running"
-    if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"notfound","detail":"app not running (run the launcher first)"}',(New-Object System.Text.UTF8Encoding($false))) }
+    Restore-Scene; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"notfound","detail":"app not running (run the launcher first)"}',(New-Object System.Text.UTF8Encoding($false))) }
     exit 1
 }
 if($hwnd -eq [IntPtr]::Zero){
@@ -115,7 +115,7 @@ if($hwnd -eq [IntPtr]::Zero){
     }
 }
 if($hwnd -eq [IntPtr]::Zero){ $hwnd = Find-ByTitle; if($hwnd -ne [IntPtr]::Zero){ Log ("found by title hwnd="+$hwnd) } }
-if($hwnd -eq [IntPtr]::Zero){ Log "NO WINDOW"; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"notfound","detail":"no main window"}',(New-Object System.Text.UTF8Encoding($false))) } exit 1 }
+if($hwnd -eq [IntPtr]::Zero){ Restore-Scene; Log "NO WINDOW"; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"notfound","detail":"no main window"}',(New-Object System.Text.UTF8Encoding($false))) } exit 1 }
 
 [void][L32]::ShowWindow($hwnd,9); Start-Sleep -Milliseconds 400; [void][L32]::SetForegroundWindow($hwnd); Start-Sleep -Milliseconds 700
 $r=New-Object L32+RECT; [L32]::GetWindowRect($hwnd,[ref]$r)|Out-Null
@@ -220,7 +220,22 @@ function Click-At($ax,$ay) {
     [L32]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero)
 }
 
+$script:SavedForeground=[IntPtr]::Zero
+function Save-Foreground {
+    if($script:SavedForeground -eq [IntPtr]::Zero){
+        $f=[L32]::GetForegroundWindow()
+        if($f -ne $hwnd){ $script:SavedForeground=$f }
+    }
+}
+function Restore-Foreground {
+    try{ if($script:SavedForeground -ne [IntPtr]::Zero){ [void][L32]::SetForegroundWindow($script:SavedForeground) } }catch{}
+}
+# 运行结束一律恢复现场：关掉本次自己拉起的实例（签到前就开着的保留），
+# 并把前台还给运行前那个窗口。失败也不留窗口——无人值守跑完桌面不该堆着客户端。
+function Restore-Scene { Close-LaunchedApp; Restore-Foreground }
+
 function Ensure-Foreground {
+    Save-Foreground
     [void][L32]::ShowWindow($hwnd,9)
     Start-Sleep -Milliseconds 300
     [void][L32]::SetForegroundWindow($hwnd)
@@ -337,7 +352,7 @@ if($Verify){
         exit 0
     }
     Log ("VERIFY inconclusive")
-    if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"pending","detail":"verify inconclusive"}',(New-Object System.Text.UTF8Encoding($false))) }
+    Restore-Scene; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"pending","detail":"verify inconclusive"}',(New-Object System.Text.UTF8Encoding($false))) }
     exit 2
 }
 
@@ -399,7 +414,7 @@ if($claimBtn){
     }
     if($okHit){ Log ("ok marker: "+$okHit.text); Close-LaunchedApp; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"ok","detail":"'+$okHit.text+'"}',(New-Object System.Text.UTF8Encoding($false))) } exit 0 }
     Log "clicked panel claim, no confirm marker"
-    if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"pending","detail":"clicked panel claim, no confirm"}',(New-Object System.Text.UTF8Encoding($false))) }
+    Restore-Scene; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"pending","detail":"clicked panel claim, no confirm"}',(New-Object System.Text.UTF8Encoding($false))) }
     exit 2
 }
 
@@ -437,6 +452,6 @@ if($anchor){
 }
 
 Log "no claim path worked"
-if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"pending","detail":"no claim path worked"}',(New-Object System.Text.UTF8Encoding($false))) }
+Restore-Scene; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"pending","detail":"no claim path worked"}',(New-Object System.Text.UTF8Encoding($false))) }
 exit 2
 } catch { Log ("ERROR: "+$_.Exception.Message) }

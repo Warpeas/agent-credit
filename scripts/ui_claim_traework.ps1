@@ -266,6 +266,8 @@ function Get-OcrLines {
     $g.Dispose()
     $ms = New-Object System.IO.MemoryStream
     $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    # 保留同一帧，供像素级定位（黑底白字按钮 OCR 漏检，只能靠像素找）
+    try { $script:ShotBmp = $bmp.Clone() } catch { }
     $bmp.Dispose()
     $stream = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
     $writer = New-Object Windows.Storage.Streams.DataWriter($stream.GetOutputStreamAt(0))
@@ -360,34 +362,51 @@ function Find-DarkButton([int]$rowY, [int]$x0, [int]$x1) {
         if ($x1 -gt $winW) { $x1 = $winW - 1 }
         if ($x0 -lt 0) { $x0 = 0 }
         if ($x1 -le $x0) { return $null }
-        $y = $rowY
-        if ($y -ge $winH) { $y = $winH - 2 }
-        if ($y -lt 0) { $y = 0 }
-        $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
-        $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $hdc = $g.GetHdc()
-        $pw = [Cap32]::PrintWindow($hwnd, $hdc, 2)
-        $g.ReleaseHdc($hdc)
-        if (-not $pw) { $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size) }
-        $g.Dispose()
+        $bmp = $script:ShotBmp
+        if (-not $bmp) {
+            $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $hdc = $g.GetHdc()
+            $pw = [Cap32]::PrintWindow($hwnd, $hdc, 2)
+            $g.ReleaseHdc($hdc)
+            if (-not $pw -or (Test-Blank $bmp)) { $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size) }
+            $g.Dispose()
+        }
+        # 多行扫描：按钮可能比说明文字略高或略低；只有 hover 之后它才渲染出来
         $best = $null
-        $runStart = -1
-        for ($x = $x0; $x -lt $x1; $x++) {
-            $c = $bmp.GetPixel($x, $y)
-            $dark = ($c.R -lt 90 -and $c.G -lt 90 -and $c.B -lt 90)
-            if ($dark -and $runStart -lt 0) { $runStart = $x }
-            if (-not $dark -and $runStart -ge 0) {
-                $len = $x - $runStart
-                if ($len -ge 25 -and (-not $best -or $len -gt $best.len)) { $best = @{ x = $runStart; len = $len } }
-                $runStart = -1
+        $log = New-Object System.Collections.ArrayList
+        for ($yy = ($rowY - 30); $yy -le ($rowY + 90); $yy += 6) {
+            if ($yy -lt 0 -or $yy -ge $winH) { continue }
+            $runStart = -1
+            for ($x = $x0; $x -lt $x1; $x++) {
+                $c = $bmp.GetPixel($x, $yy)
+                $dark = ($c.R -lt 90 -and $c.G -lt 90 -and $c.B -lt 90)
+                if ($dark -and $runStart -lt 0) { $runStart = $x }
+                if (-not $dark -and $runStart -ge 0) {
+                    $len = $x - $runStart
+                    if ($len -ge 30 -and (-not $best -or $len -gt $best.len)) { $best = @{ x = [int]($runStart + ($len / 2)); y = $yy; len = $len } }
+                    $runStart = -1
+                }
+            }
+            if ($runStart -ge 0) {
+                $len = $x1 - $runStart
+                if ($len -ge 30 -and (-not $best -or $len -gt $best.len)) { $best = @{ x = [int]($runStart + ($len / 2)); y = $yy; len = $len } }
+            }
+            if ([Math]::Abs($yy - $rowY) -lt 7) {
+                $samples = New-Object System.Collections.ArrayList
+                for ($sx2 = $x0; $sx2 -lt $x1; $sx2 += 6) {
+                    $cc = $bmp.GetPixel($sx2, $yy)
+                    [void]$samples.Add("$sx2`:$($cc.R),$($cc.G),$($cc.B)")
+                }
+                [void]$log.Add("row=$yy " + ($samples -join ' '))
             }
         }
-        if ($runStart -ge 0) {
-            $len = $x1 - $runStart
-            if ($len -ge 25 -and (-not $best -or $len -gt $best.len)) { $best = @{ x = $runStart; len = $len } }
-        }
-        $bmp.Dispose()
-        if ($best) { return [int]($best.x + ($best.len / 2)) }
+        try {
+            $lns = "$(Get-Date -Format HH:mm:ss) x0=$x0 x1=$x1 src=" + $(if ($script:ShotBmp) { 'ocr-frame' } else { 'fresh' }) + " " + ($log -join ' | ') + " best=" + $(if ($best) { "$($best.x),$($best.y) len=$($best.len)" } else { 'none' }) + "`n"
+            [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_scan.txt", $lns)
+        } catch { }
+        if (-not $script:ShotBmp) { $bmp.Dispose() }
+        if ($best) { return $best }
     } catch { }
     return $null
 }
@@ -716,15 +735,22 @@ if ($menuRight -gt 0) {
 # 黑底白字的「签到」按钮 OCR 整行漏检，靠像素扫描在入口行右侧找深色块，
 # 命中后以它为主点击点（比按偏移猜可靠得多）。
 $x1 = [int]($winW * 0.3)
-if ($menuRight -gt 0) { $x1 = [int]($menuRight + 40) }
-$btnX = Find-DarkButton $by ([int]([int]$bx + 60)) $x1
-if ($btnX) {
-    $d0 = [int]($btnX - [int]$bx)
+if ($menuRight -gt 0) { $x1 = [int]($menuRight + 80) }
+# 黑色「签到」按钮是 hover 才渲染的元素：实测没有 hover 时入口行右侧
+# x=263~431 全是 250,250,250 纯白，OCR 与像素扫描都看不到它。
+# 先把真实光标移到入口行触发 hover，等它渲染，再刷新一帧去扫描。
+[Cap32]::SetCursorPos(($winX + [int]$bx + 60), ($winY + $by)) | Out-Null
+Start-Sleep -Milliseconds 800
+$null = Get-OcrLines
+$btn = Find-DarkButton $by ([int]([int]$bx + 40)) $x1
+if ($btn) {
+    $d0 = [int]($btn.x - [int]$bx)
     $dm = $d0 - 40
     $dp = $d0 + 40
     $offsets = @($d0, $dm, $dp, 0)
+    $by = $btn.y
     try {
-        $ln = "$(Get-Date -Format HH:mm:ss) darkBtn x=$btnX entryX=$bx offsets=" + ($offsets -join ',') + "`n"
+        $ln = "$(Get-Date -Format HH:mm:ss) darkBtn x=$($btn.x) y=$($btn.y) len=$($btn.len) entryX=$bx offsets=" + ($offsets -join ',') + "`n"
         [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
     } catch { }
 }

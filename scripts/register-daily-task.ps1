@@ -46,6 +46,10 @@ if ($RunNow) {
     $randomXml  = ""
 }
 
+# Tried adding a SessionUnlock trigger (re-run as soon as the session unlocks,
+# to cover the locked-screen case). It does NOT work here: Register-ScheduledTask
+# -Xml silently drops any trigger other than Daily/Logon (TimeTrigger was dropped
+# the same way) - it reports success but the trigger never shows up. Don't add it.
 $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">

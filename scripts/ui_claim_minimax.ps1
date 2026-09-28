@@ -4,10 +4,22 @@
 # this script was the one that started it (-NoClose to opt out).
 param(
     [string]$OutFile = "",
+    # 默认会在签到成功后关闭「本次由脚本拉起」的客户端；签到前已运行的不动。
+    # -NoClose 用于探索期：保留窗口以便反复调试，不必每次重拉（重拉会弹 UAC）。
     [switch]$NoClose
 )
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+# Surface terminating errors instead of dying silently.
+trap {
+    try {
+        $m = "FATAL: " + $_.Exception.Message + " @ " + $_.InvocationInfo.PositionMessage
+        $p = "$PSScriptRoot\..\logs\minimax_claim.json"
+        [System.IO.File]::WriteAllText($p, (ConvertTo-Json -Compress @{ status = 'failed'; detail = $m }))
+    } catch { }
+    break
+}
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -29,7 +41,13 @@ public static class Cap32 {
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+  [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern IntPtr ChildWindowFromPointEx(IntPtr hWnd, POINT p, uint flags);
   public struct RECT { public int Left, Top, Right, Bottom; }
+  public struct POINT { public int X, Y; }
   public delegate bool EnumProc(IntPtr hWnd, IntPtr lp);
 }
 "@
@@ -104,6 +122,8 @@ function Restore-Foreground {
 function Stop-LaunchedApp {
     # Only ever close what *we* started. If any MiniMax process was already
     # alive when the script began, we touch nothing.
+    # Default is NO-CLOSE: closing after every run forces a fresh elevated
+    # launch next time, which means another UAC prompt for the human.
     if ($NoClose) { return }
     if (-not $script:CloseAllowed) { return }
 
@@ -192,6 +212,8 @@ if ($hwnd -eq [IntPtr]::Zero) {
         if ($hwnd -ne [IntPtr]::Zero) { break }
     }
     if ($hwnd -eq [IntPtr]::Zero) { Out-Json "notfound" "MiniMax Code 启动后 60s 内未出现主窗口" }
+    # 冷启动后给渲染多留时间，避免抓到白屏
+    Start-Sleep -Seconds 12
 }
 
 function Wait-Foreground {
@@ -216,8 +238,24 @@ function Wait-Foreground {
 }
 
 function Get-OcrLinesSafe {
-    if (-not (Wait-Foreground)) { return $null }
+    # Foreground is best-effort now: PrintWindow captures the window even when it
+    # is occluded or not in front, so a refused foreground switch must not abort
+    # the run (it used to return $null -> "未在前台" -> pending).
+    try { Wait-Foreground | Out-Null } catch { }
     return Get-OcrLines
+}
+
+function Test-Blank($bmp) {
+    $first = $bmp.GetPixel([int]($winW / 2), [int]($winH / 2))
+    for ($i = 1; $i -le 8; $i++) {
+        $px = [int]($winW * $i / 9)
+        for ($j = 1; $j -le 8; $j++) {
+            $py = [int]($winH * $j / 9)
+            $c = $bmp.GetPixel($px, $py)
+            if ($c.R -ne $first.R -or $c.G -ne $first.G -or $c.B -ne $first.B) { return $false }
+        }
+    }
+    return $true
 }
 
 # A window parked on another virtual desktop still reports a valid rect and even
@@ -239,11 +277,33 @@ $winH = $rect.Bottom - $rect.Top
 $winX = $rect.Left
 $winY = $rect.Top
 
+# 诊断用：保存一次主窗口截图，便于肉眼定位签到按钮（不影响点击逻辑）
+try {
+    $shot = New-Object System.Drawing.Bitmap($winW, $winH)
+    $sg = [System.Drawing.Graphics]::FromImage($shot)
+    $hdc2 = $sg.GetHdc()
+    $pw2 = [Cap32]::PrintWindow($hwnd, $hdc2, 2)
+    $sg.ReleaseHdc($hdc2)
+    if (-not $pw2 -or (Test-Blank $shot)) { $sg.CopyFromScreen($winX, $winY, 0,0, $shot.Size) }
+    $sg.Dispose()
+    $shot.Save("C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\minimax_shot.png", [System.Drawing.Imaging.ImageFormat]::Png)
+    $shot.Dispose()
+} catch { }
+
 function Get-OcrLines {
     $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size)
+    # PrintWindow: captures the window itself, so it works while occluded, not in
+    # the foreground, or on a locked session. Fall back to screen capture when it
+    # yields a blank frame (some GPU-composited apps return black/white).
+    $hdc = $g.GetHdc()
+    $pw = [Cap32]::PrintWindow($hwnd, $hdc, 2)
+    $g.ReleaseHdc($hdc)
+    if (-not $pw -or (Test-Blank $bmp)) {
+        $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size)
+    }
     $g.Dispose()
+    try { $script:ShotBmp = $bmp.Clone() } catch { }
     $ms = New-Object System.IO.MemoryStream
     $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
@@ -286,6 +346,54 @@ function Find-Line($lines, [string]$needle) {
 function Click-At([int]$ax, [int]$ay) {
     $sx = $winX + $ax
     $sy = $winY + $ay
+
+    # 1) Already in front -> real input injection (most reliable).
+    if ([Cap32]::GetForegroundWindow() -eq $hwnd) {
+        [Cap32]::SetCursorPos($sx, $sy) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+        [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        return
+    }
+
+    # 2) Otherwise deliver the click into the window's own message queue, which
+    #    needs no foreground at all. Prefer the real top-most window at the point
+    #    (Electron/CEF popups may be separate windows), verifying the process.
+    $sp = [Cap32+POINT]::new()
+    $sp.X = $sx
+    $sp.Y = $sy
+    $top = [Cap32]::WindowFromPoint($sp)
+    $target = $hwnd
+    if ($top -ne [IntPtr]::Zero) {
+        $pidTop = [uint32]0
+        [Cap32]::GetWindowThreadProcessId($top, [ref]$pidTop) | Out-Null
+        $pidMain = [uint32]0
+        [Cap32]::GetWindowThreadProcessId($hwnd, [ref]$pidMain) | Out-Null
+        if ($pidTop -eq $pidMain) { $target = $top }
+    }
+    $cp = [Cap32+POINT]::new()
+    $cp.X = $sx
+    $cp.Y = $sy
+    [Cap32]::ScreenToClient($target, [ref]$cp) | Out-Null
+    for ($k = 0; $k -lt 4; $k++) {
+        $c = [Cap32]::ChildWindowFromPointEx($target, $cp, 1)
+        if ($c -eq [IntPtr]::Zero -or $c -eq $target) { break }
+        $target = $c
+        $cp.X = $sx
+        $cp.Y = $sy
+        [Cap32]::ScreenToClient($target, [ref]$cp) | Out-Null
+    }
+    $lp = [IntPtr]((($cp.Y -band 0xFFFF) * 65536) -bor ($cp.X -band 0xFFFF))
+    $res = [IntPtr]::Zero
+    # hover first: some buttons only render on hover
+    [Cap32]::SendMessageTimeout($target, 0x0200, [UIntPtr]::Zero, $lp, 0, 1000, [ref]$res) | Out-Null
+    Start-Sleep -Milliseconds 150
+    $r1 = [Cap32]::SendMessageTimeout($target, 0x0201, [UIntPtr]::new([uint64]1), $lp, 0, 1500, [ref]$res)
+    Start-Sleep -Milliseconds 90
+    $r2 = [Cap32]::SendMessageTimeout($target, 0x0202, [UIntPtr]::Zero, $lp, 0, 1500, [ref]$res)
+    if ($r1 -ne [IntPtr]::Zero -and $r2 -ne [IntPtr]::Zero) { return }
+
+    # 3) Last resort: real cursor input anyway.
     [Cap32]::SetCursorPos($sx, $sy) | Out-Null
     Start-Sleep -Milliseconds 120
     [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
@@ -301,7 +409,14 @@ if ($null -eq $lines) { Out-Json "pending" "MiniMax Code 未在前台（请点�
 # very top, so require the brand string up there before touching the mouse.
 $confirmed = $false
 foreach ($l in $lines) {
-    if ($l.y -lt 80 -and $l.text -match "(?i)minimax") { $confirmed = $true; break }
+    if ($l.y -lt 120 -and $l.text -match "(?i)min[i1l]max|code") { $confirmed = $true; break }
+}
+# 容错：只要捕捉到 MiniMax 主页特有的「每日签到」卡片即确认窗口正确
+# （OCR 偶发把标题栏误识为 MinlMaxC0de，品牌串匹配会漏，改用语义特征词）
+if (-not $confirmed) {
+    foreach ($l in $lines) {
+        if ($l.text -match "每日签到") { $confirmed = $true; break }
+    }
 }
 if (-not $confirmed) {
     $top = ($lines | Where-Object { $_.y -lt 120 } | Select-Object -First 5 | ForEach-Object { $_.text }) -join "/"

@@ -73,16 +73,29 @@ function Await($WinRtOp, $ResultType) {
     return $netTask.Result
 }
 
-function Out-Json([string]$status, [string]$detail) {
-    # Claimed (ok/already): kill the client so it does not linger in the background.
-    # pending/failed: keep the window open for manual follow-up.
-    if ($status -eq "ok" -or $status -eq "already") {
-        # 只关本次我们自己拉起的实例；签到前用户已开着的必须保留。
-        if (-not $DryRun -and $script:LaunchedByUs) {
-            taskkill /IM "TRAE SOLO CN.exe" /F 2>$null | Out-Null
-            $detail = $detail + "；已关闭本次启动的客户端"
-        }
+$script:SavedForeground = [IntPtr]::Zero
+function Save-Foreground {
+    if ($script:SavedForeground -eq [IntPtr]::Zero) {
+        $f = [Cap32]::GetForegroundWindow()
+        if ($f -ne $hwnd) { $script:SavedForeground = $f }
     }
+}
+function Restore-Foreground {
+    try {
+        if ($script:SavedForeground -ne [IntPtr]::Zero) {
+            [Cap32]::SetForegroundWindow($script:SavedForeground) | Out-Null
+        }
+    } catch { }
+}
+
+function Out-Json([string]$status, [string]$detail) {
+    # 运行结束一律恢复现场：关掉本次拉起的实例（签到前就开着的保留），并把前台
+    # 还给运行前的窗口。失败时也不留窗口——无人值守跑完桌面不该堆着客户端。
+    if (-not $DryRun -and $script:LaunchedByUs) {
+        taskkill /IM "TRAE SOLO CN.exe" /F 2>$null | Out-Null
+        $detail = $detail + "；已关闭本次启动的客户端"
+    }
+    Restore-Foreground
     $payload = @{ status = $status; detail = $detail } | ConvertTo-Json -Compress
     if ($OutFile) {
         [System.IO.File]::WriteAllText($OutFile, $payload, (New-Object System.Text.UTF8Encoding($false)))
@@ -186,6 +199,7 @@ if ($hwnd -eq [IntPtr]::Zero) {
 # 用户正在操作电脑时会把窗口挤到后台，单靠 SetForegroundWindow 常常切不回来
 # （Windows 会拒绝非前台进程的切换请求）。逐级加码：还原 → Alt 技巧 → 绑输入队列强切。
 function Ensure-Foreground {
+    Save-Foreground
     if ([Cap32]::GetForegroundWindow() -eq $hwnd) { return $true }
 
     if ([Cap32]::IsIconic($hwnd)) {

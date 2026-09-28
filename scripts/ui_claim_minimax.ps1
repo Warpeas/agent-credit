@@ -141,9 +141,10 @@ function Stop-LaunchedApp {
 }
 
 function Out-Json([string]$status, [string]$detail) {
-    # On success give the window back, then close the client if we launched it.
-    # On failure keep it open -- the human needs to look at it.
-    if ($status -eq "ok" -or $status -eq "already") { Stop-LaunchedApp }
+    # 运行结束一律恢复现场：关掉本次由脚本拉起的实例（签到前就开着的保留），
+    # 再把前台还给运行前的窗口。失败时也不留窗口——无人值守跑完桌面不该堆着
+    # 客户端，诊断信息已落日志（minimax_shot.png / ocr dump）与台账。
+    Stop-LaunchedApp
     Restore-Foreground
     $payload = @{ status = $status; detail = $detail } | ConvertTo-Json -Compress
     if ($OutFile) {

@@ -291,23 +291,9 @@ try {
     $shot.Dispose()
 } catch { }
 
-function Get-OcrLines {
-    $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    # PrintWindow: captures the window itself, so it works while occluded, not in
-    # the foreground, or on a locked session. Fall back to screen capture when it
-    # yields a blank frame (some GPU-composited apps return black/white).
-    $hdc = $g.GetHdc()
-    $pw = [Cap32]::PrintWindow($hwnd, $hdc, 2)
-    $g.ReleaseHdc($hdc)
-    if (-not $pw -or (Test-Blank $bmp)) {
-        $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size)
-    }
-    $g.Dispose()
-    try { $script:ShotBmp = $bmp.Clone() } catch { }
+function Ocr-Bitmap($bmp) {
     $ms = New-Object System.IO.MemoryStream
     $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-    $bmp.Dispose()
     $stream = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
     $writer = New-Object Windows.Storage.Streams.DataWriter($stream.GetOutputStreamAt(0))
     $writer.WriteBytes($ms.ToArray())
@@ -334,7 +320,46 @@ function Get-OcrLines {
         }
         $lines += @{ text = $text; x = $minX; y = $minY; w = ($maxX - $minX); h = ($maxY - $minY) }
     }
-    return $lines
+    return ,$lines
+}
+
+function Get-OcrLines {
+    $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    # PrintWindow captures the window itself (works while occluded / not in
+    # front). Fall back to screen capture on a blank frame, and - critically -
+    # on a frame that OCR finds almost nothing in: Electron windows sometimes
+    # hand PrintWindow a stale/unrendered surface, which used to make the brand
+    # check fail and abort the whole claim.
+    $hdc = $g.GetHdc()
+    $pw = [Cap32]::PrintWindow($hwnd, $hdc, 2)
+    $g.ReleaseHdc($hdc)
+    if (-not $pw -or (Test-Blank $bmp)) {
+        $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size)
+    }
+    $g.Dispose()
+    $lines1 = Ocr-Bitmap $bmp
+    if ($lines1.Count -ge 3) {
+        try { $script:ShotBmp = $bmp.Clone() } catch { }
+        $bmp.Dispose()
+        return ,$lines1
+    }
+
+    $bmp2 = New-Object System.Drawing.Bitmap($winW, $winH)
+    $g2 = [System.Drawing.Graphics]::FromImage($bmp2)
+    $g2.CopyFromScreen($winX, $winY, 0, 0, $bmp2.Size)
+    $g2.Dispose()
+    $lines2 = Ocr-Bitmap $bmp2
+    if ($lines2.Count -gt $lines1.Count) {
+        try { $script:ShotBmp = $bmp2.Clone() } catch { }
+        $bmp.Dispose()
+        $bmp2.Dispose()
+        return ,$lines2
+    }
+    $bmp2.Dispose()
+    try { $script:ShotBmp = $bmp.Clone() } catch { }
+    $bmp.Dispose()
+    return ,$lines1
 }
 
 function Find-Line($lines, [string]$needle) {

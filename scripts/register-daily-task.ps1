@@ -38,9 +38,9 @@ $sid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
 # "runas"? The elevated shell frequently never starts (UAC path unreliable
 # from the automation session).
 # RandomDelay is dropped in RunNow mode, otherwise the run would be postponed
-# by up to 10 minutes. Re-run WITHOUT -RunNow afterwards to restore 00:05.
-$dailyStart = "2026-09-28T00:05:00"
-$randomXml  = "      <RandomDelay>PT10M</RandomDelay>`n"
+# by a few minutes. Re-run WITHOUT -RunNow afterwards to restore 00:00.
+$dailyStart = "2026-09-29T00:00:00"
+$randomXml  = "      <RandomDelay>PT3M</RandomDelay>`n"
 if ($RunNow) {
     $dailyStart = (Get-Date).AddSeconds(100).ToString("yyyy-MM-ddTHH:mm:ss")
     $randomXml  = ""
@@ -54,7 +54,7 @@ $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Agent credit daily checkin: daily 00:05 (plus up to 10m random) and logon+5min; elevated, interactive, no UAC inside</Description>
+    <Description>Agent credit daily checkin: daily 00:00 (plus up to 3m random) and logon+5min; elevated, interactive, no UAC inside</Description>
   </RegistrationInfo>
   <Triggers>
     <CalendarTrigger>

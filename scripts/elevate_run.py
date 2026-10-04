@@ -1,6 +1,6 @@
 """Run a .ps1 ELEVATED via UAC (ShellExecuteW "runas") and wait a bit.
 
-Usage: python scripts/_elevate_run.py scripts/register-daily-task.ps1
+Usage: python scripts/elevate_run.py scripts/register-daily-task.ps1
 """
 import ctypes
 import sys

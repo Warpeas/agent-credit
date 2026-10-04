@@ -9,7 +9,7 @@ launched by an elevated script died together with that script's process tree.
 """
 import ctypes
 
-SCRIPT = r"C:\Users\Hunter\Documents\Warpeas\agent-credit\scripts\_launch_detached.ps1"
+SCRIPT = r"C:\Users\Hunter\Documents\Warpeas\agent-credit\scripts\launch_detached.ps1"
 EXE = r"C:\Users\Hunter\AppData\Local\Programs\LobsterAI\LobsterAI.exe"
 
 cmd = '-NoProfile -ExecutionPolicy Bypass -File "' + SCRIPT + '" -Exe "' + EXE + '"'

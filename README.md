@@ -197,12 +197,28 @@
 
 ## 一期范围
 
-- 每日必签（无上限可攒）：WorkBuddy / MiniMax / TraeWork / AutoClaw / LobsterAI；MonkeyCode 已确认不用签到
-- 自动签到：优先 external 直签（WorkBuddy、MiniMax，无 GUI 无 UAC）；其余走本机客户端 UI（点「签到」）。点不到则 pending，不入账
+- 每日必签（无上限可攒）：WorkBuddy / MiniMax / TraeWork / AutoClaw / LobsterAI / **MonkeyCode 积分**
+- 自动签到：优先 external 直签（WorkBuddy，全自动无 GUI）；其余走本机客户端 UI
+- 幂等：所有签到脚本都先用只读接口确认「今天是否已签」，已签直接返回，**不启客户端、不做点击**
+  （MonkeyCode 用 `GET /api/v1/users/wallet/checkin`；LobsterAI 用 chip 上的「今日已领」文案）
 - 可选：在 `catalog.yaml` 填 `command` 覆盖为外部脚本
 - AutoClaw：每日 200，无明确过期；UI 失败后 `record autoclaw claimed 200`
 - DuMate / ToDesk：上限未测出前不自动领
 - 不做：定时启动 Mavis / MonkeyCode Token / Loomy 等当日清零客户端
+
+## 仓库约定
+
+**不按文件名前缀决定是否入库**，判断标准是开发规范：
+
+| 判断 | 处置 | 例子 |
+|---|---|---|
+| 是项目资产（换机器还要用、需要被审阅） | **入库** | `scripts/forensics_*.py`、`research/tools/`、`vendor/*/` |
+| 一次性改写脚本（使命完成） | **用完即删**，不留占位 | 改注册表的临时 patch 脚本 |
+| 运行期产物（状态而非代码） | **.gitignore 排除** | `data/ledger.json`、`logs/` |
+
+曾用 `_` 前缀标记「本地草稿不提交」，已废除——那个约定会让有用的取证脚本被
+永久排除在版本控制外，下次排查同类问题只能重写。取证与探路脚本恰恰是最该
+入库的：它们记录了「怎么发现的」，比结论更值钱。
 
 ## 命令
 
@@ -228,6 +244,26 @@ credit.cmd record workbuddy used 50
 ```bat
 python scripts\gen_rating_table.py --write
 ```
+
+## 排查工具
+
+客户端出问题时先取证再改代码，工具都在仓库里：
+
+```bat
+:: 枚举某客户端全部顶层窗口 + 逐个抓图判黑（定位「全黑窗口」这类问题）
+python scripts\forensics_lobster_windows.py --launch
+python scripts\forensics_monkeycode_windows.py --launch
+
+:: 验证窗口选择判据是否还会选错
+python scripts\verify_lobster_pick.py
+
+:: 界面探路：按坐标点击 + 截图，定位签到按钮
+python scripts\monkeycode_probe_ui.py --tag s0
+```
+
+窗口坐标换算的坑（三套坐标系混用）见 `scripts/ui_claim_monkeycode.py:content_click`
+的注释：截图 PNG 真实像素 == 窗口 rect，但 Read 展示时会缩略到 1088 宽，
+`scale = w / 1088` 再加窗口原点才是对的。
 
 ## 计划任务（可选）
 

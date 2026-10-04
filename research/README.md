@@ -32,6 +32,23 @@ research/prompts/UNIVERSAL.md
 | `research/prompts/UNIVERSAL.md` | **只有一份**。通用探索流程 + 本机安装目录速查表，粘进任意一家客户端 |
 | `research/answers/<id>.md` | 答案存放处，**按家分文件**。已存在的不会被生成器覆盖 |
 | `research/ANSWER-SCHEMA.md` | 答案格式规范，独立一份方便随时对照 |
+| `research/tools/` | 逆向/取证脚本。记录「怎么发现的」，比结论更值钱 |
+| `vendor/<客户端>/*/` | 官方接口直签与探测脚本，凭据一律运行时从本机读，不落盘 |
+
+## tools：取证脚本值得入库
+
+`research/tools/` 下的脚本不是草稿，是**排查过程的存档**。举几个例子说明为什么：
+
+- `analyze_minimax_windows.py` — MiniMax「全黑窗口」的取证入口，
+  枚举进程下每个窗口报 class/可见性/渲染采样
+- `timeline_minimax_startup.py` — 冷启动时序采样，
+  回答「黑窗是否早期 visible 且渲染纯黑、之后被隐藏」
+- `probe_minimax_windows.py` — 逐窗口 PrintWindow 判空白
+- `explore_monkeycode.ps1` — MonkeyCode 界面探索（只截图 OCR，不点击）
+
+结论会写进 `catalog.yaml` 的 notes，但**「怎么排除其他可能」只有脚本记得**。
+下次该客户端改版、问题复发时，照着改几个常量就能重跑，
+比从头逆向一遍省几小时。所以这类脚本一律入库，不按「本地草稿」处理。
 
 ## 回填规矩
 
@@ -63,11 +80,14 @@ research/prompts/UNIVERSAL.md
 按额度 × 缺口排，`gen_research_prompts.py` 里的 `RESEARCH_IDS` 顺序即优先级
 （答案文件按这个顺序生成，速查表也按这个顺序排）：
 
-1. `minimax` — 400/天，全靠手签，最大缺口
-2. `autoclaw` — 200/天，OCR 入口定位已失效
-3. `traework` — 150/天，UI 路线未验证
-4. `lobsterai` — 100/天，UI 路线未验证
-5. `workbuddy` — 已通，主要想补齐余额查询接口
-6. `dumate` / `todesk` — 卡在领取上限（cap）没测出来
-7. `monkeycode_credit` — 手签
-8. `kimi` / `joycode` / `qclaw` — 月度或一次性，优先级最低
+**已打通**（2026-10-04）：`workbuddy`(external) / `minimax`(external+UI 回退) /
+`traework`(UI) / `autoclaw`(UI) / `lobsterai`(UI) / `monkeycode_credit`(UI)
+
+**仍待探索**：
+
+1. `dumate` / `todesk` — 卡在领取上限（cap）没测出来
+2. `kimi` / `joycode` / `qclaw` — 月度或一次性，优先级最低
+3. `monkeycode_token` — 10M/天当日清零，用时再开，不用每日签
+
+各家的坑（黑窗、坐标换算、验证码）记在 `catalog.yaml` 对应账户的 `notes` 里，
+排查过程记在 `research/tools/`。

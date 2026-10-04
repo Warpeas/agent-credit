@@ -164,7 +164,7 @@ def find_main(pids: set[int]) -> int:
 def write_png(path: Path, bgra: bytes, w: int, h: int) -> None:
     """最小 PNG 编码（RGBA，无滤波）。
 
-    自包含实现，不依赖 scripts/_forensics_lobster_windows.py——
+    自包含实现，不依赖 scripts/forensics_lobster_windows.py——
     那个文件是`_` 前缀的本地取证草稿，按项目约定不入库，
     生产脚本不能反向依赖它（否则换台机器就ModuleNotFoundError）。
     纯 zlib，无 Pillow 依赖（本机 managed python 没装 PIL）。

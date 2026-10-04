@@ -35,12 +35,28 @@ python C:\Users\Hunter\Documents\Warpeas\agent-credit\credit.py <命令>
 
 ## 硬规则
 
+> **动手探测任何客户端之前，先读 `research/SAFETY.md`。**
+> 那里有完整的禁止清单、允许路线优先级、探测预算和收手判据。
+> 本节的规则 6 是它的摘要，冲突时以 `research/SAFETY.md` 为准。
+
 1. **不要启动** Mavis、MonkeyCode Token、Loomy、Coze、小浣熊、千问、Accio、阶跃等登录即领且当日过期的客户端。`open` / `checkin --open` 也不得打开它们。推荐里最多说「你要干这个的话先打开 xxx」。
 2. `checkin` 退出码：`0` 全部自动完成；`2` 有待手签；`1` 失败。把 CLI 原文给用户，待手签列出软件名。
 3. AutoClaw 是**每日手动签到 200**，不是月度登录。用户说「AutoClaw 签了」→ `record autoclaw claimed 200`。
 4. 推荐以 CLI 输出为准，不要即兴改烧法。顺序：已打开的当日清零 > 7 天内到期 > 长期 FIFO > 有上限 > 无过期（AutoClaw）。轻活不要动 MiniMax/WorkBuddy 囤积分。
 5. DuMate / ToDesk 默认不领。`due` / `recommend` 只有余额低于上限阈值才提示。
-6. 不要打印、复制 token，不外传任何登录态给第三方，不解密加密存储的登录态（如 TraeWork 的 storage.json）。允许的例外：读取本机**明文**凭据（如 WorkBuddy 的 workbuddy-desktop.info）直调**官方**接口的 external 脚本（vendor/ 内），其输出与命令行不得包含 token。
+6. **账号安全优先于积分收益**（完整版见 `research/SAFETY.md`）：
+   - **禁止**：解密加密存储的登录态（TraeWork `storage.json`、AutoClaw `auth.json` 的 safeStorage）、
+     内存注入/hook 取 token、开 remote-debugging / CDP 调试口、篡改客户端本地数据伪造额度、
+     高频并发压测式请求、绕过验证码、绕过完整性级别/反调试/代码签名、把凭据外传第三方。
+   - **禁止写循环重试**。同一端点最多试 2 次，候选端点枚举上限 10 个，
+     单次探索不超过 20 个工具调用。超了就停下写清卡点，别扩大探索面。
+   - **允许**：只读本机**明文**凭据（WorkBuddy `workbuddy-desktop.info`、MiniMax `auth.json`、
+     MonkeyCode `monkeycode-cookies.json`、LobsterAI sqlite 的 `auth_tokens`）直调**官方**接口；
+     只读客户端二进制里的 i18n 文案与接口路径字符串；走客户端自身界面的 UI 自动化；
+     只读 GET 查询余额/签到状态。
+   - 凭据**运行时读取**，不落盘、不进命令行、不进日志、不进输出。
+   - **查不到就写 unknown，别硬钻**。本项目一半以上的有效期就是 unknown，照样运转。
+     账号被封的代价远高于多领 100 积分。
 7. WorkBuddy 客户端会丢弃模拟点击（isTrusted 过滤），`claim_mode=external`（API 直签）是它唯一可靠路线，不要改回 ui。
 7b. **`isTrusted` 不能当否决理由**（2026-09-25 主人定调，2026-09-26 复核）：该结论**只对 UIA 的
    `InvokePattern.Invoke()` 成立**；OS 级注入（`SetCursorPos` + `mouse_event`）与 external 直签都不受影响

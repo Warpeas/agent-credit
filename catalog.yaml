@@ -1,6 +1,10 @@
 version: 1
 claim_threshold_ratio: 0.3
 notes: "P1 登录即领且当日过期的软件不自动唤醒。每日必签走本机 UI（不解密登录态）。AutoClaw 每日签到 200，无明确过期。"
+# ⚠️ 探索本文件描述的任何客户端之前，先读 research/SAFETY.md。
+# 账号承载真实付费订阅，被判定为自动化攻击会直接封号、囤的积分归零，
+# 代价远高于多领 100 积分。禁止解密登录态 / 开调试口 / 篡改客户端 /
+# 重试风暴 / 绕验证码；查不到就写unknown。
 
 # 积分有效期口径（2026-10-04 逐家实测，来源分三档，见下）
 #   confirmed  = 客户端 i18n 硬编码 或 服务端返回 expires 字段，或官方规则明示
@@ -136,7 +140,7 @@ accounts:
     extra_monthly: 500
     capabilities: [coding]
     open_when_needed: false
-    notes: "【2026-09-28 起改全自动：claim_mode=ui，由每日计划任务提权跑 scripts/ui_claim_traework.ps1（OCR 定位+点击，9-27 实测 +150 成功）；签完只关闭本次由脚本拉起的实例，主人已开着的保留】TraeWork(TRAE SOLO CN) 与 TraeCode(Trae CN) 是同一套签到：out\\main.js 大小只差 3 字节，共用 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}），主人已确认两者共享积分账户 -> 台账只保留 traework，不新增 traecode，避免重复计数。【规则 2026-09-26 双方自述 + 官方页确认】免费 150/天、会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么是 manual】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按硬规则 6 不解密 -> external 拿不到凭据；本环境冷启动两个客户端都失败（ShellExecuteW 返回 42 但 45s 无进程）-> UI 路线也不可全自动；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且**每次运行自身消耗积分**，日收益 150 未必覆盖，故未启用。入口：桌面端左下角头像 → 菜单「签到」按钮（云端开关 checkinMenuEnabled 控制，网页/手机端无入口）。【OCR 脚本 2026-09-27 实测成功】scripts/ui_claim_traework.ps1 + run_traework_claim.py（提权 runas，--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。**提权才能冷启动客户端**（未提权 ShellExecuteW 起不来，推翻此前"必须手动打开"结论）。四个实测坑：①签到按钮文案是「每日领150积分」不是「签到」，且 OCR 拆成单字（每/日/领/150/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③「每日领150积分」是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏 ~380px（窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「会员¥39」推广卡片。已签态文案「本账号今日已签到，明日再来」。2026-09-27 实测 ok 并入账 150。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。"
+    notes: "【2026-09-28 起改全自动：claim_mode=ui，由每日计划任务提权跑 scripts/ui_claim_traework.ps1（OCR 定位+点击，9-27 实测 +150 成功）；签完只关闭本次由脚本拉起的实例，主人已开着的保留】TraeWork(TRAE SOLO CN) 与 TraeCode(Trae CN) 是同一套签到：out\\main.js 大小只差 3 字节，共用 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}），主人已确认两者共享积分账户 -> 台账只保留 traework，不新增 traecode，避免重复计数。【规则 2026-09-26 双方自述 + 官方页确认】免费 150/天、会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么是 manual】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按 research/SAFETY.md 禁止解密登录态 -> external 拿不到凭据；本环境冷启动两个客户端都失败（ShellExecuteW 返回 42 但 45s 无进程）-> UI 路线也不可全自动；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且**每次运行自身消耗积分**，日收益 150 未必覆盖，故未启用。入口：桌面端左下角头像 → 菜单「签到」按钮（云端开关 checkinMenuEnabled 控制，网页/手机端无入口）。【OCR 脚本 2026-09-27 实测成功】scripts/ui_claim_traework.ps1 + run_traework_claim.py（提权 runas，--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。**提权才能冷启动客户端**（未提权 ShellExecuteW 起不来，推翻此前"必须手动打开"结论）。四个实测坑：①签到按钮文案是「每日领150积分」不是「签到」，且 OCR 拆成单字（每/日/领/150/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③「每日领150积分」是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏 ~380px（窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「会员¥39」推广卡片。已签态文案「本账号今日已签到，明日再来」。2026-09-27 实测 ok 并入账 150。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。"
     models_note: "16+ 模型，CUE / MCP"
     rating:
       value: 3
@@ -163,7 +167,7 @@ accounts:
     mobile: true
     mobile_note: "与桌面端项目不同步，是独立的云端 claw 环境；模型与桌面端一致，同为智谱 GLM 系列"
     open_when_needed: false
-    notes: "2026-09-24 自述调研（v1.19.0，端点自 resources/app.asar 反编译，已本机复核命中）：签到是任务体系，task_id='daily_signin'，端点 /autoclaw-proxy/proxy/autoclaw-task-{list,complete}，host=autoglm-acceleration-api.zhipuai.cn，鉴权 X-Auth-Appid/TimeStamp/Sign + Bearer。token 在 C:\\Users\\Hunter\\AppData\\Roaming\\autoclaw\\auth.json 为 safeStorage 加密（enc: 前缀），external 直调需解密登录态 -> 否决。首页「每日签到」横幅受实验开关 show_checkin_banner 控制（defaultValue off，生产默认不展示），点击只打开「灵感中心」视图，签到动作在灵感中心任务卡片里（i18n：标题「每日签到」/ 副「赚 {{points}} 分/天」/ 已完成「已完成」）。横幅 onClick 是普通 React 事件，无 isTrusted 校验 -> OCR 点击路线可行，此前长期 pending 是入口定位与加载等待问题，不是被过滤。失效条件：v1.19.0 改版、端点改路径、或横幅开关改为默认 on。额度/连签/有效期由服务端下发，代码无硬编码（reliability: 未实测）。2026-09-24 提权实测跑通：入口 = 侧边栏「灵感与活动」→ 赚积分任务首卡「每日签到」→ 卡片内黑色「签到」按钮；已签态 OCR 文案为「已完成 / 已签到N天」，幂等判定靠它；脚本在 ok/already 分支会 taskkill 客户端。日额度 200 主人已确认（卡片副标题「签到得@20 积分」是显示/OCR 误差）。积分并非永久：客户端曾提示「152 积分将于 3 天内到期」，与 points/expiring 端点吻合，但整体有效期天数仍由服务端下发，validity_days 保持 null。"
+    notes: "2026-09-24 自述调研（v1.19.0，端点自 resources/app.asar 反编译，已本机复核命中）：签到是任务体系，task_id='daily_signin'，端点 /autoclaw-proxy/proxy/autoclaw-task-{list,complete}，host=autoglm-acceleration-api.zhipuai.cn，鉴权 X-Auth-Appid/TimeStamp/Sign + Bearer。token 在 C:\\Users\\Hunter\\AppData\\Roaming\\autoclaw\\auth.json 为 safeStorage 加密（enc: 前缀），external 直调需解密登录态 -> 按 research/SAFETY.md 否决。首页「每日签到」横幅受实验开关 show_checkin_banner 控制（defaultValue off，生产默认不展示），点击只打开「灵感中心」视图，签到动作在灵感中心任务卡片里（i18n：标题「每日签到」/ 副「赚 {{points}} 分/天」/ 已完成「已完成」）。横幅 onClick 是普通 React 事件，无 isTrusted 校验 -> OCR 点击路线可行，此前长期 pending 是入口定位与加载等待问题，不是被过滤。失效条件：v1.19.0 改版、端点改路径、或横幅开关改为默认 on。额度/连签/有效期由服务端下发，代码无硬编码（reliability: 未实测）。2026-09-24 提权实测跑通：入口 = 侧边栏「灵感与活动」→ 赚积分任务首卡「每日签到」→ 卡片内黑色「签到」按钮；已签态 OCR 文案为「已完成 / 已签到N天」，幂等判定靠它；脚本在 ok/already 分支会 taskkill 客户端。日额度 200 主人已确认（卡片副标题「签到得@20 积分」是显示/OCR 误差）。积分并非永久：客户端曾提示「152 积分将于 3 天内到期」，与 points/expiring 端点吻合，但整体有效期天数仍由服务端下发，validity_days 保持 null。"
     models_note: "GLM 系列（智谱）【2026-10-03 主人更正：桌面端与移动端都只有 GLM，旧记录 Pony-Alpha-2/DeepSeek/Kimi/MiniMax 有误】"
     rating:
       value: 4

@@ -114,6 +114,17 @@ abs = 窗口原点 + 缩略图坐标 * scale
 
 ## 工程约定
 
+- ⚠️ **探索安全约束：动手探测任何客户端前先读 `research/SAFETY.md`**（2026-10-04 立）。
+  这些账号承载真实付费订阅，封号 = 囤的积分与订阅归零，代价远高于多领 100 积分。
+  - **禁止**：解密登录态（TraeWork `storage.json`、AutoClaw `auth.json` safeStorage）、
+    内存注入/hook 取 token、开 remote-debugging·CDP、绕完整性级别/反调试/签名、
+    篡改本地数据伪造额度、高频并发压测、外传凭据、绕验证码、**写循环重试**
+  - **允许**：只读本机明文凭据调官方接口、只读二进制 i18n 与路径字符串、
+    走客户端自身 UI 自动化、只读 GET 查询余额/签到状态、问 Agent 自己
+  - **探测预算**：同端点≤2 次、候选端点枚举≤10 个、单次探索≤20 个工具调用
+  - **查不到就写 unknown，别硬钻**（本项目一半以上的有效期就是 unknown，照样运转）
+  - 单一来源在 `research/SAFETY.md`；`skill/SKILL.md` 规则 6、`catalog.yaml` 顶层 notes、
+    两个 README 都引用它，改规则只改那一处
 - ⚠️ **不按文件名前缀决定是否入库**（2026-10-04 废除「`_` 前缀=本地草稿不提交」）。
   旧约定把取证/探路脚本永久排除在版本控制外，下次排查同类问题只能重写一遍。
   现标准：**项目资产（换机器还要用、值得被审阅）→ 入库；一次性改写脚本 → 用完即删；
@@ -121,6 +132,8 @@ abs = 窗口原点 + 缩略图坐标 * scale
   已按此重整：`_forensics_*.py` / `_verify_*.py` 等 8 个脚本去前缀入库，
   MiniMax 黑窗排查的 5 个脚本归入 `research/tools/`，
   删掉 4 个一次性/重复脚本（strip_block / probe_procs / enum_windows / monkey_explore2）。
+  `.workbuddy/memory/*.md` 同样入库（记技术判断，等价 research/answers），
+  只有 `automations/`（UUID 命名运行时任务记忆）排除。
 - 调试**不动账本** `data/ledger.json`；改前先备份（曾因临时改账本重复入账，靠备份回滚）。
 - 每次会话变更以独立 commit 粒度提交；提交前审计残留杂项文件。
 - 提交前必做**凭据扫描**（`scripts/test_leak_check.py` 或 grep JWT/Bearer/sk-），

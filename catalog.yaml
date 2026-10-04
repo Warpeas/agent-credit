@@ -2,6 +2,36 @@ version: 1
 claim_threshold_ratio: 0.3
 notes: "P1 登录即领且当日过期的软件不自动唤醒。每日必签走本机 UI（不解密登录态）。AutoClaw 每日签到 200，无明确过期。"
 
+# 积分有效期口径（2026-10-04 逐家实测，来源分三档，见下）
+#   confirmed  = 客户端 i18n 硬编码 或 服务端返回 expires 字段，或官方规则明示
+#   measured   = 实测/服务端返回，但客户端不写死、由服务端按账号下发
+#   unknown    = 客户端与 API 都没有该字段，规则完全由服务端控制，本地无从查证
+validity_audit_2026_10_04:
+  workbuddy:
+    days: 30
+    confidence: measured
+    evidence: "无单笔 expires 字段；30 天是本地记账规则。服务端 status 返回 active/total_credits/checkin_dates，无有效期"
+  minimax:
+    days: 30
+    confidence: confirmed
+    evidence: "asar i18n usage_resource_tooltip_rule1 原文「赠予积分（如签到奖励，30天有效）仅限 MiniMax Code 使用」；且 POST /signin/claim 返回 expire_at_ms=1793635200000 = 2026-11-03 00:00:00，与今天 10-04 相差正好 30 天。**注意付费积分有效期 1 年**（同段 rule2）"
+  traework:
+    days: 31
+    confidence: measured
+    evidence: "out/main.js 的 checkin_credits 响应只有 credits/checkin_enabled/checked_in，无有效期字段；31 天来自官方规则页 + 双方 Agent 自述（FIFO 自然日）"
+  autoclaw:
+    days: null
+    confidence: unknown
+    evidence: "客户端 dist 明文无任何积分有效期文案；存在 /agent-assetmgr/api/v1/points/expiring 端点但需解密登录态才能调。UI 只滚动提示最近一批（如「542 积分将于 3 天内到期」），天数随批次变化，无法反推固定有效期"
+  lobsterai:
+    days: 30
+    confidence: measured
+    evidence: "asar i18n dailyCheckInValidityDays = 「有效期{days}天」，days 是**服务端变量**不是硬编码；字段结构为 context.state.rewardValidityDays + result.expiresAt。实测 UI 显示 30 天。服务端 slot 现返回 slotState=empty，拿不到 context，故 30 只能从 UI OCR 读"
+  monkeycode_credit:
+    days: null
+    confidence: unknown
+    evidence: "GET /api/v1/users/wallet 只返回 id/balance/daily_token_balance/daily_token_limit，**无任何有效期字段**；exe 是 Go 编译，validity 仅 3 处命中且全为无关（Go 运行时/证书/垃圾数据），界面文案来自远程 webview 挖不到"
+
 calendar:
   - id: lobster_gift
     account: lobsterai
@@ -53,7 +83,14 @@ accounts:
     vendor: MiniMax
     unit: credit
     grant_type: accumulating
-    daily_amount: 400
+    # 【2026-10-04 按服务端实测修正】原记 400 是错的。GET /signin/status 的
+    # days[] 数组直接下发每日真实额度：points(基础) + bonus_points(加成)。
+    # 7 天周期实测值：day1-3 = 800+400，day4 = 2000+1000，day5-6 = 800+400，
+    # day7 = 2000+1000。即**平时 1200/天**（800 基础 + 400 连签加成），
+    # 第 4/7 天 3000，整周期 12000。
+    # 旧配置 daily_amount=400 + bonus_on=[4,7] + bonus_amount=1000
+    # 等价于「平时 400、第4/7天1500」，与真实值差 3 倍。
+    daily_amount: 1200
     validity_days: 30
     cap: null
     claim_policy: always
@@ -63,20 +100,23 @@ accounts:
     command: '"C:\Users\Hunter\.workbuddy\binaries\python\versions\3.13.12\python.exe" "C:\Users\Hunter\Documents\Warpeas\agent-credit\vendor\minimax-auto-signin\signin.py" auto'
     streak:
       cycle_days: 7
+      # 每天都有 400 连签加成（不是只有第4/7天）；第 4/7 天在此基础上再额外 +1000
+      daily_bonus: 400
       bonus_on: [4, 7]
       bonus_amount: 1000
+      cycle_total: 12000
       mode: set_daily
     capabilities: [coding, multimodal]
     mobile: true
     mobile_note: "能看到桌面端的项目并继续对话（比 AutoClaw 移动端强）；模型同样只有 MiniMax 自家"
     open_when_needed: false
-    notes: "签到卡在主页左下角（每日签到/今天@400/第4天@1000）。【2026-09-26 起改为 external 直签：全自动、不依赖客户端运行、不开窗口】端点 GET/POST /minimax-cloud/api/v1/signin/{status,claim}，host=https://agent.minimax.cn，鉴权 Authorization: Bearer（读本机明文凭据 C:\\Users\\Hunter\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json；token 不进命令行、不进日志、不进输出）。**必须带 timezone_id=Asia/Shanghai**：缺失时 HTTP 仍 200 但业务返回 1406010011 invalid timezone_id；只有 IANA 名有效，8 / +8 / 28800 / Shanghai 全被拒。已签判定用 days 里 is_today 且 status=3(Claimed)，以服务端为准不重复领取（2026-09-26 实测幂等）。【2026-09-27 修正·最终】弃用 UI 路线的旧理由「无法冷启动（只起 updater.exe、主进程不出现）」已被实测推翻；而更早的「打开瞬间关掉/客户端崩溃」是**沙箱内的假象**——在沙箱里用 ShellExecuteW 拉起的进程会在沙箱命令返回后被回收（误判为崩溃），**客户端本身不崩**。真实约束：本自动化会话只能以 runas（提权）拉起 GUI 客户端，非提权从会话启动根本不起进程（与 TraeWork/AutoClaw 同一套路；每次 runas 弹一次 UAC，需主人批准，漏批则静默失败）。真正的大坑是**冷启动渲染延迟**：全新拉起的（提权）MiniMax 主窗口最初是白屏，要等约 12s 内容才渲染出来，过早 OCR/截图只会看到标题栏而找不到「每日签到」卡。修复：窗口出现后 `Start-Sleep 12` 再 OCR/点击（与 GPU、WebGPU 无关，`--disable-gpu` 无效已移除）。external 直签仍被过期 token 阻断（expiresAt 2026-09-26 00:24、无刷新端点记录）；UI/OCR 路线现已可用（2026-09-27 实测 ok 并入账 400）。失效条件：token 过期（脚本会打印剩余小时）、端点改路径、timezone 校验变更、UAC 漏批导致启动失败。此前「isTrusted 过滤」只对 UIA InvokePattern 成立，OS 级注入与 external 都不受影响，不要再拿它当否决理由。【2026-09-30 · 国庆活动推广干扰 UI 路线】客户端在 9.28-10.07 展示活动推广，其文案同时含「每日签到」与「领取」，曾劫持锚点/按钮识别、点进广告正文 (614,658)。已加固：锚点与按钮搜索限定左侧栏 (x<600) 且文本长度上限 12/16。更麻烦的是该推广层会吞掉点击（点击后连续三帧画面与按钮文案完全不变），ESC 与广告右上候选关闭点均无法关闭，UI 路线当日实际不可用。故将 external 直签设为主路线：token 有效时无 GUI、无 UAC、不受推广层影响；token 过期时 checkin.py 回退 UI。今日最终由 external 领取 800（第 1 天 / bonus 400），连签 5。"
+    notes: "签到卡在主页左下角。【2026-09-26 起改为 external 直签：全自动、不依赖客户端运行、不开窗口】端点 GET/POST /minimax-cloud/api/v1/signin/{status,claim}，host=https://agent.minimax.cn，鉴权 Authorization: Bearer（读本机明文凭据 C:\\Users\\Hunter\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json；token 不进命令行、不进日志、不进输出）。**必须带 timezone_id=Asia/Shanghai**：缺失时 HTTP 仍 200 但业务返回 1406010011 invalid timezone_id；只有 IANA 名有效，8 / +8 / 28800 / Shanghai 全被拒。【2026-10-04 额度规则按服务端实测重写】GET /signin/status 返回的 days[] 直接下发真实额度，字段是 points(基础) + bonus_points(加成)，7 天实测：day1-3=800+400、day4=2000+1000、day5-6=800+400、day7=2000+1000→ **平时 1200/天、第4/7天 3000、整周期 12000**。旧记「400/天、第4/7天加1000」与真实值差 3 倍，已改。枚举 SigninDayStatus{Upcoming=1,Claimable=2,Claimed=3,Disabled=4}，已签判定用 status==3；**status==1(Upcoming) 表示当天额度还没到可领时间，此时 claim 会被拒**——10-04 凌晨 00:14 那轮就是 Upcoming，所以没领成，不是脚本坏了。已签判定以服务端为准不重复领取（2026-09-26 实测幂等）。**有效期 30天是官方口径**（asar 内 usage_resource_tooltip_rule1 原文：「赠予积分（如签到奖励，30天有效）仅限 MiniMax Code 使用」），但要注意**付费积分有效期 1 年**（同段 rule2），台账只跟签到赠予的 30 天。扣费顺序 Token Plan > 积分。【2026-09-27 修正·最终】弃用 UI 路线的旧理由「无法冷启动」已被实测推翻；真实约束是本自动化会话只能以 runas 拉起 GUI，非提权起不来。冷启动渲染延迟约 12s，过早 OCR 只能看到标题栏。【2026-09-30 · 国庆活动推广干扰 UI 路线】9.28-10.07 活动推广文案同时含「每日签到」「领取」，会劫持锚点/按钮识别并吞掉点击，已加固限定左侧栏 x<600 + 文本长度上限 12/16；该推广层当日 UI 路线实际不可用，故 external 为主路线。失效条件：token 过期（脚本打印剩余小时；沙箱内 Popen 拉不起 GUI，需用非提权计划任务 RunLevel=Limited+LogonType=Interactive 拉起）、端点改路径、timezone 校验变更、当天额度处于 Upcoming 状态。此前「isTrusted 过滤」只对 UIA InvokePattern 成立，不要再拿它当否决理由。"
     models_note: "MiniMax-M3 / M2.7 / H3"
     rating:
       value: 5
       capability: 4
       automation: 5
-      review: "可累积额度里的天花板：400/天，第 4、7 天当日 1000，30 天有效期。external 直签无 GUI 无 UAC，不受客户端活动推广干扰，是当前唯一完全无感的路线。模型限于 MiniMax 自家（M3/M2.7/H3），多模态是加分项。"
+      review: "可累积额度里的天花板：**1200/天、第 4/7 天 3000、7 天周期 12000**（2026-10-04 按服务端 days[] 实测修正，旧记 400/天差 3 倍），赠予积分 30 天有效。external 直签无GUI 无 UAC，不受客户端活动推广干扰，是当前唯一完全无感的路线。唯一软肋是 accessToken 有效期极短（客户端停跑就废），需靠计划任务在签到前先拉客户端续期。模型限于 MiniMax 自家（M3/M2.7/H3），多模态是加分项。"
       best_for: "高频重度使用、多模态任务；移动端可续桌面端的对话"
       owner_note: "有移动端，能看到桌面端的项目并继续对话（这点比 AutoClaw 强，后者移动端是另一套环境、项目不同步）。模型两端都只有 MiniMax 自家（M3/M2.7/H3）。"
 

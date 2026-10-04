@@ -208,17 +208,22 @@
 
 ## 仓库约定
 
-**不按文件名前缀决定是否入库**，判断标准是开发规范：
+**不按文件名前缀、也不按「谁生成的」决定是否入库**，判断标准是开发规范：
 
 | 判断 | 处置 | 例子 |
 |---|---|---|
-| 是项目资产（换机器还要用、需要被审阅） | **入库** | `scripts/forensics_*.py`、`research/tools/`、`vendor/*/` |
+| 是项目资产（换机器还要用、需要被审阅） | **入库** | `scripts/forensics_*.py`、`research/tools/`、`.workbuddy/memory/*.md` |
 | 一次性改写脚本（使命完成） | **用完即删**，不留占位 | 改注册表的临时 patch 脚本 |
 | 运行期产物（状态而非代码） | **.gitignore 排除** | `data/ledger.json`、`logs/` |
 
 曾用 `_` 前缀标记「本地草稿不提交」，已废除——那个约定会让有用的取证脚本被
 永久排除在版本控制外，下次排查同类问题只能重写。取证与探路脚本恰恰是最该
 入库的：它们记录了「怎么发现的」，比结论更值钱。
+
+`.workbuddy/memory/` 下的技术判断与踩坑记录同样入库，理由一样：
+「为什么当初判断 external 走不通」「为什么窗口要按可见性+标题过滤」这类
+推理过程，等价于 `research/answers/`。只有 `automations/`（agent 运行时任务
+记忆，UUID 命名）属运行期产物，被忽略。
 
 ## 命令
 
@@ -244,6 +249,27 @@ credit.cmd record workbuddy used 50
 ```bat
 python scripts\gen_rating_table.py --write
 ```
+
+## 积分有效期
+
+2026-10-04 逐家实测，结论与证据存在 `catalog.yaml` 的 `validity_audit_2026_10_04`。
+可信度分三档，别把「unknown」当成「永久有效」：
+
+| 账户 | 天数 | 可信度 | 依据 |
+|---|---|---|---|
+| MiniMax Code | **30** | confirmed | asar i18n 官方文案 + 服务端 `expire_at_ms` 算出正好 30 天 |
+| WorkBuddy | 30 | measured | 本地记账规则；服务端 status 无有效期字段 |
+| LobsterAI | 30 | measured | i18n `dailyCheckInValidityDays` 的 `days` 是服务端变量；UI 实测 30 天 |
+| TraeWork | 31 | measured | 官方规则页 + 双方 Agent 自述（FIFO 自然日）；API 无字段 |
+| AutoClaw | ? | **unknown** | 客户端无文案；`points/expiring` 端点需解密登录态才能调 |
+| MonkeyCode 积分 | ? | **unknown** | `/users/wallet` 只返回 balance 与 token，无任何有效期字段 |
+
+两个容易踩的坑：
+
+- **MiniMax 赠予积分 30 天，付费积分 1 年**——同一段 i18n 里写明，别混用。
+- **AutoClaw 的「N 天内到期」是滚动提示**，永远显示最近一批的剩余天数
+  （实测见过「152 积分 3 天内到期」和「542 积分 3 天内到期」），
+  不能反推出固定有效期。
 
 ## 排查工具
 

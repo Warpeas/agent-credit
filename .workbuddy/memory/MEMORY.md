@@ -80,6 +80,13 @@ abs = 窗口原点 + 缩略图坐标 * scale
   脚本 `vendor/monkeycode-status/status.py`
   ✅ **`balance` 就是签到积分**（2026-04-04 定案，推翻 10-03 的「语义未确认」判断）：
   签到后 195267→295267（+100），与界面「积分 195→295」严格同步。可以入账。
+- **有效期 unknown，但已排除接口与 UI 两侧**：`/users/wallet` 只返回
+  {id, balance, daily_token_balance, daily_token_limit}，无任何有效期字段；
+  二进制里积分相关路径只有 wallet 与 wallet/checkin 两个，另探 records/
+  transactions/detail/points 四个候选明细端点全 404；UI「设置 → 账号」只有
+  三栏（今日额度/积分/已邀请），**没有积分明细入口**。
+  维持 unknown 的理由不是「没找」，而是「两侧都确认没有」。
+  ⚠️ 不要为此解密登录态去调 captcha 链路（SAFETY.md 规则 1）。
 - **external 直签永久不可行**（逆向实证，勿再尝试）：
   `POST /api/v1/users/wallet/checkin` → `code 10701`；
   captcha 链路 = `POST /api/v1/public/captcha/challenge`（GET 是 404）
@@ -106,6 +113,14 @@ abs = 窗口原点 + 缩略图坐标 * scale
   通用教训：**Electron/Tauri 客户端按 pid + 面积枚举窗口必然踩坑**，
   必须加「可见 + 有标题 + 排除辅助窗口类」过滤。
   另需给 PS 补`GetClassName` 的 DllImport 声明。
+- **积分分四类，各自有效期规则独立**：`daily`(每日) / `monthly`(包月) /
+  `longTerm`(长期) / `campaign`(活动)，服务端若下发 `walletItems[]` 则以其为准。
+  **所以「AutoClaw 有效期多少天」这个问法本身不成立** —— 有「长期积分」这一类，
+  说明并非全部统一过期。`validity_days` 保持 null 是因为无法用单值表达，
+  **不是 unknown**。查法：设置 → 积分明细页（路由 `/settings/credits`，
+  i18n `creditsDetail.ledger.expiresAt` = 「{{date}} 到期」，
+  `expiresAt` 是 Unix 秒级时间戳）。⚠️ UI 上「N 积分将于 N 天内到期」是**滚动提示**
+  （只显示最近一批剩余天数，见过「152→3 天」与「542→3 天」两条），不能反推固定天数。
 - 积分礼**不走活动下发**（`slot` 永久 empty），只能界面领。
   入口两处等价：左下「我的」展开面板里的「立即领取」、右上角「每日积分礼」chip。
 - 冷启动后需等登录态同步，chip 才会渲染（Path C 有 75s 等待循环）。

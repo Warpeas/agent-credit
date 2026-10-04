@@ -256,6 +256,21 @@ credit.cmd record workbuddy used 50
 python scripts\gen_rating_table.py --write
 ```
 
+改完 `catalog.yaml` 提交前**必须**跑一遍校验：
+
+```bat
+python scripts\test_catalog_yaml.py
+```
+
+它检查四件事，因为本项目有两个 YAML 解析器、要求不一样：
+`catalog.yaml` 由自带的 `agent_credit/yaml_lite.py` 解析（零依赖），
+但编辑时你可能顺手用了 pyyaml 才支持的写法——
+
+- **`>-` / `|` 折叠标量**：`yaml_lite` 不支持，会直接抛 `bad indent`，而 pyyaml 能过
+- **双引号标量里的裸 `"`**：pyyaml 报 `expected <block end>`，`yaml_lite` 可能静默截断
+- `yaml_lite` 解析结果里 accounts / calendar / validity_audit 是否齐全
+- pyyaml 能否解析（两个解析器都过才算安全）
+
 ## 积分有效期
 
 2026-10-04 逐家实测，结论与证据存在 `catalog.yaml` 的 `validity_audit_2026_10_04`。
@@ -267,15 +282,21 @@ python scripts\gen_rating_table.py --write
 | WorkBuddy | 30 | measured | 本地记账规则；服务端 status 无有效期字段 |
 | LobsterAI | 30 | measured | i18n `dailyCheckInValidityDays` 的 `days` 是服务端变量；UI 实测 30 天 |
 | TraeWork | 31 | measured | 官方规则页 + 双方 Agent 自述（FIFO 自然日）；API 无字段 |
-| AutoClaw | ? | **unknown** | 客户端无文案；`points/expiring` 端点需解密登录态才能调 |
-| MonkeyCode 积分 | ? | **unknown** | `/users/wallet` 只返回 balance 与 token，无任何有效期字段 |
+| AutoClaw | **分类，无统一值** | measured | 积分分daily/monthly/longTerm/campaign 四类，各类独立算；明细页在设置→积分 |
+| MonkeyCode 积分 | ? | **unknown** | 接口与 UI 两侧都确认没有该字段 |
 
-两个容易踩的坑：
+三个容易踩的坑：
 
 - **MiniMax 赠予积分 30 天，付费积分 1 年**——同一段 i18n 里写明，别混用。
+- **AutoClaw 的有效期是分类的**，问「多少天」本身不成立。而且它有「长期积分」这一类，
+  说明并非全部统一过期。查法是设置 → 积分明细页，每条流水带 `{{date}} 到期`。
 - **AutoClaw 的「N 天内到期」是滚动提示**，永远显示最近一批的剩余天数
   （实测见过「152 积分 3 天内到期」和「542 积分 3 天内到期」），
   不能反推出固定有效期。
+
+> 方法论：判断有效期时**别只探接口**。客户端的积分明细页往往本来就展示这个信息，
+> 读 UI 属于 `research/SAFETY.md` 的允许路线，不需要解密任何东西。
+> AutoClaw 就是靠读明文 dist + UI 才把「unknown」翻成「measured」的。
 
 ## 排查工具
 

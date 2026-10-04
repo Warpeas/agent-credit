@@ -25,8 +25,8 @@ validity_audit_2026_10_04:
     evidence: "out/main.js 的 checkin_credits 响应只有 credits/checkin_enabled/checked_in，无有效期字段；31 天来自官方规则页 + 双方 Agent 自述（FIFO 自然日）"
   autoclaw:
     days: null
-    confidence: unknown
-    evidence: "客户端 dist 明文无任何积分有效期文案；存在 /agent-assetmgr/api/v1/points/expiring 端点但需解密登录态才能调。UI 只滚动提示最近一批（如「542 积分将于 3 天内到期」），天数随批次变化，无法反推固定有效期"
+    confidence: measured
+    evidence: "【2026-10-04 修正：不是 unknown，客户端本来就展示这个信息，之前没找对页面】从客户端明文 dist（resources/app/dist/renderer/assets/session-history-*.js）挖到完整结构：积分明细页路由 `/settings/credits`，是设置页的一个 leaf tab（渲染成 data-zwork-surface=\"settings/credits\"，导航项 data-settings-tab=\"credits\"，i18n creditsDetail.title = 「积分」）。i18n `creditsDetail.ledger.expiresAt`= 「{{date}} 到期」，流水结构 {id, description, occurredAt, expiresAt, amount, type}，其中 expiresAt 是 **Unix 秒级时间戳**（渲染时 new Date(e*1e3)）。**关键：积分分四类，各自的有效期规则独立**——daily(每日) / monthly(包月) / longTerm(长期) / campaign(活动)，服务端若下发 walletItems[] 则以其为准（key + displayName + balanceView）。所以「AutoClaw 有效期是多少天」这个问法本身不成立，必须按积分类型分别看；且「长期积分」的存在说明并非全部统一过期。validity_days 保持 null，因为四类规则不同、无法用单值表达。⚠️ 之前记的 unknown 是错的 —— 判unknown 的理由是「points/expiring 端点需解密登录态」，但读 UI 属于 research/SAFETY.md 的允许路线，根本不需要解密。另：UI 上「N积分将于 N 天内到期」是**滚动提示**（只显示最近一批剩余天数，历史 OCR 有「152 积分 3 天内到期」与「542 积分 3 天内到期」两条，数字在涨天数恒为 3），不能用它反推固定天数。"
   lobsterai:
     days: 30
     confidence: measured
@@ -34,8 +34,7 @@ validity_audit_2026_10_04:
   monkeycode_credit:
     days: null
     confidence: unknown
-    evidence: "GET /api/v1/users/wallet 只返回 id/balance/daily_token_balance/daily_token_limit，**无任何有效期字段**；exe 是 Go 编译，validity 仅 3 处命中且全为无关（Go 运行时/证书/垃圾数据），界面文案来自远程 webview 挖不到"
-
+    evidence: "【2026-10-04 两轮核查后仍为 unknown，但已排除更多可能】① 接口层：GET /api/v1/users/wallet 只返回{id, balance, daily_token_balance, daily_token_limit}，**无任何有效期字段**；二进制（monkeycode-desktop.exe，Go 编译）里与积分相关的 API 路径只有/api/v1/users/wallet 和 /api/v1/users/wallet/checkin 两个，另探 records / transactions / detail / points 四个候选明细端点全 404；exe 里 validity 仅 3 处命中且全为无关（Go 运行时 / 证书吊销 / 打包的垃圾数据）。② UI 层：2026-10-04 实测走过「设置 → 账号」，页面只有三栏（今日额度 / 积分 / 已邀请），**没有积分明细或有效期入口**，「签到 +100」也没有附带任何期限说明。结论：这个字段既不在接口返回里，界面上也不展示，本地无从查证。维持 unknown 的理由不是「没找接口」，而是「客户端与 API 两侧都确认没有」。⚠️ 不要为此解密登录态去调captcha 链路（见 research/SAFETY.md 规则 1）。"
 calendar:
   - id: lobster_gift
     account: lobsterai
@@ -140,7 +139,7 @@ accounts:
     extra_monthly: 500
     capabilities: [coding]
     open_when_needed: false
-    notes: "【2026-09-28 起改全自动：claim_mode=ui，由每日计划任务提权跑 scripts/ui_claim_traework.ps1（OCR 定位+点击，9-27 实测 +150 成功）；签完只关闭本次由脚本拉起的实例，主人已开着的保留】TraeWork(TRAE SOLO CN) 与 TraeCode(Trae CN) 是同一套签到：out\\main.js 大小只差 3 字节，共用 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}），主人已确认两者共享积分账户 -> 台账只保留 traework，不新增 traecode，避免重复计数。【规则 2026-09-26 双方自述 + 官方页确认】免费 150/天、会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么是 manual】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按 research/SAFETY.md 禁止解密登录态 -> external 拿不到凭据；本环境冷启动两个客户端都失败（ShellExecuteW 返回 42 但 45s 无进程）-> UI 路线也不可全自动；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且**每次运行自身消耗积分**，日收益 150 未必覆盖，故未启用。入口：桌面端左下角头像 → 菜单「签到」按钮（云端开关 checkinMenuEnabled 控制，网页/手机端无入口）。【OCR 脚本 2026-09-27 实测成功】scripts/ui_claim_traework.ps1 + run_traework_claim.py（提权 runas，--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。**提权才能冷启动客户端**（未提权 ShellExecuteW 起不来，推翻此前"必须手动打开"结论）。四个实测坑：①签到按钮文案是「每日领150积分」不是「签到」，且 OCR 拆成单字（每/日/领/150/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③「每日领150积分」是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏 ~380px（窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「会员¥39」推广卡片。已签态文案「本账号今日已签到，明日再来」。2026-09-27 实测 ok 并入账 150。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。"
+    notes: "【2026-09-28 起改全自动：claim_mode=ui，由每日计划任务提权跑 scripts/ui_claim_traework.ps1（OCR 定位+点击，9-27 实测 +150 成功）；签完只关闭本次由脚本拉起的实例，主人已开着的保留】TraeWork(TRAE SOLO CN) 与 TraeCode(Trae CN) 是同一套签到：out\\main.js 大小只差 3 字节，共用 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}），主人已确认两者共享积分账户 -> 台账只保留 traework，不新增 traecode，避免重复计数。【规则 2026-09-26 双方自述 + 官方页确认】免费 150/天、会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么是 manual】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按 research/SAFETY.md 禁止解密登录态 -> external 拿不到凭据；本环境冷启动两个客户端都失败（ShellExecuteW 返回 42 但 45s 无进程）-> UI 路线也不可全自动；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且**每次运行自身消耗积分**，日收益 150 未必覆盖，故未启用。入口：桌面端左下角头像 → 菜单「签到」按钮（云端开关 checkinMenuEnabled 控制，网页/手机端无入口）。【OCR 脚本 2026-09-27 实测成功】scripts/ui_claim_traework.ps1 + run_traework_claim.py（提权 runas，--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。**提权才能冷启动客户端**（未提权 ShellExecuteW 起不来，推翻此前\"必须手动打开\"结论）。四个实测坑：①签到按钮文案是「每日领150积分」不是「签到」，且 OCR 拆成单字（每/日/领/150/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③「每日领150积分」是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏 ~380px（窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「会员¥39」推广卡片。已签态文案「本账号今日已签到，明日再来」。2026-09-27 实测 ok 并入账 150。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。"
     models_note: "16+ 模型，CUE / MCP"
     rating:
       value: 3

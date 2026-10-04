@@ -86,7 +86,8 @@ catalog_patch:
   **这两条不受 isTrusted 影响，用它解释失败是错的。**
 
 MiniMax 那次失败的真正原因更可能是脚本自身缺陷：点错了目标、校验窗口没盖住按钮区域。
-详见 `research/NOTES-isTrusted.md`。
+（isTrusted 的完整论证就在本文件「关于「isTrusted 过滤」这条 blocker」一节，
+`research/NOTES-isTrusted.md` 并未单独落盘。）
 
 ## 端点逆向（2026-09-23 本机完成）
 
@@ -144,6 +145,35 @@ async claimSignin()    { let {data:e} = await <axios>.post("/minimax-cloud/api/v
 
 已入账：`credit record minimax claimed 400` → 剩余 400，连签 1 天。
 
+## external 直签（2026-09-26 打通，已切为默认路线）
+
+**UI 路线做不到全自动**：本环境无法冷启动 MiniMax Code —— `Start-Process` 与
+`ShellExecuteW(open)` 都只起来一个 **`updater.exe`**，主进程始终不出现（全进程 diff 验证过）；
+`.minimax` 最后活动停在 9-24，客户端压根没跑。主人要求"不要手动、全自动"，于是按硬规则 6 的
+例外条款（读本机**明文**凭据 + 直调**官方**接口 + 脚本放 `vendor/` 内）走了 external。
+
+实现：`vendor/minimax-auto-signin/signin.py`（`status` 只读 / `auto` 查询后按需领取）。
+token 不进命令行、不进日志、不进输出（打印一律 `<redacted>`）。
+
+**踩到的坑：`timezone_id` 必填。**
+
+```
+GET /minimax-cloud/api/v1/signin/status            → HTTP 200，业务 1406010011 invalid timezone_id
+GET .../signin/status?timezone_id=Asia/Shanghai    → ✅ 正常返回面板
+```
+
+只有 **IANA 时区名**有效；`8` / `+8` / `28800` / `Shanghai` **全部被拒**。
+**注意它 HTTP 仍是 200**——只看状态码会误判成功。
+
+**数据模型（与逆向一致）**：`days[]` 里 `is_today=true` 且 `status=3(Claimed)` 即今日已领，
+`status=2(Claimable)` 才能领。已签判定以服务端为准（台账可能漏记，但不重复领取）。
+
+**实测**：9-26 00:0x 首次 `auto` 领到 `day_no=4, points=1000`（连签第 4 天奖励，与
+「第 4、7 天各 +1000」一致），`claim_result=1`；复跑返回 `[already] 不重复领取`，幂等通过。
+CLI 集成 `credit checkin --only minimax` → `[skipped] 今日已签`。
+
+`catalog.yaml` 已改：`claim_mode: external` + `command` 指向该脚本。
+
 ## 下一步
 
 1. **[已完成]** 修 `ui_claim_minimax.ps1`：点击目标从「今天」标签改为真正的按钮「签到得@400」（y≈1882）；
@@ -158,3 +188,101 @@ async claimSignin()    { let {data:e} = await <axios>.post("/minimax-cloud/api/v
    **需要主人明确授权才做**。
 5. 稳定性观察：OCR 点击依赖窗口在前台、依赖 OCR 识别率。建议先连跑 3 天，
    出现 ≥1 次 pending 就退回 `manual` + 人工兜底。
+
+## 六、2026-09-27 崩溃诊断（重要）
+
+现象：MiniMax 客户端"打开瞬间关掉"。经系统排查，已排除脚本/提权/窗口枚举/单实例锁/GPU/WebGPU 假设。
+
+实测排除：
+- runas 提权启动 → 瞬间自退；改回 open 普通用户 → 同样启动即退（ShellExecuteW ret:42 启动成功，但 15–25s 后 tasklist 无 MiniMax 进程）
+- %APPDATA%\MiniMax 下无 SingletonLock 残留
+- 加 `--disable-gpu` / `--disable-features=WebGPU` → 仍启动即退
+
+关键证据：
+- `logs/main-09-27.log`：主进程启动到 01:10:37.053 截断（窗口已注册 type=archon），随后进程消失；无 error/gpu fatal 日志
+- `Crashpad/reports` 与 `metadata` 均空 → 无 crash dump
+- `observability-outbox.jsonl` 的 `app.startup_performance_summary`：启动 4s 完成、surface_to_visible_ms=72.3（窗口曾可见），随后崩溃
+- 客户端崩溃前几秒能正常登录并调 signin/status（api-09-27.log, hasBearer:true）
+
+结论：MiniMax 3.0.73 在用户当前环境（Windows 10.0.26200 / Ryzen 5700X3D / GPU acceleration enabled / WebGPU(Dawn) 渲染）启动完成、窗口闪现后数秒内崩溃退出，无 dump，根因需 MiniMax 侧分析。
+
+影响：客户端不稳定 → OCR 路线（需窗口）与 external 路线（auth.json 的 accessToken 已于 2026-09-26 00:24 过期，客户端又跑不起来刷不到新 token）都受阻。MiniMax 当前无法自动签到。
+
+待修：清 %APPDATA%\MiniMax 缓存（GPUCache/DawnWebGPUCache/DawnGraphiteCache/Cache/Code Cache/blob_storage/Session Storage，保留 Local Storage/Network/Cookies/Preferences）或覆盖重装，验证客户端能否稳定。
+
+## 七、2026-10-02 双窗口根因（已闭环）+ OAuth2 token 刷新端点
+
+### 7.1 「黑屏窗口与正常窗口共存」到底是什么
+
+取证方法：杀掉进程后用**非提权**计划任务拉起客户端（`RunLevel=Limited` + `InteractiveToken`），
+Python(ctypes) 从启动前开始每 0.3s 采样所有 MiniMax 顶层窗口的
+`class / title / rect / IsWindowVisible / WS_VISIBLE / DWM cloaked / PrintWindow 渲染色数`。
+产物：`logs/_mm_timeline.txt`、`logs/_mm_allwins.txt`。
+
+冷启动时序（同一 MAIN 进程 pid）：
+
+| 时刻 | 事件 |
+|---|---|
+| t=0.0–0.8s | MAIN 进程已起，**窗口数 = 0** |
+| t=1.3s | `Chrome_WidgetWin_0` 出现，`1440x756`（物理 2880x1512），`Vis=0`，PrintWindow **单色纯黑** |
+| t=2.1s | `Chrome_WidgetWin_1` 出现，标题 `MiniMax Code`，`Vis=1`，渲染色数 11 → t=3.9s 涨到 35 |
+
+结论：**这是 Electron 主进程创建的两个 BrowserWindow，同属一个 pid**，
+所以任何「按 pid 枚举窗口」的自动化都会同时看到它们。黑窗口比真身早约 0.8s 出现。
+
+那个 `Chrome_WidgetWin_0` 不是常驻隐藏的死窗口，而是**活动/推广浮层窗口**，状态随时变化——
+`logs/minimax_windows.txt` 的历史记录直接证明：
+
+| 时刻 | `Chrome_WidgetWin_0` 状态 |
+|---|---|
+| 2026-09-30 07:13（冷启动瞬间） | 扫描结果里**只有它**，真身尚未创建 |
+| 2026-09-30 23:17 | `visible=False blank=True`（隐藏、纯黑） |
+| **2026-09-30 23:21 / 23:24 / 23:26** | **`visible=True blank=False`，2880x1511（近满屏）** |
+
+也就是说，主人看到的两个现象是**同一个窗口的不同阶段**：
+- 「全黑画面的窗口」= 该窗口刚被 show、WebContents 还没完成首绘；
+- 「广告遮盖了整个窗口」= 同一窗口渲染完成后的推广内容（宽 2880 = 满屏宽）。
+
+### 7.2 代码侧修复
+
+`scripts/ui_claim_minimax.ps1` 的 `Find-AppWindow` 原 fallback 在 90s 超时后会退化成
+「不要求标题」的查找，冷启动早期只有黑窗口存在时会锁死它 → 之后所有点击坐标整体偏移，
+表现为「点击被吞掉」。已改为：
+
+- 无标题且渲染为纯色的窗口 **score = 0，永不入选**；
+- `if ($best.score -le 0) { return [IntPtr]::Zero }` —— 只有黑窗口时拒绝返回，继续等待；
+- 有标题但抓图失败的窗口仍保留 score 4/1，避免真身被 `Test-WindowBlank` 的保守兜底误杀。
+
+### 7.3 不依赖 UAC、不要求客户端常驻的两条路
+
+**(A) 临时拉起客户端（已验证可行）**
+注册 `RunLevel=Limited`（非提权）+ `LogonType=Interactive` 的计划任务，Action 直接执行
+`C:\Users\Hunter\AppData\Local\Programs\MiniMax Code\MiniMax Code.exe`，
+`Start-ScheduledTask` 即可拉起 —— **不弹 UAC**（实测 procs 从 0 → 7）。
+签到完 `Stop-Process` 收掉，不需要常驻。
+注意：沙箱会话里 `Start-Process` 拉 GUI 无效（procs=0），必须走计划任务。
+
+**(B) 纯脚本刷新 token（端点已挖到，未实机刷新）**
+`app.asar` 内常量：`MCODE_OAUTH_CLIENT_ID = 'mcode-public'`、`audience = 'agent-backend'`；
+端点配置：`https://account.minimax.cn`（prod/cn）下
+`/oauth2/device/code`、`/oauth2/token`、`/oauth2/revoke`。
+
+凭据文件 `C:\Users\Hunter\.minimax\auth\prod\cn\mcode-public\auth.json` 里有**明文**
+`accessToken` + `refreshToken` + `clientId` + `expiresAtMs`（`generation` 已到 50，
+说明客户端在持续刷新）。accessToken 有效期约 1 小时 —— 这就是「客户端不常驻就刷不到
+新 token」的根因。
+
+零风险探测结果（用无效 refresh_token，不会作废真实凭据）：
+
+```
+POST https://account.minimax.cn/oauth2/token   (json 与 form 两种 Content-Type 均一致)
+  -> 400 {"error":"invalid_grant","error_description":"this refresh token can no longer be used, start a new authorization"}
+POST https://account.minimax.cn/oauth2/device/code
+  -> 400 {"error":"invalid_request","error_description":"valid S256 PKCE is required"}
+```
+
+端点确认为标准 OAuth2。用真实 `refresh_token` 即可换取新 accessToken，**全程不需要客户端**。
+
+⚠️ 待主人定夺，不要擅自执行：错误文案暗示 refresh token **轮换**（旧 token 刷新后作废），
+因此刷新成功后必须把新 token 写回 `auth.json`，否则客户端下次刷新会失败（掉登录）。
+写入前应先备份该文件。这条路线属凭据操作，按本文件第四节第 4 条仍需主人明确授权。

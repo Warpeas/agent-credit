@@ -12,10 +12,10 @@
 
 ```
 scripts/gen_research_prompts.py
-        │  从 catalog.yaml 生成定制 prompt
+        │  生成通用 prompt + 各家答案模板
         ▼
-research/prompts/<id>.md
-        │  整段粘进对应软件的对话框
+research/prompts/UNIVERSAL.md
+        │  整段粘进目标客户端的对话框（一次一家）
         ▼
   该软件按 SCHEMA 回答
         │  存进 research/answers/<id>.md
@@ -27,10 +27,10 @@ research/prompts/<id>.md
 
 | 路径 | 作用 |
 |---|---|
-| `scripts/gen_research_prompts.py` | 生成器。改了 catalog 后重跑，prompt 会带上最新已知信息 |
+| `scripts/gen_research_prompts.py` | 生成器。改了 catalog 后重跑，速查表会带上最新路径与额度 |
 | `scripts/check_research_answers.py` | 入库前校验：填了没 + 有没有 token 明文。发现疑似明文 exit 1 |
-| `research/prompts/<id>.md` | 每家一份，粘进它自己的对话框 |
-| `research/answers/<id>.md` | 答案存放处。**已存在的不会被生成器覆盖** |
+| `research/prompts/UNIVERSAL.md` | **只有一份**。通用探索流程 + 本机安装目录速查表，粘进任意一家客户端 |
+| `research/answers/<id>.md` | 答案存放处，**按家分文件**。已存在的不会被生成器覆盖 |
 | `research/ANSWER-SCHEMA.md` | 答案格式规范，独立一份方便随时对照 |
 
 ## 回填规矩
@@ -60,7 +60,8 @@ research/prompts/<id>.md
 
 ## 优先级
 
-按额度 × 缺口排，`research/prompts/` 里的生成顺序即优先级：
+按额度 × 缺口排，`gen_research_prompts.py` 里的 `RESEARCH_IDS` 顺序即优先级
+（答案文件按这个顺序生成，速查表也按这个顺序排）：
 
 1. `minimax` — 400/天，全靠手签，最大缺口
 2. `autoclaw` — 200/天，OCR 入口定位已失效

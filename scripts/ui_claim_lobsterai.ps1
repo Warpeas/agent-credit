@@ -25,10 +25,13 @@ public static class L32 {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr hAfter, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int n);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdcBlt, uint nFlags);
@@ -58,6 +61,13 @@ $frameDir='C:\Users\Hunter\Documents\Warpeas\agent-credit\logs'
 function Get-PidSet { $s=@{}; Get-Process $AppProcess -ErrorAction SilentlyContinue | ForEach-Object { $s[[uint32]$_.Id]=$true }; return $s }
 
 function Find-AppWindow($pids) {
+    # 2026-10-04 取证结论（logs/_lobster_windows.json）：
+    #   LobsterAI 同一 pid(9780) 下同时存在两个 BrowserWindow，与 MiniMax 同构。
+    #     hwnd 1050762  Chrome_WidgetWin_0  title=""                392,392 2880x1511  纯黑 RGB(0,0,0)
+    #     hwnd 1311006  Chrome_WidgetWin_1  title="LobsterAI"     158,0   1964x1216  正常内容
+    #   黑窗面积 4.35M > 真身 2.39M —— 旧实现"按面积取最大"必然选中黑窗，
+    #   导致 PrintWindow 抓到全黑、坐标全错、点击落到屏幕外，表现为 no claim path worked。
+    # 修复：先按硬条件过滤（可见 + 有标题 + 非 WidgetWin_0），再按面积取最大。
     $script:BestHwnd=[IntPtr]::Zero; $script:BestArea=0
     if($pids.Count -eq 0){ return [IntPtr]::Zero }
     $cb=[L32+EnumProc]{
@@ -66,7 +76,20 @@ function Find-AppWindow($pids) {
         if($pids.ContainsKey($o)){
             $r=New-Object L32+RECT; [L32]::GetWindowRect($h,[ref]$r)|Out-Null
             $w=$r.Right-$r.Left; $hh=$r.Bottom-$r.Top
-            if($w-gt 500 -and $hh -gt 400 -and ($w*$hh) -gt $script:BestArea){ $script:BestHwnd=$h; $script:BestArea=$w*$hh }
+            if($w -le 500 -or $hh -le 400){ return $true }
+            # 硬条件 1：必须可见。黑窗冷启动瞬间可能 visible，过一会自己隐藏；
+            # 这里只挡"始终不可见"的那些，真正靠条件 2/3 区分。
+            if(-not [L32]::IsWindowVisible($h)){ return $true }
+            # 硬条件 2：必须有非空标题。真身标题恒为 "LobsterAI"，
+            # Chrome_WidgetWin_0 / IME / Base_PowerMessageWindow 全是空标题。
+            $sb=New-Object System.Text.StringBuilder 256
+            [L32]::GetWindowText($h,$sb,256)|Out-Null
+            if([string]::IsNullOrWhiteSpace($sb.ToString())){ return $true }
+            # 硬条件 3：显式排除 Chromium 的辅助窗口类。
+            $cn=New-Object System.Text.StringBuilder 256
+            [L32]::GetClassName($h,$cn,256)|Out-Null
+            if($cn.ToString() -eq 'Chrome_WidgetWin_0'){ return $true }
+            if(($w*$hh) -gt $script:BestArea){ $script:BestHwnd=$h; $script:BestArea=$w*$hh }
         }
         return $true
     }
@@ -117,7 +140,27 @@ if($hwnd -eq [IntPtr]::Zero){
 if($hwnd -eq [IntPtr]::Zero){ $hwnd = Find-ByTitle; if($hwnd -ne [IntPtr]::Zero){ Log ("found by title hwnd="+$hwnd) } }
 if($hwnd -eq [IntPtr]::Zero){ Restore-Scene; Log "NO WINDOW"; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"notfound","detail":"no main window"}',(New-Object System.Text.UTF8Encoding($false))) } exit 1 }
 
-[void][L32]::ShowWindow($hwnd,9); Start-Sleep -Milliseconds 400; [void][L32]::SetForegroundWindow($hwnd); Start-Sleep -Milliseconds 700
+# 2026-10-03: 冷启动会把窗口恢复到 (441,441) 2880x1511 —— 右下角 (3321,1952) 远超
+# 屏幕 2880x1800，大半内容落在屏幕外。表现是 OCR 只看到 10 行、侧栏底部永远不出现，
+# ready 判定卡死 2 分钟然后 "no claim path worked"。窗口越界就强制拉回屏幕内。
+$sw=[L32]::GetSystemMetrics(0); $sh=[L32]::GetSystemMetrics(1)
+function Reset-WindowRect {
+    param([IntPtr]$h)
+    $rr=New-Object L32+RECT; [L32]::GetWindowRect($h,[ref]$rr)|Out-Null
+    $rx=$rr.Left; $ry=$rr.Top; $rw=$rr.Right-$rr.Left; $rh=$rr.Bottom-$rr.Top
+    if($rw -le 0 -or $rh -le 0){ return $false }
+    $over = ($rx -lt 0) -or ($ry -lt 0) -or (($rx+$rw) -gt $sw) -or (($ry+$rh) -gt $sh)
+    if(-not $over){ return $false }
+    $nw=[Math]::Min($rw,$sw); $nh=[Math]::Min($rh,$sh)
+    Log ("rect offscreen: "+$rx+","+$ry+" "+$rw+"x"+$rh+" (screen "+$sw+"x"+$sh+") -> move to 0,0 "+$nw+"x"+$nh)
+    [void][L32]::SetWindowPos($h,[IntPtr]::Zero,0,0,$nw,$nh,0x0004)  # SWP_NOZORDER
+    Start-Sleep -Milliseconds 600
+    return $true
+}
+
+[void][L32]::ShowWindow($hwnd,9); Start-Sleep -Milliseconds 400
+[void](Reset-WindowRect $hwnd)
+[void][L32]::SetForegroundWindow($hwnd); Start-Sleep -Milliseconds 700
 $r=New-Object L32+RECT; [L32]::GetWindowRect($hwnd,[ref]$r)|Out-Null
 $winX=$r.Left; $winY=$r.Top; $winW=$r.Right-$r.Left; $winH=$r.Bottom-$r.Top
 Log ("RECT="+$winX+","+$winY+" "+$winW+"x"+$winH)
@@ -289,7 +332,16 @@ while((Get-Date) -lt $dl2){
     $loading=$false
     foreach($l in $lines){ if($l.text -match '启动中|正在启动|％|%$|加载中'){ $loading=$true; break } }
     Log ("poll lines="+$lines.Count+" loading="+$loading)
-    if(-not $loading -and $lines.Count -gt 5){ $ready=$true; break }
+    # Not loading is NOT enough: on 2026-10-01 the sidebar rendered only its top
+    # half (21 lines, nothing below y=433), so the bottom-left user bar was
+    # missing and the claim path was skipped entirely. Keep polling until the
+    # sidebar's bottom shows up -- that is the element we actually click.
+    if(-not $loading -and $lines.Count -gt 5){
+        foreach($l in $lines){
+            if($l.x -lt ($winW*0.20) -and $l.y -gt ($winH*0.75)){ $ready=$true; break }
+        }
+        if($ready){ break }
+    }
 }
 Log ("ready="+$ready)
 [void](Dismiss-Ads)
@@ -364,8 +416,81 @@ Ensure-Foreground
 [void](Dismiss-Ads)
 $lines = Get-OcrLines $shotPath
 
+# --- Path C (preferred; user-confirmed 2026-10-01) ---
+# The top-right "每日积分礼" chip is ITSELF a claim entry -- clicking it opens
+# the claim directly, no need to expand the bottom-left user panel first (that
+# panel's OCR came back empty twice tonight, which killed the run). The daily
+# gift is NOT served by the client-activities API (slot is always empty), so the
+# UI really is the only route. Prefer this chip before the panel path.
+$chip=$null
+# A cold-started client has not synced its signed-in state yet: on 2026-10-02 the
+# sidebar was fully drawn (23 lines, ready=True) but the 每日积分礼 chip was simply
+# absent, so every claim path had nothing to act on. Wait for the chip to appear.
+$chipDl=(Get-Date).AddSeconds(75)
+while((Get-Date) -lt $chipDl){
+    foreach($l in $lines){
+        if($l.text -match '积分礼' -and $l.x -gt ($winW*0.45)){
+            if($null -eq $chip -or $l.x -gt $chip.x){ $chip=$l }
+        }
+    }
+    if($chip){ break }
+    Start-Sleep -Seconds 8
+    $lines = Get-OcrLines ""
+}
+Log ("gift chip wait: " + $(if($chip){ "found '"+$chip.text+"'" } else { "NOT FOUND" }))
+if($chip){
+    $gx=$chip.x+[int]($chip.w/2); $gy=$chip.y+[int]($chip.h/2)
+    Log ("top-right gift chip '"+$chip.text+"' at "+$gx+","+$gy)
+    Click-At $gx $gy
+    $ci=0
+    foreach($delay in @(1500,2000,2500)){
+        Start-Sleep -Milliseconds $delay
+        $ci++
+        $cap = Get-OcrLines ($frameDir+"\lobsterai_chip"+$ci+".png")
+        $dump = ($cap | ForEach-Object { $_.text+"@"+$_.x+","+$_.y }) -join " | "
+        Log ("chip"+$ci+": "+$dump.Substring(0,[Math]::Min(400,$dump.Length)))
+        $chipBtn=$null; $chipDone=$null
+        foreach($l in $cap){
+            if(-not $chipDone -and $l.text -match '今日已领|已领取|本期已完成'){ $chipDone=$l }
+            if(-not $chipBtn -and $l.text -match '立即领取'){ $chipBtn=$l }
+        }
+        if($chipDone){
+            Log ("chip already: "+$chipDone.text); Close-LaunchedApp
+            if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"already","detail":"'+$chipDone.text+'"}',(New-Object System.Text.UTF8Encoding($false))) }
+            exit 0
+        }
+        if($chipBtn){
+            $bx3=$chipBtn.x+[int]($chipBtn.w/2); $by3=$chipBtn.y+[int]($chipBtn.h/2)
+            Log ("click chip claim btn '"+$chipBtn.text+"' at "+$bx3+","+$by3)
+            Click-At $bx3 $by3
+            foreach($d2 in @(2000,2500)){
+                Start-Sleep -Milliseconds $d2
+                $f = Get-OcrLines ""
+                $chipHit=$null; $btnGone=$true
+                foreach($l in $f){
+                    if($l.text -match '立即领取'){ $btnGone=$false }
+                    if(-not $chipHit -and $l.text -match '今日已领|已领取|领取成功|成功'){ $chipHit=$l }
+                }
+                if($chipHit -or $btnGone){
+                    $d = if($chipHit){ $chipHit.text } else { "chip 领取按钮消失，判定已领取" }
+                    Log ("chip ok: "+$d); Close-LaunchedApp
+                    if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"ok","detail":"'+$d+'"}',(New-Object System.Text.UTF8Encoding($false))) }
+                    exit 0
+                }
+            }
+            break
+        }
+    }
+}
+
 $bar=$null
 foreach($l in $lines){ if($l.x -lt ($winW*0.15) -and $l.y -gt ($winH*0.80)){ $bar=$l; break } }
+if(-not $bar){
+    # Same fallback the verify path already uses: the user bar sits at a fixed
+    # spot at the bottom-left. Better to click the known coordinate than to give
+    # up and lose the day's claim over one missed OCR line.
+    $bar = @{ text="(fallback)"; x=[int]($winW*0.03); y=[int]($winH*0.93); w=140; h=44 }
+}
 
 $claimBtn=$null; $alreadyHit=$null
 if($bar){

@@ -15,10 +15,6 @@ calendar:
     account: joycode
     date: "2026-10-16"
     note: "JoyCode 10000 积分到期，确认是否续期"
-  - id: qclaw_monthly
-    account: qclaw
-    date: "monthly-01"
-    note: "QClaw 每月登录领 500（不自动启动客户端）"
 
 accounts:
   - id: workbuddy
@@ -42,6 +38,14 @@ accounts:
     open_when_needed: false
     notes: "API 直签（vendor/workbuddy-auto-signin，MIT），稳定可靠。早期记录称「客户端模拟点击被 isTrusted 过滤」，该结论只适用于 UIA InvokePattern 路线，未经 OS 级注入复测；既然 external 可用，不做 UI 路线。auto 附带成长中心（派 Buddy/盲盒/任务）。"
     models_note: "混元、DeepSeek、GLM、Kimi、MiniMax"
+    rating:
+      value: 4
+      capability: 4
+      automation: 5
+      review: "额度不算最高但最省心：external 直签零交互，30 天有效期够攒，7 天连签再加 1000。混元/DeepSeek/GLM/Kimi/MiniMax 多模型可选，办公文档链路完整。"
+      best_for: "日常编码主力 + 腾讯文档/办公场景"
+      owner_note: ""
+
 
   - id: minimax
     name: MiniMax Code
@@ -53,17 +57,29 @@ accounts:
     validity_days: 30
     cap: null
     claim_policy: always
+    # external 直签为主路线（无 GUI、无 UAC、不受客户端广告影响）；claim_mode=ui
+    # 保留为 token 过期时的兜底（checkin.py 里 external 失败会回退 UI）。
     claim_mode: ui
-    command: ""
+    command: '"C:\Users\Hunter\.workbuddy\binaries\python\versions\3.13.12\python.exe" "C:\Users\Hunter\Documents\Warpeas\agent-credit\vendor\minimax-auto-signin\signin.py" auto'
     streak:
       cycle_days: 7
       bonus_on: [4, 7]
       bonus_amount: 1000
       mode: set_daily
     capabilities: [coding, multimodal]
+    mobile: true
+    mobile_note: "能看到桌面端的项目并继续对话（比 AutoClaw 移动端强）；模型同样只有 MiniMax 自家"
     open_when_needed: false
-    notes: "签到卡在主页左下角（每日签到/今天@400/第4天@1000）。【2026-09-26 起改为 external 直签：全自动、不依赖客户端运行、不开窗口】端点 GET/POST /minimax-cloud/api/v1/signin/{status,claim}，host=https://agent.minimax.cn，鉴权 Authorization: Bearer（读本机明文凭据 C:\\Users\\Hunter\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json；token 不进命令行、不进日志、不进输出）。**必须带 timezone_id=Asia/Shanghai**：缺失时 HTTP 仍 200 但业务返回 1406010011 invalid timezone_id；只有 IANA 名有效，8 / +8 / 28800 / Shanghai 全被拒。已签判定用 days 里 is_today 且 status=3(Claimed)，以服务端为准不重复领取（2026-09-26 实测幂等）。【2026-09-27 修正·最终】弃用 UI 路线的旧理由「无法冷启动（只起 updater.exe、主进程不出现）」已被实测推翻；而更早的「打开瞬间关掉/客户端崩溃」是**沙箱内的假象**——在沙箱里用 ShellExecuteW 拉起的进程会在沙箱命令返回后被回收（误判为崩溃），**客户端本身不崩**。真实约束：本自动化会话只能以 runas（提权）拉起 GUI 客户端，非提权从会话启动根本不起进程（与 TraeWork/AutoClaw 同一套路；每次 runas 弹一次 UAC，需主人批准，漏批则静默失败）。真正的大坑是**冷启动渲染延迟**：全新拉起的（提权）MiniMax 主窗口最初是白屏，要等约 12s 内容才渲染出来，过早 OCR/截图只会看到标题栏而找不到「每日签到」卡。修复：窗口出现后 `Start-Sleep 12` 再 OCR/点击（与 GPU、WebGPU 无关，`--disable-gpu` 无效已移除）。external 直签仍被过期 token 阻断（expiresAt 2026-09-26 00:24、无刷新端点记录）；UI/OCR 路线现已可用（2026-09-27 实测 ok 并入账 400）。失效条件：token 过期（脚本会打印剩余小时）、端点改路径、timezone 校验变更、UAC 漏批导致启动失败。此前「isTrusted 过滤」只对 UIA InvokePattern 成立，OS 级注入与 external 都不受影响，不要再拿它当否决理由。"
+    notes: "签到卡在主页左下角（每日签到/今天@400/第4天@1000）。【2026-09-26 起改为 external 直签：全自动、不依赖客户端运行、不开窗口】端点 GET/POST /minimax-cloud/api/v1/signin/{status,claim}，host=https://agent.minimax.cn，鉴权 Authorization: Bearer（读本机明文凭据 C:\\Users\\Hunter\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json；token 不进命令行、不进日志、不进输出）。**必须带 timezone_id=Asia/Shanghai**：缺失时 HTTP 仍 200 但业务返回 1406010011 invalid timezone_id；只有 IANA 名有效，8 / +8 / 28800 / Shanghai 全被拒。已签判定用 days 里 is_today 且 status=3(Claimed)，以服务端为准不重复领取（2026-09-26 实测幂等）。【2026-09-27 修正·最终】弃用 UI 路线的旧理由「无法冷启动（只起 updater.exe、主进程不出现）」已被实测推翻；而更早的「打开瞬间关掉/客户端崩溃」是**沙箱内的假象**——在沙箱里用 ShellExecuteW 拉起的进程会在沙箱命令返回后被回收（误判为崩溃），**客户端本身不崩**。真实约束：本自动化会话只能以 runas（提权）拉起 GUI 客户端，非提权从会话启动根本不起进程（与 TraeWork/AutoClaw 同一套路；每次 runas 弹一次 UAC，需主人批准，漏批则静默失败）。真正的大坑是**冷启动渲染延迟**：全新拉起的（提权）MiniMax 主窗口最初是白屏，要等约 12s 内容才渲染出来，过早 OCR/截图只会看到标题栏而找不到「每日签到」卡。修复：窗口出现后 `Start-Sleep 12` 再 OCR/点击（与 GPU、WebGPU 无关，`--disable-gpu` 无效已移除）。external 直签仍被过期 token 阻断（expiresAt 2026-09-26 00:24、无刷新端点记录）；UI/OCR 路线现已可用（2026-09-27 实测 ok 并入账 400）。失效条件：token 过期（脚本会打印剩余小时）、端点改路径、timezone 校验变更、UAC 漏批导致启动失败。此前「isTrusted 过滤」只对 UIA InvokePattern 成立，OS 级注入与 external 都不受影响，不要再拿它当否决理由。【2026-09-30 · 国庆活动推广干扰 UI 路线】客户端在 9.28-10.07 展示活动推广，其文案同时含「每日签到」与「领取」，曾劫持锚点/按钮识别、点进广告正文 (614,658)。已加固：锚点与按钮搜索限定左侧栏 (x<600) 且文本长度上限 12/16。更麻烦的是该推广层会吞掉点击（点击后连续三帧画面与按钮文案完全不变），ESC 与广告右上候选关闭点均无法关闭，UI 路线当日实际不可用。故将 external 直签设为主路线：token 有效时无 GUI、无 UAC、不受推广层影响；token 过期时 checkin.py 回退 UI。今日最终由 external 领取 800（第 1 天 / bonus 400），连签 5。"
     models_note: "MiniMax-M3 / M2.7 / H3"
+    rating:
+      value: 5
+      capability: 4
+      automation: 5
+      review: "可累积额度里的天花板：400/天，第 4、7 天当日 1000，30 天有效期。external 直签无 GUI 无 UAC，不受客户端活动推广干扰，是当前唯一完全无感的路线。模型限于 MiniMax 自家（M3/M2.7/H3），多模态是加分项。"
+      best_for: "高频重度使用、多模态任务；移动端可续桌面端的对话"
+      owner_note: "有移动端，能看到桌面端的项目并继续对话（这点比 AutoClaw 强，后者移动端是另一套环境、项目不同步）。模型两端都只有 MiniMax 自家（M3/M2.7/H3）。"
+
 
   - id: traework
     name: TraeWork
@@ -82,6 +98,14 @@ accounts:
     open_when_needed: false
     notes: "【2026-09-28 起改全自动：claim_mode=ui，由每日计划任务提权跑 scripts/ui_claim_traework.ps1（OCR 定位+点击，9-27 实测 +150 成功）；签完只关闭本次由脚本拉起的实例，主人已开着的保留】TraeWork(TRAE SOLO CN) 与 TraeCode(Trae CN) 是同一套签到：out\\main.js 大小只差 3 字节，共用 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}），主人已确认两者共享积分账户 -> 台账只保留 traework，不新增 traecode，避免重复计数。【规则 2026-09-26 双方自述 + 官方页确认】免费 150/天、会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么是 manual】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按硬规则 6 不解密 -> external 拿不到凭据；本环境冷启动两个客户端都失败（ShellExecuteW 返回 42 但 45s 无进程）-> UI 路线也不可全自动；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且**每次运行自身消耗积分**，日收益 150 未必覆盖，故未启用。入口：桌面端左下角头像 → 菜单「签到」按钮（云端开关 checkinMenuEnabled 控制，网页/手机端无入口）。【OCR 脚本 2026-09-27 实测成功】scripts/ui_claim_traework.ps1 + run_traework_claim.py（提权 runas，--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。**提权才能冷启动客户端**（未提权 ShellExecuteW 起不来，推翻此前"必须手动打开"结论）。四个实测坑：①签到按钮文案是「每日领150积分」不是「签到」，且 OCR 拆成单字（每/日/领/150/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③「每日领150积分」是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏 ~380px（窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「会员¥39」推广卡片。已签态文案「本账号今日已签到，明日再来」。2026-09-27 实测 ok 并入账 150。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。"
     models_note: "16+ 模型，CUE / MCP"
+    rating:
+      value: 3
+      capability: 4
+      automation: 3
+      review: "额度中等（150/天）但 31 天有效期 + 每月登录赠 500，16+ 模型与 MCP 支持是优势。领取靠提权 UI + OCR 点击，窗口改版即失效，是五家里最脆的一环。与 TraeCode 共用同一积分账户，别重复计数。"
+      best_for: "需要多模型切换、MCP 工具链的编码任务"
+      owner_note: ""
+
 
   - id: autoclaw
     name: AutoClaw 智谱
@@ -96,9 +120,19 @@ accounts:
     claim_mode: ui
     command: ""
     capabilities: [coding, local]
+    mobile: true
+    mobile_note: "与桌面端项目不同步，是独立的云端 claw 环境；模型与桌面端一致，同为智谱 GLM 系列"
     open_when_needed: false
     notes: "2026-09-24 自述调研（v1.19.0，端点自 resources/app.asar 反编译，已本机复核命中）：签到是任务体系，task_id='daily_signin'，端点 /autoclaw-proxy/proxy/autoclaw-task-{list,complete}，host=autoglm-acceleration-api.zhipuai.cn，鉴权 X-Auth-Appid/TimeStamp/Sign + Bearer。token 在 C:\\Users\\Hunter\\AppData\\Roaming\\autoclaw\\auth.json 为 safeStorage 加密（enc: 前缀），external 直调需解密登录态 -> 否决。首页「每日签到」横幅受实验开关 show_checkin_banner 控制（defaultValue off，生产默认不展示），点击只打开「灵感中心」视图，签到动作在灵感中心任务卡片里（i18n：标题「每日签到」/ 副「赚 {{points}} 分/天」/ 已完成「已完成」）。横幅 onClick 是普通 React 事件，无 isTrusted 校验 -> OCR 点击路线可行，此前长期 pending 是入口定位与加载等待问题，不是被过滤。失效条件：v1.19.0 改版、端点改路径、或横幅开关改为默认 on。额度/连签/有效期由服务端下发，代码无硬编码（reliability: 未实测）。2026-09-24 提权实测跑通：入口 = 侧边栏「灵感与活动」→ 赚积分任务首卡「每日签到」→ 卡片内黑色「签到」按钮；已签态 OCR 文案为「已完成 / 已签到N天」，幂等判定靠它；脚本在 ok/already 分支会 taskkill 客户端。日额度 200 主人已确认（卡片副标题「签到得@20 积分」是显示/OCR 误差）。积分并非永久：客户端曾提示「152 积分将于 3 天内到期」，与 points/expiring 端点吻合，但整体有效期天数仍由服务端下发，validity_days 保持 null。"
-    models_note: "Pony-Alpha-2 / GLM / DeepSeek / Kimi / MiniMax"
+    models_note: "GLM 系列（智谱）【2026-10-03 主人更正：桌面端与移动端都只有 GLM，旧记录 Pony-Alpha-2/DeepSeek/Kimi/MiniMax 有误】"
+    rating:
+      value: 4
+      capability: 2
+      automation: 2
+      review: "200/天可累积，本地执行能力全，有思考过程。但模型只有智谱 GLM 一家（旧记的五模型池是错的），场景覆盖窄；签到藏在灵感中心任务卡里靠 OCR 定位，首页横幅还受服务端开关控制，随时可能定位不到；实测资源时常紧张。有效期由服务端下发、台账无法确定。"
+      best_for: "只用 GLM 就够、需要本地执行能力的场景；资源紧张时段别指望它"
+      owner_note: "有思考过程（早先记的『不输出思考情况』是误记，已更正）。但资源容易紧张，实际用起来不太好用。**桌面端和移动端都只有 GLM 模型**——旧记录写的 Pony-Alpha-2/DeepSeek/Kimi/MiniMax 多模型池是错的。移动端还不与桌面端项目同步，给的是独立的云端 claw 环境。"
+
 
   - id: lobsterai
     name: LobsterAI
@@ -116,6 +150,14 @@ accounts:
     open_when_needed: false
     notes: "【2026-09-27 UI 路线打通，claim_mode 改 ui】入口=主窗口右上角「每日积分礼」卡（2316x1442 窗口内 x≈2056,y≈109）。流程：runas 拉起 → 等窗口出现 → 轮询 OCR 直到无『启动中/％』（AI 引擎冷启动约 20s）→ 点卡片 → 多帧捕获（1.5/2/2.5s，期间禁止 SetForegroundWindow，会把弹层关掉）→ 点「立即领取/领取/签到」→ 验证「今日已领/已领/成功」。实测关键结论（2026-09-28 修正）：①【签到反馈信号】此 UI 没有「今日已领」文字——成功=用户面板里「立即领取」按钮消失+积分额度上涨（实测 00:25→00:27：1000→1100，正好 +100）；②【首选路径】点左下角「我的」(约 3%宽,95%高) 展开用户面板 → 点面板内「立即领取」（限 x<35% 窗宽，避免误匹配广告）→ 复查按钮消失；右上角卡片时有时无，只作兜底、不能当已领依据（此前「卡片点击后跨重启消失=已领取」的推断是错的，卡片会再出现）；③【广告弹窗】冷启动后可能弹「新用户专享¥0.01 解锁 1000积分」全屏遮罩（即 desktop_startup_modal placement），必须先关——先 ESC，无效则点窗口 (69%宽,27%高) 处的圆形×；④.ps1 必须 UTF-8 带 BOM，否则 PS5.1 按 GBK 读中文正则直接语法错误且零输出——正文含中文就要 BOM，首行 ASCII 注释救不了；⑤【三段式】launch_lobsterai.py（runas 一次 UAC，经 explorer 降权拉起 → app 以普通权限常驻、不随脚本退出而被终止）→ run_lobsterai_claim.py 默认非提权 + -NoLaunch 反复跑 explore/claim/verify → 最后才退出 app。原 external 路线保留备用：2026-09-26 逆向 + 实测：签到是 client-activities 活动体系。host=https://lobsterai-server.youdao.com；槽位 GET /api/client-activities/slot?placement=desktop_sidebar|desktop_startup_modal&clientVersion=1.0.0&containerApiVersion=1&platform=win32；签到 POST /api/client-activities/daily_check_in/actions/check_in；鉴权 Authorization: Bearer，token 在本机明文 %APPDATA%\\LobsterAI\\lobsterai.sqlite 的 kv 表 auth_tokens（脚本内读取，不入命令行与日志）。**当前服务端未下发任何签到活动**：实测 slot 返回 code 0 但 slotState=empty、activity=null（两个 placement 都一样），context 返回 51100 活动不存在——脚本因此报 [no-activity] 并退出码 2，属正常现象不是故障。活动一旦下发即可自动签到，无需改代码。失效条件：host 变更、活动体系改版、sqlite 里 auth_tokens 结构变化。另有一条 /api/credits-reset-campaign/free-credits/claim（需 campaignCode），对应日历里 9-29 到期的 300 赠送，campaignCode 来源尚未找到。"
     models_note: "GPT-4o / Claude / Gemini / DeepSeek 等 10+"
+    rating:
+      value: 2
+      capability: 4
+      automation: 1
+      review: "纸面 100/天、10+ 模型（GPT-4o/Claude/Gemini/DeepSeek）看着香，但服务端当前根本没下发签到活动（slot 返回 empty），external 脚本只能报 no-activity。UI 路线已打通，冷启动 20s + 广告遮罩，实测收益仅 +100。属于占着坑不产粮。"
+      best_for: "活动下发后再评估；当前只作备用"
+      owner_note: ""
+
 
   - id: dumate
     name: DuMate 百度搭子
@@ -132,6 +174,14 @@ accounts:
     capabilities: [search, office, docs]
     open_when_needed: false
     notes: "有领取上限。cap=0 表示尚未测出上限，一期默认不自动领。"
+    rating:
+      value: 4
+      capability: 3
+      automation: 1
+      review: "500/天是全场第二高，但领取上限（cap）始终没测出来，一期不敢自动领。百度系搜索/办公/文档能力，适合资料型任务。只要把 cap 摸清就能进自动盘。"
+      best_for: "搜索资料、文档处理；待摸清上限后启用"
+      owner_note: ""
+
 
   - id: todesk
     name: ToDesk AI
@@ -153,23 +203,14 @@ accounts:
     capabilities: [remote]
     open_when_needed: false
     notes: "有领取上限。cap 未测出前不自动领。"
+    rating:
+      value: 2
+      capability: 2
+      automation: 1
+      review: "100/天 + 7 天连签 600，额度一般且同样卡在 cap 未测出。能力集中在远控，和编码/办公场景几乎不重叠。优先级低。"
+      best_for: "远程协助场景，顺手领"
+      owner_note: ""
 
-  - id: qclaw
-    name: QClaw 小龙虾
-    aliases: [小龙虾]
-    vendor: 腾讯电脑管家
-    unit: credit
-    grant_type: monthly
-    daily_amount: 0
-    monthly_amount: 500
-    validity_days: 30
-    cap: null
-    claim_policy: monthly
-    claim_mode: never
-    command: ""
-    capabilities: [remote, local]
-    open_when_needed: true
-    notes: "每月登录即领，不自动启动。"
 
   - id: joycode
     name: JoyCode 京东
@@ -186,6 +227,14 @@ accounts:
     command: ""
     capabilities: [coding]
     open_when_needed: true
+    rating:
+      value: 4
+      capability: 3
+      automation: 1
+      review: "一次性 10000 积分，量很大但 10-16 到期，属于有死期的存量。京东云系，编码能力。当前策略是永不自动、用时再开。"
+      best_for: "到期前集中消耗，别放着烂掉"
+      owner_note: ""
+
 
   - id: kimi
     name: Kimi Work
@@ -203,6 +252,14 @@ accounts:
     capabilities: [office, docs]
     open_when_needed: true
     models_note: "Kimi K3 / 100万上下文"
+    rating:
+      value: 3
+      capability: 4
+      automation: 1
+      review: "周期制额度（下次重置 10-14），Kimi K3 + 100 万上下文是长文档场景的独门优势。不自动领，按周期重置。"
+      best_for: "超长文档阅读、办公写作"
+      owner_note: ""
+
 
   - id: catpaw
     name: CatPaw 美团
@@ -219,6 +276,14 @@ accounts:
     capabilities: [coding]
     open_when_needed: true
     notes: "新用户 1000，无每日签到。"
+    rating:
+      value: 2
+      capability: 3
+      automation: 1
+      review: "新用户 1000 一次性，365 天有效期，美团系编码产品。没有每日签到，领完就没有后续产出。"
+      best_for: "一次性消耗完即可"
+      owner_note: ""
+
 
   - id: mavis
     name: Mavis 腾讯
@@ -235,6 +300,14 @@ accounts:
     capabilities: [coding, office, local, remote]
     open_when_needed: true
     notes: "登录即领 1000 万 Token，当日清零。用时再开。"
+    rating:
+      value: 4
+      capability: 2
+      automation: 1
+      review: "额度是全场最猛的 10M token/天，能力标签也写得最全（coding/office/local/remote）。但纸面参数与实测体感差距最大：免费的省心组合模型更新慢、能力弱，且当日清零决定它进不了自动签到。真正值得期待的只有腾讯电脑管家团队在电脑管理方向的潜在优势。"
+      best_for: "电脑管理/系统运维方向值得一试；不适合项目编码与 vibe coding"
+      owner_note: "10M token 看着多，实际不好用。「省心组合」模型更新慢、能力弱、响应也慢（当前是 hy4preview + deepseek v4pro）。不知道是上下文管理还是提示词的问题：做项目推进很慢，输入抓不到重点，输出倒是全面细致但没重点。没有工作空间设计，不适合 vibe coding。多 agent 的设计也没看出明显优势。唯一可能的价值点在于是腾讯电脑管家团队出品，电脑管理方面或许有点用。"
+
 
   - id: monkeycode_token
     name: MonkeyCode Token
@@ -251,6 +324,14 @@ accounts:
     capabilities: [coding]
     open_when_needed: true
     notes: "10M Token 登录即领、当日清零。用时再开。"
+    rating:
+      value: 4
+      capability: 3
+      automation: 1
+      review: "同样是 10M Token/天当日清零，长亭百川系，编码向，确认可用 GPT 模型。逻辑同 Mavis：额度巨大但必须当天用掉。亮点是开发时能调思考强度、能看到推理过程；缺 auto 模式，手机端登录体验差。风险点：额度补充规则不明（当日清零后如何续、是否有其他补充途径均未确认）。"
+      best_for: "当天集中编码任务，需要亲自控制推理强度时"
+      owner_note: "手机端登录很奇怪：要扫微信码，且不能跳转。确认能用 GPT 模型；开发时可以调思考强度、也能看到推理过程，但没有提供 auto 模式。额度怎么补充目前不清楚。"
+
 
   - id: monkeycode_credit
     name: MonkeyCode 积分
@@ -261,12 +342,20 @@ accounts:
     daily_amount: 100
     validity_days: null
     cap: null
-    claim_policy: never_auto
-    claim_mode: never
-    command: ""
+    claim_policy: always
+    claim_mode: ui
+    command: "python C:\\Users\\Hunter\\Documents\\Warpeas\\agent-credit\\scripts\\ui_claim_monkeycode.py"
     capabilities: [coding]
     open_when_needed: false
-    notes: "【主人 2026-09-28 确认：MonkeyCode 不用签到】原为 always/manual 每天挂在「待手签」，已改为 never_auto + claim_mode never，不再出现在待办里。100 积分若以后恢复签到再改回。"
+    notes: "【2026-10-04 UI 路线打通，claim_mode 改 ui】入口=左下「设置」→ 弹层→ 左侧「账号」页 → 「积分」卡片下方绿色「签到 +100」。脚本 scripts/ui_claim_monkeycode.py（Tauri客户端，纯 ctypes，屏幕捕获 BitBlt + 绝对坐标注入）。**签到本身不弹验证码**——服务端只在 external 直签路径（POST /api/v1/users/wallet/checkin）才要求 captcha，UI 路径点击即可，实测一次成功。**【2026-10-04 balance 语义定案】**主人 10-03 质疑的 balance 单位问题已解决：/api/v1/users/wallet 的 balance 就是签到积分，签到后 195267 → 295267（+100），与界面「积分 195 → 295」严格同步。此前 10-03 误判为「语义待确认、不要入账」是错的，已撤销。**external 直签仍不可行**（逆向实证）：POST checkin → code 10701「兑换验证码失败」；captcha 链路为 POST /api/v1/public/captcha/challenge（GET 404）→ 201 {challenge:{c:50,s:32,d:3}, expires, token} → POST /api/v1/public/captcha/redeem → 500 invalid solutions。连采 6 个 challenge，c/s/d 恒为 50/32/3 = 固定规格图形验证码（画布50/块32/容差3），需真渲染+图像识别+模拟拖动，成本远高于点一次UI。**坐标体系是本脚本最大坑**：客户端是 Tauri(webview2)，窗口 rect 物理尺寸实测 2426x1615（跨屏大字），但截图 PNG 真实像素==窗口 rect，Read 展示时又缩略到 1088 宽——三套坐标系混用导致连错4 次（按窗口比例/颜色扫描求原点/完全不缩放/固定716 网格），最终方案：lx,ly 用缩略图(1088 宽)坐标，scale=w/1088 统一缩放后加窗口原点。已验证 abs 落点正确。客户端窗口类= `Tauri Window`，同pid 还有 tray_icon_app(2880x1511隐藏黑窗) 与 MonkeyCodeNativePetLayeredWindow(桌宠232x240)，find_main 必须按 class+标题双重排除。PrintWindow 抓不到 webview 内容，必须屏幕捕获。"
+    rating:
+      value: 1
+      capability: 3
+      automation: 1
+      review: "100/天的积分档。10-04 之前判定「不用签到」是错的（主人 09-28 就说过有入口），现已打通 UI 自动化并实测入账。100 分对 GPT 编码场景只是零花，但胜在全自动。产品体验见 monkeycode_token 条目。"
+      best_for: "长亭百川系编码客户端的每日积分，脚本自动领取"
+      owner_note: "与 monkeycode_token 是同一产品；使用体验见 monkeycode_token 条目（手机端扫码登录别扭、能调思考强度、无 auto 模式）。"
+
 
   - id: loomy
     name: 讯飞 Loomy
@@ -282,7 +371,16 @@ accounts:
     command: ""
     capabilities: [office, search, docs]
     open_when_needed: true
-    notes: "每日 5000 当日清零；另有永久 6500。用时再开。"
+    notes: "每日 5000 当日清零；另有永久 6500。用时再开。无手机客户端（主人 2026-10-02 确认）。"
+    mobile: false
+    rating:
+      value: 3
+      capability: 3
+      automation: 1
+      review: "5000/天当日清零，另有永久 6500 托底，讯飞系办公/搜索/文档。清零额度里算厚道的，但同样要当天开。没有手机客户端，意味着离开电脑就消耗不掉，进一步压低了它的实际价值。"
+      best_for: "办公文档批处理，且必须在电脑前当天做掉"
+      owner_note: "没有手机客户端。"
+
 
   - id: coze
     name: 扣子 Coze
@@ -299,6 +397,14 @@ accounts:
     capabilities: [multimodal, search, office]
     open_when_needed: true
     notes: "每日 1500 当日清零。用时再开。"
+    rating:
+      value: 2
+      capability: 3
+      automation: 1
+      review: "1500/天当日清零，字节系多模态 + 搜索。额度中等，清零机制决定它只能当临时补充。"
+      best_for: "多模态/搜索类临时任务"
+      owner_note: ""
+
 
   - id: xiaohuanxiong
     name: 商汤小浣熊
@@ -307,14 +413,23 @@ accounts:
     unit: credit
     grant_type: daily_expire
     daily_amount: 300
-    validity_days: 0
+    validity_days: null
     cap: null
     claim_policy: never_auto
     claim_mode: never
     command: ""
     capabilities: [office, docs]
     open_when_needed: true
-    notes: "每日 300 当日清零。用时再开。"
+    notes: "【2026-10-02 更新】每日积分改为**网页登录即领**（不是客户端），有效期为若干天（具体天数待主人确认，故 validity_days 置空）——原记「当日清零」可能有误。无手机客户端。"
+    mobile: false
+    rating:
+      value: 1
+      capability: 2
+      automation: 1
+      review: "300/天，商汤系办公文档向，额度在这个量级很难支撑一次像样的任务。2026-10-02 更新：改为网页登录即领、有效期多天（待确认）——若确为多天有效，它比同类当日清零产品更值得定期去领。无手机客户端。"
+      best_for: "低频办公辅助；网页端顺手领"
+      owner_note: "每日积分是网页登录即领，不是客户端；有效期若干天（天数待确认）。没有手机客户端。"
+
 
   - id: qwenwork
     name: 千问办公
@@ -331,6 +446,14 @@ accounts:
     capabilities: [office, docs]
     open_when_needed: true
     notes: "每日 100 当日过期。用时再开。"
+    rating:
+      value: 1
+      capability: 2
+      automation: 1
+      review: "100/天当日过期，阿里系办公文档。额度太小，属于聊胜于无。"
+      best_for: "几乎不值得专门启动"
+      owner_note: ""
+
 
   - id: accio
     name: Accio Work
@@ -347,6 +470,14 @@ accounts:
     capabilities: [ecommerce]
     open_when_needed: true
     notes: "每日 200 当日清零。用时再开。"
+    rating:
+      value: 1
+      capability: 2
+      automation: 1
+      review: "200/天当日清零，阿里国际电商向。场景窄 + 额度小，优先级垫底。"
+      best_for: "跨境电商相关任务才考虑"
+      owner_note: ""
+
 
   - id: stepfun
     name: 阶跃 AI
@@ -363,3 +494,11 @@ accounts:
     capabilities: [coding]
     open_when_needed: true
     notes: "每日 20 当日过期。用时再开。"
+    rating:
+      value: 1
+      capability: 2
+      automation: 1
+      review: "20/天当日过期，阶跃星辰编码向。全场最低额度，基本可以忽略。"
+      best_for: "基本忽略"
+      owner_note: ""
+

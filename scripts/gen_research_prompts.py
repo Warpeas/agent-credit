@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""生成 research/prompts/<id>.md 与 research/answers/<id>.md。
+"""生成 research/prompts/UNIVERSAL.md 与 research/answers/<id>.md。
 
-思路：不让主项目从外部硬逆向各家接口，而是给每家 Agent 一份定制 prompt，
+思路：不让主项目从外部硬逆向各家接口，而是给每家 Agent 一份**通用**的探索 prompt，
 让它自己交代签到入口、余额查询方式和自动化可行性。答案按 SCHEMA 回填到
 research/answers/，其中的 catalog_patch 段可直接合入 catalog.yaml。
 
+为什么 prompt 只有一份通用的：
+  各家都是打包型客户端，签到信息藏在自己的 resources/app.asar 里，探索流程完全一样。
+  按家定制问卷的好处只是「能带上这家已知的额度」，而这点用一张安装目录速查表就够，
+  代价却是十几份文件要跟 catalog 同步维护。所以：prompt 通用化，答案仍按家分文件存。
+
 用法：
     python scripts/gen_research_prompts.py            # 生成（答案文件已存在则跳过）
-    python scripts/gen_research_prompts.py --force    # 强制重建 prompts
+    python scripts/gen_research_prompts.py --force    # 强制重建（只影响 prompt / schema）
 已有答案文件永不被覆盖。
 """
 from __future__ import annotations
@@ -27,7 +32,9 @@ RESEARCH_DIR = ROOT / "research"
 PROMPT_DIR = RESEARCH_DIR / "prompts"
 ANSWER_DIR = RESEARCH_DIR / "answers"
 
-# 需要调研的账户。顺序 = 优先级（额度大 / 缺口严重的靠前）。
+UNIVERSAL_PATH = PROMPT_DIR / "UNIVERSAL.md"
+
+# 需要维护答案文件的账户。顺序 = 优先级（额度大 / 缺口严重的靠前）。
 RESEARCH_IDS = [
     "minimax",
     "autoclaw",
@@ -85,63 +92,119 @@ catalog_patch:                      # 只写确定要改的字段，不确定的
     # notes: "接口从 xx 逆向；改版后失效条件：..."
 """
 
-PROMPT_TEMPLATE = """# {name} · 自述调研
+UNIVERSAL_TEMPLATE = """# 通用探索调研 prompt
 
 | 项 | 值 |
 |---|---|
-| 账户 id | `{id}` |
-| 厂商 | {vendor} |
-| 本机客户端 | {exe} |
-| 台账已知额度 | {daily} |
-| 当前 claim_mode | {mode} |
+| 适用 | 本机任意一家 Agent 客户端（AutoClaw / TraeWork / LobsterAI / ...） |
 | 生成日期 | {today} |
+| 用法 | 粘进目标客户端的对话框，一次搞定一家 |
 
-**怎么用**：把下面四反引号围栏里的整段内容，原样粘进 {name} 的对话框。
+**怎么用**
+
+1. 打开目标客户端
+2. 把下面四反引号围栏里的整段，原样粘进它的对话框
+3. 把它的回答（探索日志 + YAML）整段存进 `research/answers/<id>.md`
+4. 跑 `python scripts\\check_research_answers.py` 确认没混进 token 明文
+5. `reliability: 已实测` 才改 `catalog.yaml`
+
+**为什么只有一份通用的**
+
+各家都是打包型客户端，签到信息藏在自己的 `resources/app.asar` 里，探索流程完全一样。
+上一代按家定制的问卷在 MiniMax Code 上失效过——它全程答 `unknown`，
+而端点就在它自己的 `resources/app.asar` 里（`/minimax-cloud/api/v1/signin/status`
+与 `/signin/claim`），我十分钟就翻出来了。失效根因是：客户端工作在用户的项目目录里，
+压根没想到去翻自己的安装目录，于是凭印象作答。
+
+所以这一版不做定制描述，改为**统一探索流程 + 一张安装目录速查表**：
+谁都能用，也不随 `catalog.yaml` 变动而失效。**粘贴前不用改任何东西**，
+正文里带了本机的路径表，让它自己对号入座。
+
+**若它仍然交白卷**：自述路线对打包型客户端价值有限，兜底是自己扫它的 `resources/app.asar`
+找接口字面量。点击路线一律走 OS 级注入（`SetCursorPos` + `mouse_event`），
+**不要**用 UIA 的 `InvokePattern`——那条 `isTrusted` 为 false 会被前端过滤。
+结论出处：`research/answers/minimax.md`。
 
 ````text
-你是 {name}（{vendor}）{app_role}。我搭了一个本地积分台账，想把你的每日签到和余额查询自动化。
-我从外部逆向你的接口既慢又容易失效，而且容易被你们的前端校验拦掉——**你最了解你自己**，所以我直接问你。
+你是本机装的一个 AI Agent 客户端。我搭了本地积分台账，想把你的「每日签到」和「剩余积分」自动化。
 
-请回答下面 6 个问题。目标是让我能在无人值守的情况下做到两件事：
-  (1) 每天触发一次你的签到；
-  (2) 随时查询「今天是否已签」和「剩余积分」。
+先讲一个反面案例。我用「请你自述」的问法问过本机另一家客户端，它全程回答 unknown。
+后来我自己在它的 resources/app.asar 里翻了十分钟，就找到了签到端点的字面量路径
+（形如 /xxx/api/v1/signin/status 与 /signin/claim）。
+它答 unknown 不是因为做不到，而是凭印象作答、没真的去读自己的打包产物。
+**所以这次我要的不是你的印象，是你查过之后的证据。**
 
-## 一、需要你回答的
+## 0. 先对号入座，再自报家门
 
-1. **签到入口**：人类在你界面里的点击路径；如果你知道对应的 HTTP 接口（方法 + 路径 + 关键参数形状），也写出来。
-2. **签到规则**：每日额度、连续签到周期与额外奖励、积分有效期、有没有领取上限（cap）。
-3. **查询方法**：查「剩余积分」和「今日是否已签」分别怎么做——界面路径、接口、还是本机某个可读文件。
-4. **自动化可行性**：从外部程序触发你的签到，哪条路走得通？
-   - 有没有官方 CLI / 开放 API / 可编程入口？
-   - 模拟点击会不会被你们前端的 isTrusted 校验或系统 UIPI 拦掉？
-   - 有没有配置文件、本地服务、或浏览器扩展可以驱动？
-5. **本机线索**：你的安装目录、配置文件、日志在哪；其中哪些是明文可读的。
-6. **幂等与风险**：重复调用签到会怎样；有没有频率限制或反刷风控。
+本机已探测到的客户端（找到你自己那一行；表里没有你，就自己找安装目录并告诉我）：
 
-## 二、我已经知道 / 已经试过
+{path_table}
 
-{known}
+然后回答：
 
-## 三、你可以怎么查
+- 你的 `account_id`（用表里的 id；表里没有就自己起一个英文小写 id）
+- 你的版本号
+- 逐条说能做 / 不能做：执行本机 PowerShell 或 Python；读本机任意路径的文件；
+  对大文件（几百 MB 的二进制归档）做字符串搜索；看到并截取当前界面；
+  有没有内置的「定时任务 / 自动化」入口；有没有自带 CLI
 
-- 读你自己的安装目录、前端资源/bundle、本地缓存里的接口路径
-- 读本机**明文**的配置与日志
-- 查你的官方文档、设置页、帮助中心
-- 让我打开某个页面，然后告诉我你在页面上看到了什么
-- 直接给我一段可执行的命令（PowerShell / Python），我自己跑
+哪一项不行就直说，我换路线，不要硬答。
 
-## 四、硬约束（违反就别做）
+## 1. 探索步骤（按顺序做，边做边贴命令与输出片段）
 
-- **不要**解密任何加密的登录态，**不要**绕开鉴权
-- **不要**输出 token / cookie / 密码原文，一律写 `<redacted>`，只说明「从哪个字段读」
-- **不要**把任何本机数据上传到第三方
-- **不要**执行兑换、抽奖、购买、下单这类会消耗资源的操作
-- 签到**只给我方法，不要你替我点**——真正的领取由我的脚本执行
-- 不确定就写 `unknown`，**不要编**；猜测必须标 `reliability: 推测`
+A. 列你的安装目录与 `resources` 目录，说明每个子目录大概是干什么的
+B. 确认你是不是 Electron 应用。如果是，前端打包产物通常在：
+   - `resources/app.asar`          （归档；接口路径是字符串常量，混淆不掉）
+   - `resources/app.asar.unpacked` （未打包部分）
+   顺手看同目录有没有 CLI 线索（*.cmd、node/、python/ 之类）
+C. 在上面这些文件里搜签到相关字面量，中英文都要搜：
+   - 英文：signin / sign_in / checkin / check-in / daily / claim / reward / points / credit / quota / task
+   - 中文：签到 / 积分 / 领取 / 已签 / 连续 / 活动
+   二进制也能直接搜。参考：
 
-## 五、输出格式
+```python
+import re, pathlib
+d = pathlib.Path(r"<你的 app.asar 绝对路径>").read_bytes()
+n = 0
+for m in re.finditer(rb"signin|checkin|daily|points|积分|签到", d):
+    print(m.start(), d[max(0, m.start() - 120):m.start() + 200])
+    n += 1
+    if n > 20:
+        break
+```
 
-把答案写成下面这段 YAML，原样填好回给我。除了 YAML 本身，最多再加三行说明。
+   一次搜全盘会很慢，先搜 resources 下的 *.asar / *.js / *.json
+D. 命中疑似端点后补齐四件事：HTTP 方法、完整路径、host 常量（一般在同文件的 BASE / HOST 常量里）、
+   鉴权怎么带（只说「从哪个字段 / 哪个请求头读」，不要贴值）
+E. 找本机明文配置与日志（典型位置：`%APPDATA%\\<你>`、`%USERPROFILE%\\.<你>`、安装目录下的 logs / userData），
+   看有没有能直接读出「今日是否已签」「剩余积分」的文件
+F. 如果你有「定时任务 / 自动化 / Skills」入口，说清楚它能不能每天自己触发一次签到动作
+
+## 2. 我要的结论
+
+1. **签到的人类点击路径**：从界面哪个入口进、几步、按钮叫什么
+2. **端点**（能确认就给）：method + path + host + 参数形状 + 鉴权来源
+3. **规则**：每日额度、连续签到周期与额外奖励、积分有效期、有没有领取上限
+   （表里我记的额度与实际不符就纠正我）
+4. **幂等与风控**：重复触发签到会怎样，有没有频率限制
+5. **外部自动化哪条路走得通**：官方 CLI / 本地 HTTP / 只能模拟点击 / 都不行。
+   若涉及模拟点击：你们前端有没有 isTrusted 之类校验，会不会被系统 UIPI 拦掉
+6. **你自己能不能用定时任务每天自签**（可以的话说清怎么配）
+
+## 3. 硬约束（违反就别做）
+
+- 不解密任何加密的登录态，不绕开鉴权
+- 不输出 token / cookie / 密码原文，一律写 `<redacted>`，只说明「从哪个字段读」
+- 不把任何本机数据上传到第三方
+- 不执行兑换、抽奖、购买、下单这类会消耗资源的操作
+- **探索阶段不要替我点签到**——今天这份额度我自己安排；要真点验证，先问我一句
+- 不确定就写 `unknown`，但必须附上「我试了 X，没找到 Y」。**不许没查就写 unknown**
+- 每条结论都要带证据：文件路径 + 命中片段。推测的标 `reliability: 推测`
+
+## 4. 输出格式
+
+先给一段「探索日志」：你跑了哪些命令、看到了什么、哪几步没结果，5~15 行。
+再给下面这份 YAML，原样填好。除了探索日志和 YAML，最多再加三行说明。
 
 ```yaml
 {schema}```
@@ -149,13 +212,13 @@ PROMPT_TEMPLATE = """# {name} · 自述调研
 
 ## 回填
 
-1. 把它的回答整段存进 `research/answers/{id}.md`
-2. 人工核对 `evidence` 里没有 token 明文
+1. 把它的回答整段存进 `research/answers/<id>.md`
+2. 人工核对 `evidence` 里没有 token 明文（或跑 `python scripts\\check_research_answers.py`）
 3. 把 `catalog_patch` 段合进 `catalog.yaml`（当前运行时只消费 `claim_mode` 和 `command`；
    `status_command` 是给后续 `credit sync` 预留的字段，先存着不影响现有逻辑）
 """
 
-ANSWER_TEMPLATE = """# {name} · 自述答案
+ANSWER_TEMPLATE = """# {name} · 探索答案
 
 | 项 | 值 |
 |---|---|
@@ -170,47 +233,48 @@ ANSWER_TEMPLATE = """# {name} · 自述答案
 """
 
 
-def _known_block(acc: dict) -> str:
-    lines: list[str] = []
-    notes = (acc.get("notes") or "").strip()
-    if notes:
-        lines.append(f"- {notes}")
-    models = (acc.get("models_note") or "").strip()
-    if models:
-        lines.append(f"- 模型线：{models}")
-    daily = acc.get("daily_amount")
-    monthly = acc.get("monthly_amount")
-    if daily:
-        lines.append(f"- 台账记的每日额度：{daily} {acc.get('unit')}")
-    if monthly:
-        lines.append(f"- 台账记的每月额度：{monthly} {acc.get('unit')}")
-    if acc.get("expires_on"):
-        lines.append(f"- 台账记的到期日：{acc['expires_on']}")
-    if acc.get("next_reset"):
-        lines.append(f"- 台账记的下次重置：{acc['next_reset']}")
-    streak = acc.get("streak") or {}
-    if streak:
+def _dirs(acc_id: str) -> tuple[str, str]:
+    """(安装目录, resources 目录)。客户端不会自己找安装目录，必须由我们喂给它。"""
+    exe = find_exe(acc_id)
+    if not exe:
+        return "未探测到", "未探测到"
+    install = Path(exe).parent
+    return str(install), str(install / "resources")
+
+
+def _amount(acc: dict) -> str:
+    parts = []
+    if acc.get("daily_amount"):
+        parts.append(f"{acc['daily_amount']} {acc.get('unit')}/天")
+    if acc.get("monthly_amount"):
+        parts.append(f"{acc['monthly_amount']} {acc.get('unit')}/月")
+    if acc.get("grant_type") == "one_shot":
+        parts.append("一次性")
+    return "；".join(parts) or "未知"
+
+
+def render_path_table() -> str:
+    lines = [
+        "| account_id | 软件 | 安装目录 | resources | 台账已知额度 |",
+        "|---|---|---|---|---|",
+    ]
+    for acc_id in RESEARCH_IDS:
+        try:
+            acc = find_account(acc_id)
+        except Exception:
+            continue
+        install, resources = _dirs(acc_id)
         lines.append(
-            f"- 台账记的连签：{streak.get('cycle_days')} 天一轮，第 {streak.get('bonus_on')} 天奖励 {streak.get('bonus_amount')}"
+            f"| `{acc_id}` | {acc['name']} | `{install}` | `{resources}` | {_amount(acc)} |"
         )
-    return "\n".join(lines) or "- （暂无，从零开始）"
+    return "\n".join(lines)
 
 
-def render_prompt(acc: dict, today: str) -> str:
-    exe = find_exe(acc["id"])
-    daily = acc.get("daily_amount") or acc.get("monthly_amount") or 0
-    app_role = "的客户端本体，运行在我这台 Windows 机器上"
-    return PROMPT_TEMPLATE.format(
-        id=acc["id"],
-        name=acc["name"],
-        vendor=acc.get("vendor") or "unknown",
-        exe=str(exe) if exe else "未探测到",
-        daily=f"{daily} {acc.get('unit')}" if daily else "未知",
-        mode=acc.get("claim_mode") or "unknown",
+def render_universal(today: str) -> str:
+    return UNIVERSAL_TEMPLATE.format(
         today=today,
-        app_role=app_role,
-        known=_known_block(acc),
-        schema=SCHEMA.format(id=acc["id"], name=acc["name"]),
+        path_table=render_path_table(),
+        schema=SCHEMA.format(id="«你的 account_id，见上表»", name="«你的名字»"),
     )
 
 
@@ -234,44 +298,31 @@ def render_schema_doc() -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="生成各 Agent 软件的调研 prompt")
-    ap.add_argument("--force", action="store_true", help="强制重建 prompts")
+    ap = argparse.ArgumentParser(description="生成通用调研 prompt 与各家答案模板")
+    ap.add_argument("--force", action="store_true", help="强制重建（prompt / schema）")
     args = ap.parse_args()
 
     PROMPT_DIR.mkdir(parents=True, exist_ok=True)
     ANSWER_DIR.mkdir(parents=True, exist_ok=True)
+
+    today = date.today().isoformat()
     (RESEARCH_DIR / "ANSWER-SCHEMA.md").write_text(render_schema_doc(), encoding="utf-8")
+    UNIVERSAL_PATH.write_text(render_universal(today), encoding="utf-8")
+    print(f"prompt {UNIVERSAL_PATH.relative_to(ROOT)}")
 
     known = {a["id"] for a in accounts()}
-    today = date.today().isoformat()
-    written_p: list[str] = []
     written_a: list[str] = []
-    skipped: list[str] = []
-
     for acc_id in RESEARCH_IDS:
         if acc_id not in known:
             print(f"skip unknown account: {acc_id}", file=sys.stderr)
             continue
-        acc = find_account(acc_id)
-
-        p = PROMPT_DIR / f"{acc_id}.md"
-        if args.force or not p.exists():
-            p.write_text(render_prompt(acc, today), encoding="utf-8")
-            written_p.append(str(p.relative_to(ROOT)))
-        else:
-            skipped.append(str(p.relative_to(ROOT)))
-
         a = ANSWER_DIR / f"{acc_id}.md"
         if not a.exists():
-            a.write_text(render_answer(acc), encoding="utf-8")
+            a.write_text(render_answer(find_account(acc_id)), encoding="utf-8")
             written_a.append(str(a.relative_to(ROOT)))
 
-    for f in written_p:
-        print("prompt", f)
     for f in written_a:
         print("answer", f)
-    for f in skipped:
-        print("exists", f)
 
 
 if __name__ == "__main__":

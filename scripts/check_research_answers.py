@@ -27,6 +27,9 @@ LEAK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 FILLED_KEYS = ("account_id", "confidence", "checkin", "status", "automation")
+
+# 鉴权方案名：出现在 Authorization 头里不代表泄露，真正要看的是它后面那串
+AUTH_SCHEMES = {"Bearer", "Basic", "Cloud-IDE-JWT", "JWT", "Digest", "Token", "OAuth"}
 PLACEHOLDER = "YYYY-MM-DD"
 
 
@@ -44,6 +47,41 @@ def yaml_blocks(text: str) -> list[str]:
             out.append("\n".join(buf))
         i += 1
     return out
+
+
+def is_leak(label: str, snippet: str) -> tuple[bool, str]:
+    """判断一个命中片段是不是真凭据。返回 (是否泄露, 要展示的片段)。
+
+    宁可误报不要漏报是前提，但纯误报会把「方案名」当凭据，反而让人不看告警。
+    这里只排除三类确定不是凭据的东西：占位符、接口路径/域名、鉴权方案名。
+    """
+    if "<redacted>" in snippet:
+        return False, ""
+
+    if label == "Authorization 头":
+        # `Authorization: Cloud-IDE-JWT <token>` 里 Cloud-IDE-JWT 是**方案名**不是凭据。
+        # 剥掉方案名与包裹符号后，剩下的若为空、是占位符、或短得不像令牌，就不算泄露。
+        m2 = re.search(r"Authorization\s*[:=]\s*(.*)$", snippet)
+        val = m2.group(1) if m2 else ""
+        stripped = re.sub(
+            r"^['\"`]?(Bearer|Basic|Cloud-IDE-JWT|JWT|Digest|Token|OAuth)['\"`]?",
+            "", val, flags=re.IGNORECASE,
+        ).strip(" '\"`,，。;；")
+        if not stripped or stripped.startswith(("<", "{")) or len(stripped) < 12:
+            return False, ""
+        return True, stripped
+
+    if label == "长 base64/hex 串":
+        # 接口路径与域名不是凭据。/autoclaw-proxy/proxy/autoclaw-task-complete
+        # 这类字面量会被 40+ 长度规则整条命中，先按路径分隔符切碎再判：
+        # 只有切完还剩 40+ 的单段才可能是真凭据。
+        parts = re.split(r"[/.:?&=]", snippet)
+        longest = max(parts, key=len)
+        if len(longest) < 40:
+            return False, ""
+        return True, longest
+
+    return True, snippet
 
 
 def check_file(path: Path) -> tuple[str, list[str]]:
@@ -65,10 +103,10 @@ def check_file(path: Path) -> tuple[str, list[str]]:
 
     for label, pat in LEAK_PATTERNS:
         for m in pat.finditer(text):
-            snippet = m.group(0)
-            if "<redacted>" in snippet:
+            leak, shown = is_leak(label, m.group(0))
+            if not leak:
                 continue
-            problems.append(f"疑似{label}明文: {snippet[:40]}")
+            problems.append(f"疑似{label}明文: {shown[:40]}")
 
     if problems:
         return "有风险", problems

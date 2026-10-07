@@ -4,7 +4,7 @@
 |---|---|
 | 账户 id | `lobsterai` |
 | 状态 | **端点已挖出并实测；服务端当前未下发签到活动** |
-| 客户端 | Electron，`C:\Users\Hunter\AppData\Local\Programs\LobsterAI\resources\app.asar`（398 MB） |
+| 客户端 | Electron，`%LOCALAPPDATA%\Programs\LobsterAI\resources\app.asar`（398 MB） |
 | 路线 | **external 直签**（`vendor/lobsterai-auto-signin/signin.py`） |
 
 ---
@@ -78,7 +78,7 @@ status:
 
 automation:
   claim_mode: external
-  command: "python C:\\Users\\Hunter\\Documents\\Warpeas\\agent-credit\\vendor\\lobsterai-auto-signin\\signin.py auto"
+  command: "python %USERPROFILE%\Documents\\Warpeas\\agent-credit\\vendor\\lobsterai-auto-signin\\signin.py auto"
   status_command: unknown
   blockers: "服务端当前未下发签到活动（slotState=empty），无法领取"
   reliability: 已实测（接口可达、鉴权通过、slot 返回 code 0）
@@ -101,5 +101,5 @@ open_questions:
 catalog_patch:
   lobsterai:
     claim_mode: external
-    command: "python C:\\Users\\Hunter\\Documents\\Warpeas\\agent-credit\\vendor\\lobsterai-auto-signin\\signin.py auto"
+    command: "python %USERPROFILE%\Documents\\Warpeas\\agent-credit\\vendor\\lobsterai-auto-signin\\signin.py auto"
 ```

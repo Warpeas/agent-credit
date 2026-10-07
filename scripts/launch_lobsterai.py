@@ -7,10 +7,13 @@ launched by an elevated script died together with that script's process tree.
 
     python scripts/launch_lobsterai.py
 """
+import os
 import ctypes
+from pathlib import Path
 
-SCRIPT = r"C:\Users\Hunter\Documents\Warpeas\agent-credit\scripts\launch_detached.ps1"
-EXE = r"C:\Users\Hunter\AppData\Local\Programs\LobsterAI\LobsterAI.exe"
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = str(ROOT / "scripts" / "launch_detached.ps1")
+EXE = str(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "LobsterAI" / "LobsterAI.exe")
 
 cmd = '-NoProfile -ExecutionPolicy Bypass -File "' + SCRIPT + '" -Exe "' + EXE + '"'
 ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell", cmd, None, 0)

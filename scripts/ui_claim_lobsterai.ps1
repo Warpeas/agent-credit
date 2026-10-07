@@ -10,8 +10,9 @@ param(
     [switch]$NoLaunch,
     [string]$OutFile = ""
 )
+$root = Split-Path -Parent $PSScriptRoot
 $ErrorActionPreference = "Stop"
-$logPath = "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\_lobsterai_log.txt"
+$logPath = "$root\logs\_lobsterai_log.txt"
 function Log($m){ $s=(Get-Date -Format "HH:mm:ss")+" "+$m; try{[System.IO.File]::AppendAllText($logPath,$s+"`n",(New-Object System.Text.UTF8Encoding($false)))}catch{}; Write-Output $s }
 try {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -52,11 +53,11 @@ $asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
 function Await($op,$t){ $m=$asTask.MakeGenericMethod($t); $x=$m.Invoke($null,@($op)); $x.Wait(-1)|Out-Null; return $x.Result }
 
 [void][L32]::SetProcessDPIAware()
-$exe='C:\Users\Hunter\AppData\Local\Programs\LobsterAI\LobsterAI.exe'
+$exe='$env:APPDATA\AppData\Local\Programs\LobsterAI\LobsterAI.exe'
 $AppProcess='LobsterAI'
-$shotPath='C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\lobsterai_shot.png'
-$ocrPath='C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\lobsterai_explore_ocr.txt'
-$frameDir='C:\Users\Hunter\Documents\Warpeas\agent-credit\logs'
+$shotPath='$root\logs\lobsterai_shot.png'
+$ocrPath='$root\logs\lobsterai_explore_ocr.txt'
+$frameDir='$root\logs'
 
 function Get-PidSet { $s=@{}; Get-Process $AppProcess -ErrorAction SilentlyContinue | ForEach-Object { $s[[uint32]$_.Id]=$true }; return $s }
 

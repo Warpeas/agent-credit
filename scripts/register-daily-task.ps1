@@ -23,7 +23,7 @@ param([switch]$RunNow)
 $root = Split-Path -Parent $PSScriptRoot
 
 # Prefer the managed python we actually verified; fall back to PATH python.
-$py = "C:\Users\Hunter\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+$py = "$env:USERPROFILE\.workbuddy\binaries\python\versions\3.13.12\python.exe"
 if (-not (Test-Path $py)) { $py = (Get-Command python).Source }
 $sid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.wintypes as wt
+import os
 import json
 import struct
 import subprocess
@@ -28,9 +29,9 @@ import time
 import zlib
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\Hunter\Documents\Warpeas\agent-credit")
+ROOT = Path(__file__).resolve().parent.parent
 LOGDIR = ROOT / "logs"
-EXE = r"C:\Users\Hunter\AppData\Local\Programs\LobsterAI\LobsterAI.exe"
+EXE = str(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "LobsterAI" / "LobsterAI.exe")
 PROC = "LobsterAI.exe"
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)

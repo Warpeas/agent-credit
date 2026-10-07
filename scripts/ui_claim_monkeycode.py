@@ -29,15 +29,16 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.wintypes as wt
+import os
 import json
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\Hunter\Documents\Warpeas\agent-credit")
+ROOT = Path(__file__).resolve().parent.parent
 LOGDIR = ROOT / "logs"
-EXE = r"C:\Users\Hunter\AppData\Local\MonkeyCode\monkeycode-desktop.exe"
+EXE = str(Path(os.environ["LOCALAPPDATA"]) / "MonkeyCode" / "monkeycode-desktop.exe")
 PROC = "monkeycode-desktop.exe"
 RESULT = LOGDIR / "monkeycode_claim.json"
 
@@ -402,7 +403,7 @@ def main() -> int:
     jar = ""
     try:
         import urllib.request
-        ck = Path(r"C:\Users\Hunter\AppData\Roaming\com.chaitin.baizhi.monkeycode\monkeycode-cookies.json")
+        ck = Path(os.environ["APPDATA"]) / "com.chaitin.baizhi.monkeycode" / "monkeycode-cookies.json"
         arr = json.loads(ck.read_text(encoding="utf-8"))
         jar = "; ".join(f"{c['name']}={c['value']}" for c in arr)
         req = urllib.request.Request(

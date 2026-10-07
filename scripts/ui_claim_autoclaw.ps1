@@ -4,6 +4,7 @@ param(
     [switch]$DryRun,
     [string]$OutFile = ""
 )
+$root = Split-Path -Parent $PSScriptRoot
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -106,7 +107,7 @@ $null = [Cap32]::SetProcessDPIAware()
 $exe = 'C:\Program Files\AutoClaw\AutoClaw.exe'
 
 # OCR 布局落盘：调锚点全靠它。失败路径也要写，否则永远看不到二跳页面长什么样。
-$dumpPath = "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\autoclaw_ocr_dump.txt"
+$dumpPath = "$root\logs\autoclaw_ocr_dump.txt"
 function Dump-Ocr($lines, $tag) {
     if (-not $lines) { return }
     try {

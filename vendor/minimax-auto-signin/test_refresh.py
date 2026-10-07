@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-AUTH = Path(r"C:\Users\Hunter\.minimax\auth\prod\cn\mcode-public\auth.json")
+AUTH = Path.home() / ".minimax" / "auth" / "prod" / "cn" / "mcode-public" / "auth.json"
 TOKEN_URL = "https://account.minimax.cn/oauth2/token"
 CLIENT_ID = "mcode-public"
 

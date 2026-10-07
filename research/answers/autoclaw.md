@@ -50,7 +50,7 @@ evidence:
   - "out/main/index.js → getZaiProxyBaseUrl/getApiRequestHost: prod=autoglm-acceleration-api.zhipuai.cn / pre=autoglm-pre-api.zhipuai.cn / dev=autoglm-inner-3.zhipuai.cn"
   - "out/main/index.js → authHeaders: X-Auth-Sign=md5(`${APP_ID}&${ts}&${APP_KEY}`)，APP_ID=100003，APP_KEY=<redacted>；commonHeaders 追加 authorization=Bearer <token>（从 getAuthState().token / 缓存读，值 <redacted>）"
   - "out/main/index.js → /agent-assetmgr/api/v2/wallets?biz_app_id=autoclaw ; /agent-assetmgr/api/v1/points/expiring?biz_app_id=autoclaw"
-  - "C:\\Users\\Hunter\\AppData\\Roaming\\autoclaw\\auth.json → token/refreshToken 前缀 'enc:'（safeStorage 加密），token-cache.json 同；无明文"
+  - "%USERPROFILE%\AppData\\Roaming\\autoclaw\\auth.json → token/refreshToken 前缀 'enc:'（safeStorage 加密），token-cache.json 同；无明文"
   - "out/main/index.js → remote-debugging-port 仅由 process.env.AUTOCLAW_CDP_PORT||AUTOCLAW_E2E_CDP_PORT 触发；当前 AutoClaw.exe 命令行未含该开关"
   - "out/renderer → daily-signin 横幅用普通 React onClick（无 isTrusted 校验）"
 
@@ -311,7 +311,7 @@ i18n 侧还捞到任务卡片的确定文案，可直接给 OCR 当锚点：
 在**管理员 PowerShell** 里跑（或普通终端跑、屏幕确认 UAC）：
 
 ```bat
-python C:\Users\Hunter\Documents\Warpeas\agent-credit\scripts\run_claim_only.py --dry-run
+python <REPO>\scripts\run_claim_only.py --dry-run
 ```
 
 预期两种结果：

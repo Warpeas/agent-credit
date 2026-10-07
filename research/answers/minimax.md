@@ -33,7 +33,7 @@ status:
 automation:
   claim_mode: ui             # 2026-09-23 实测通过后由 manual 升级；自述原值 never 不采纳
   command: ""
-  status_command: "C:\\Users\\Hunter\\.minimax\\bin\\mcode-tools.cmd auth status"   # 仅鉴权态，不是积分余额
+  status_command: "%USERPROFILE%\.minimax\\bin\\mcode-tools.cmd auth status"   # 仅鉴权态，不是积分余额
   blockers:
     - "官方 mcode-tools CLI 没有签到/积分子命令（已用 --help 与 connector tools 全量枚举确认）"
     - "前端 isTrusted 过滤 <-- 仅对 UIAutomation Invoke 路线成立；本项目 OCR 点击路线用的是 OS 级注入，不成立（见下）"
@@ -43,10 +43,10 @@ automation:
   reliability: 已实测（CLI/connector/auth 目录）+ 已确认（端点路径自 app.asar 逆向）+ 推测（风控头细节未验证）
 
 evidence:
-  - "C:\\Users\\Hunter\\.minimax\\bin\\mcode-tools.cmd --help -> 仅 auth / get-asset-url / upload-temp-url / connector"
+  - "%USERPROFILE%\.minimax\\bin\\mcode-tools.cmd --help -> 仅 auth / get-asset-url / upload-temp-url / connector"
   - "mcode-tools connector tools -> 只有 connector__hengsheng__*（恒生金融数据）与 connector__matrix__*（多媒体），无 credit/signin/daily"
   - "mcode-tools auth status -> auth_mode:shared-broker, status:authenticated, generation:10, scope:agent.default（不含积分字段）"
-  - "C:\\Users\\Hunter\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json 含 accessToken/refreshToken 明文 OAuth（已 redact，未粘贴原文）"
+  - "%USERPROFILE%\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json 含 accessToken/refreshToken 明文 OAuth（已 redact，未粘贴原文）"
   - "MiniMax Code 安装路径 ...\\MiniMax Code\\MiniMax Code.exe；CLI 实体为 resources\\resources\\mcode-tools\\cli.mjs"
   - "config.yaml 暴露 baseURL https://agent.minimax.cn/mavis/api/v1/llm/v1，是 LLM 网关而非签到端点"
   - "app.asar 前端 bundle 直出（2026-09-23 本机逆向）：getSigninPanel -> GET /minimax-cloud/api/v1/signin/status；claimSignin -> POST /minimax-cloud/api/v1/signin/claim"
@@ -257,7 +257,7 @@ Python(ctypes) 从启动前开始每 0.3s 采样所有 MiniMax 顶层窗口的
 
 **(A) 临时拉起客户端（已验证可行）**
 注册 `RunLevel=Limited`（非提权）+ `LogonType=Interactive` 的计划任务，Action 直接执行
-`C:\Users\Hunter\AppData\Local\Programs\MiniMax Code\MiniMax Code.exe`，
+`%LOCALAPPDATA%\Programs\MiniMax Code\MiniMax Code.exe`，
 `Start-ScheduledTask` 即可拉起 —— **不弹 UAC**（实测 procs 从 0 → 7）。
 签到完 `Stop-Process` 收掉，不需要常驻。
 注意：沙箱会话里 `Start-Process` 拉 GUI 无效（procs=0），必须走计划任务。
@@ -267,7 +267,7 @@ Python(ctypes) 从启动前开始每 0.3s 采样所有 MiniMax 顶层窗口的
 端点配置：`https://account.minimax.cn`（prod/cn）下
 `/oauth2/device/code`、`/oauth2/token`、`/oauth2/revoke`。
 
-凭据文件 `C:\Users\Hunter\.minimax\auth\prod\cn\mcode-public\auth.json` 里有**明文**
+凭据文件 `%USERPROFILE%\.minimax\auth\prod\cn\mcode-public\auth.json` 里有**明文**
 `accessToken` + `refreshToken` + `clientId` + `expiresAtMs`（`generation` 已到 50，
 说明客户端在持续刷新）。accessToken 有效期约 1 小时 —— 这就是「客户端不常驻就刷不到
 新 token」的根因。

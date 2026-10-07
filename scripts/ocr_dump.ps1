@@ -1,4 +1,4 @@
-# 通用窗口 OCR 抓屏：给进程名，抓它主窗口的完整布局（行级 + 词级坐标）。不做任何点击。
+﻿# 通用窗口 OCR 抓屏：给进程名，抓它主窗口的完整布局（行级 + 词级坐标）。不做任何点击。
 #
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\ocr_dump.ps1 -ProcessName "TRAE SOLO CN"
@@ -8,6 +8,7 @@ param(
     [string]$LaunchPath = "",
     [string]$OutFile = ""
 )
+$root = Split-Path -Parent $PSScriptRoot
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -161,7 +162,7 @@ Write-Output $text
 
 if (-not $OutFile) {
     $safe = ($ProcessName -replace '[\\/:*?"<>| ]', '_')
-    $OutFile = "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\ocr_dump_" + $safe + ".txt"
+    $OutFile = "$root\logs\ocr_dump_" + $safe + ".txt"
 }
 [System.IO.File]::AppendAllText($OutFile, $text + "`n---`n", (New-Object System.Text.UTF8Encoding($false)))
 Write-Output ("SAVED: " + $OutFile)

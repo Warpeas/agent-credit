@@ -46,16 +46,16 @@
 
 | account_id | 软件 | 安装目录 | resources | 台账已知额度 |
 |---|---|---|---|---|
-| `minimax` | MiniMax Code | `C:\Users\Hunter\AppData\Local\Programs\MiniMax Code` | `C:\Users\Hunter\AppData\Local\Programs\MiniMax Code\resources` | 400 credit/天 |
+| `minimax` | MiniMax Code | `%LOCALAPPDATA%\Programs\MiniMax Code` | `%LOCALAPPDATA%\Programs\MiniMax Code\resources` | 400 credit/天 |
 | `autoclaw` | AutoClaw 智谱 | `C:\Program Files\AutoClaw` | `C:\Program Files\AutoClaw\resources` | 200 credit/天 |
-| `traework` | TraeWork | `C:\Users\Hunter\AppData\Local\Programs\TRAE SOLO CN` | `C:\Users\Hunter\AppData\Local\Programs\TRAE SOLO CN\resources` | 150 credit/天 |
-| `lobsterai` | LobsterAI | `C:\Users\Hunter\AppData\Local\Programs\LobsterAI` | `C:\Users\Hunter\AppData\Local\Programs\LobsterAI\resources` | 100 credit/天 |
-| `workbuddy` | WorkBuddy | `C:\Users\Hunter\AppData\Local\Programs\WorkBuddy` | `C:\Users\Hunter\AppData\Local\Programs\WorkBuddy\resources` | 100 credit/天 |
-| `dumate` | DuMate 百度搭子 | `C:\Users\Hunter\AppData\Local\Programs\DuMate` | `C:\Users\Hunter\AppData\Local\Programs\DuMate\resources` | 500 credit/天 |
+| `traework` | TraeWork | `%LOCALAPPDATA%\Programs\TRAE SOLO CN` | `%LOCALAPPDATA%\Programs\TRAE SOLO CN\resources` | 150 credit/天 |
+| `lobsterai` | LobsterAI | `%LOCALAPPDATA%\Programs\LobsterAI` | `%LOCALAPPDATA%\Programs\LobsterAI\resources` | 100 credit/天 |
+| `workbuddy` | WorkBuddy | `%LOCALAPPDATA%\Programs\WorkBuddy` | `%LOCALAPPDATA%\Programs\WorkBuddy\resources` | 100 credit/天 |
+| `dumate` | DuMate 百度搭子 | `%LOCALAPPDATA%\Programs\DuMate` | `%LOCALAPPDATA%\Programs\DuMate\resources` | 500 credit/天 |
 | `todesk` | ToDesk AI | `C:\Program Files\ToDesk AI` | `C:\Program Files\ToDesk AI\resources` | 100 credit/天 |
 | `monkeycode_credit` | MonkeyCode 积分 | `未探测到` | `未探测到` | 100 credit/天 |
-| `kimi` | Kimi Work | `C:\Users\Hunter\AppData\Local\Programs\Kimi` | `C:\Users\Hunter\AppData\Local\Programs\Kimi\resources` | 未知 |
-| `joycode` | JoyCode 京东 | `C:\Users\Hunter\AppData\Local\Programs\JoyCode` | `C:\Users\Hunter\AppData\Local\Programs\JoyCode\resources` | 一次性 |
+| `kimi` | Kimi Work | `%LOCALAPPDATA%\Programs\Kimi` | `%LOCALAPPDATA%\Programs\Kimi\resources` | 未知 |
+| `joycode` | JoyCode 京东 | `%LOCALAPPDATA%\Programs\JoyCode` | `%LOCALAPPDATA%\Programs\JoyCode\resources` | 一次性 |
 | `qclaw` | QClaw 小龙虾 | `C:\Program Files\QClaw\v0.2.37.630` | `C:\Program Files\QClaw\v0.2.37.630\resources` | 500 credit/月 |
 
 然后回答：

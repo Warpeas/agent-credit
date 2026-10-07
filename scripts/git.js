@@ -1,6 +1,8 @@
 const { execFileSync } = require('child_process');
-const gitDir = 'C:/Users/Hunter/Documents/Warpeas/agent-credit/.git';
-const workTree = 'C:/Users/Hunter/Documents/Warpeas/agent-credit';
+const path = require('path');
+// Derive the repo from this script's own location, so no absolute path is baked in.
+const workTree = path.resolve(__dirname, '..');
+const gitDir = path.join(workTree, '.git');
 function run(...args) {
   const out = execFileSync('git', ['--git-dir', gitDir, '--work-tree', workTree, ...args], { encoding: 'utf-8', shell: false });
   if (out) process.stdout.write(out);

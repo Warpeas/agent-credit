@@ -1,7 +1,8 @@
+﻿$root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # MonkeyCode 界面探索（只读）：只截 MonkeyCode 窗口本身并 OCR，不点击、不改任何东西。
-param([string]$OutPng = "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\monkey_shot.png")
+param([string]$OutPng = "$root\logs\monkey_shot.png")
 $ErrorActionPreference = "Stop"
-$logPath = "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\_monkey_explore.txt"
+$logPath = "$root\logs\_monkey_explore.txt"
 function Log($m){ $s=(Get-Date -Format "HH:mm:ss")+" "+$m; try{[System.IO.File]::AppendAllText($logPath,$s+"`n",(New-Object System.Text.UTF8Encoding($false)))}catch{}; Write-Output $s }
 try {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8

@@ -27,7 +27,7 @@ WS_VISIBLE = 0x10000000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_MINIMIZE = 0x20000000
 
-BASE = Path(r"C:\Users\Hunter\Documents\Warpeas\agent-credit")
+BASE = ROOT
 
 
 def enum_windows():

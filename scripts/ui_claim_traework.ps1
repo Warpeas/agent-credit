@@ -5,11 +5,12 @@ param(
     [switch]$Explore,
     [string]$OutFile,
     [string]$ProcessName = 'TRAE SOLO CN',
-    [string]$ExePath = 'C:\Users\Hunter\AppData\Local\Programs\TRAE SOLO CN\TRAE SOLO CN.exe',
+    [string]$ExePath = '$env:APPDATA\AppData\Local\Programs\TRAE SOLO CN\TRAE SOLO CN.exe',
     [string]$ShotDir = '',
     [int]$AvatarX = 0,
     [int]$AvatarY = 0
 )
+$root = Split-Path -Parent $PSScriptRoot
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -107,10 +108,10 @@ function Out-Json([string]$status, [string]$detail) {
 
 $null = [Cap32]::SetProcessDPIAware()
 
-$exe = 'C:\Users\Hunter\AppData\Local\Programs\TRAE SOLO CN\TRAE SOLO CN.exe'
+$exe = '$env:APPDATA\AppData\Local\Programs\TRAE SOLO CN\TRAE SOLO CN.exe'
 
 # OCR 布局落盘：调锚点全靠它。失败路径也要写，否则永远看不到二跳页面长什么样。
-$dumpPath = "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\ocr_dump_traework.txt"
+$dumpPath = "$root\logs\ocr_dump_traework.txt"
 function Dump-Ocr($lines, $tag) {
     if (-not $lines) { return }
     try {

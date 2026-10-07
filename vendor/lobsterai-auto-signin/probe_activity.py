@@ -3,10 +3,11 @@
 幂等：AlreadyClaimed(51104) 会被服务端拒绝，不存在重复领取风险。
 token 不打印。
 """
+import os
 import json, sqlite3, urllib.request, urllib.error
 from pathlib import Path
 
-DB = Path(r"C:/Users/Hunter/AppData/Roaming/LobsterAI/lobsterai.sqlite")
+DB = Path(os.environ["APPDATA"]) / "LobsterAI" / "lobsterai.sqlite"
 HOST = "https://lobsterai-server.youdao.com"
 
 con = sqlite3.connect("file:" + str(DB) + "?mode=ro", uri=True)

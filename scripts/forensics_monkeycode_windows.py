@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import subprocess
 import sys
@@ -22,7 +23,7 @@ from forensics_lobster_windows import (  # noqa: E402
     win_rect, win_text, write_png,
 )
 
-EXE = r"C:\Users\Hunter\AppData\Local\MonkeyCode\monkeycode-desktop.exe"
+EXE = str(Path(os.environ["LOCALAPPDATA"]) / "MonkeyCode" / "monkeycode-desktop.exe")
 PROC = "monkeycode-desktop.exe"
 
 

@@ -26,7 +26,7 @@ WS_EX_NOREDIRECTIONBITMAP = 0x00200000
 WS_POPUP = 0x80000000
 WS_CHILD = 0x40000000
 
-BASE = Path(r"C:\Users\Hunter\Documents\Warpeas\agent-credit")
+BASE = ROOT
 
 
 class PROCESSENTRY32W(ctypes.Structure):

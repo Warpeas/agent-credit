@@ -6,12 +6,13 @@
       https://monkeycode-ai.com/api/v1/users/wallet
       https://monkeycode-ai.com/api/v1/users/wallet/checkin
 """
+import os
 import json
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP = Path(r"C:\Users\Hunter\AppData\Roaming\com.chaitin.baizhi.monkeycode")
+APP = Path(os.environ["APPDATA"]) / "com.chaitin.baizhi.monkeycode"
 HOST = "https://monkeycode-ai.com"
 
 

@@ -28,7 +28,7 @@ import urllib.request
 from pathlib import Path
 
 HOST = "https://agent.minimax.cn"
-AUTH_FILE = Path(r"C:\Users\Hunter\.minimax\auth\prod\cn\mcode-public\auth.json")
+AUTH_FILE = Path.home() / ".minimax" / "auth" / "prod" / "cn" / "mcode-public" / "auth.json"
 # 官方 OAuth2 端点（从 app.asar 逆向：MCODE_OAUTH_CLIENT_ID / resolveMCodeOAuthEndpointConfig）。
 # accessToken 实测有效期很短——客户端在跑时 generation 每 ~7 分钟就 +1，
 # 所以不跑客户端就必然过期。用 refreshToken 自刷新可拿回 expires_in=3600，
@@ -47,7 +47,7 @@ REFRESH_MARGIN_SEC = 600  # 剩余不足 10 分钟就先刷新
 # 客户端续期（warmup）：token 失效时临时拉起 MiniMax，让它用自己的正常途径续期，
 # 续完就关掉。脚本**完全不碰 auth.json**，所以不会像自刷新那样冲掉 loginEpoch。
 # 设 MINIMAX_NO_WARMUP=1 可关。
-APP_EXE = r"C:\Users\Hunter\AppData\Local\Programs\MiniMax Code\MiniMax Code.exe"
+APP_EXE = str(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "MiniMax Code" / "MiniMax Code.exe")
 APP_PROC = "MiniMax Code.exe"
 ALLOW_CLIENT_WARMUP = os.environ.get(
     "MINIMAX_NO_WARMUP", "").strip().lower() not in ("1", "true", "yes")

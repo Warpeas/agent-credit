@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import os
 import json
 import sqlite3
 import sys
@@ -25,7 +26,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DB = Path(r"C:\Users\Hunter\AppData\Roaming\LobsterAI\lobsterai.sqlite")
+DB = Path(os.environ["APPDATA"]) / "LobsterAI" / "lobsterai.sqlite"
 HOST = "https://lobsterai-server.youdao.com"
 PLACEMENTS = ["desktop_sidebar", "desktop_startup_modal"]
 CLIENT_VERSION = "1.0.0"   # 实测服务端不校验（0.0.0 也返回 code 0）

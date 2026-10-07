@@ -5,11 +5,15 @@ import re
 import subprocess
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from . import ledger
 from .catalog import accounts, find_account, threshold_ratio
 from .ui_claim import claim as ui_claim, skip_ui
+
+# Repo root, so catalog.yaml never has to hardcode a checkout path.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass
@@ -44,6 +48,9 @@ def _run_external(acc: dict[str, Any]) -> tuple[bool, str, str]:
     command = (acc.get("command") or "").strip()
     if not command:
         return False, "未配置 command，改按手签处理", ""
+    # {REPO} = 本仓库根目录。让 catalog.yaml 不必写死检出路径，
+    # 换机器/ 换目录都能直接用。%USERPROFILE% 等由 cmd 自行展开。
+    command = command.replace("{REPO}", str(REPO_ROOT))
     if os.environ.get("AGENT_CREDIT_SKIP_EXTERNAL", "").strip().lower() in ("1", "true", "yes"):
         return False, "外部命令已跳过（AGENT_CREDIT_SKIP_EXTERNAL）", ""
     try:

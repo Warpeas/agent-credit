@@ -14,7 +14,7 @@ import json
 import time
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\Hunter\Documents\Warpeas\agent-credit")
+ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "ui_claim_autoclaw.ps1"
 
 

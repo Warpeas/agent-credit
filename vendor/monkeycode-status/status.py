@@ -16,6 +16,7 @@ token 不进命令行、不进日志、不进输出（打印一律 <redacted>）
 """
 from __future__ import annotations
 
+import os
 import json
 import sys
 import urllib.error
@@ -23,7 +24,7 @@ import urllib.request
 from pathlib import Path
 
 HOST = "https://monkeycode-ai.com"
-COOKIE_FILE = Path(r"C:\Users\Hunter\AppData\Roaming\com.chaitin.baizhi.monkeycode\monkeycode-cookies.json")
+COOKIE_FILE = Path(os.environ["APPDATA"]) / "com.chaitin.baizhi.monkeycode" / "monkeycode-cookies.json"
 TIMEOUT = 25
 
 

@@ -8,6 +8,7 @@ param(
     # -NoClose 用于探索期：保留窗口以便反复调试，不必每次重拉（重拉会弹 UAC）。
     [switch]$NoClose
 )
+$root = Split-Path -Parent $PSScriptRoot
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -158,7 +159,7 @@ function Out-Json([string]$status, [string]$detail) {
 
 $null = [Cap32]::SetProcessDPIAware()
 
-$exe = 'C:\Users\Hunter\AppData\Local\Programs\MiniMax Code\MiniMax Code.exe'
+$exe = '$env:APPDATA\AppData\Local\Programs\MiniMax Code\MiniMax Code.exe'
 $AppProcess = 'MiniMax Code'
 
 # KNOWN GAP (2026-09-23): the cold-start path below is UNVERIFIED. Launching the
@@ -244,7 +245,7 @@ function Find-AppWindow {
                      $c.h, $c.x, $c.y, $c.w, $c.hh, $c.vis, $blank, $c.title)
         }
         [System.IO.File]::AppendAllText(
-            "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\minimax_windows.txt",
+            "$root\logs\minimax_windows.txt",
             $out, (New-Object System.Text.UTF8Encoding($false)))
     } catch { }
 
@@ -378,7 +379,7 @@ try {
     $sg.ReleaseHdc($hdc2)
     if (-not $pw2 -or (Test-Blank $shot)) { $sg.CopyFromScreen($winX, $winY, 0,0, $shot.Size) }
     $sg.Dispose()
-    $shot.Save("C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\minimax_shot.png", [System.Drawing.Imaging.ImageFormat]::Png)
+    $shot.Save("$root\logs\minimax_shot.png", [System.Drawing.Imaging.ImageFormat]::Png)
     $shot.Dispose()
 } catch { }
 
@@ -618,7 +619,7 @@ function Write-AdProbe($ls) {
         }
     } catch { $out += "pixel scan failed: " + $_.Exception.Message + "`n" }
     [System.IO.File]::AppendAllText(
-        "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\minimax_ad_probe.txt",
+        "$root\logs\minimax_ad_probe.txt",
         $out, (New-Object System.Text.UTF8Encoding($false)))
 }
 
@@ -779,7 +780,7 @@ $btnY = $btn.y + [int]($btn.h / 2)
 if ($OutFile -eq "__DUMP__") { }
 
 # Dump for offline tuning
-$dumpPath = "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\minimax_ocr_dump.txt"
+$dumpPath = "$root\logs\minimax_ocr_dump.txt"
 try {
     $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $lines_txt = ($lines | ForEach-Object { "{0} | {1},{2} {3}x{4}" -f $_.text, $_.x, $_.y, $_.w, $_.h }) -join "`n"
@@ -800,7 +801,7 @@ foreach ($wait in @(1500, 2500, 3500)) {
     try {
         $atxt = ($after | ForEach-Object { "{0} | {1},{2} {3}x{4}" -f $_.text, $_.x, $_.y, $_.w, $_.h }) -join "`n"
         [System.IO.File]::AppendAllText(
-            "C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\minimax_after_dump.txt",
+            "$root\logs\minimax_after_dump.txt",
             "[wait=$wait btnY=$btnY]`n$atxt`n---`n", (New-Object System.Text.UTF8Encoding($false)))
     } catch { }
     $a2 = Find-Line $after "每日签到"

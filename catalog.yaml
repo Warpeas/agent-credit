@@ -61,7 +61,7 @@ accounts:
     cap: null
     claim_policy: always
     claim_mode: external
-    command: set WORKBUDDY_AUTH_FILE=C:\Users\Hunter\AppData\Local\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info&& set WORKBUDDY_BUDGET_SECONDS=50&& python "C:\Users\Hunter\Documents\Warpeas\agent-credit\vendor\workbuddy-auto-signin\signin.py" auto
+    command: set WORKBUDDY_AUTH_FILE=%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info&& set WORKBUDDY_BUDGET_SECONDS=50&& python "{REPO}\vendor\workbuddy-auto-signin\signin.py" auto
     streak:
       cycle_days: 7
       bonus_on: [7]
@@ -100,7 +100,7 @@ accounts:
     # external 直签为主路线（无 GUI、无 UAC、不受客户端广告影响）；claim_mode=ui
     # 保留为 token 过期时的兜底（checkin.py 里 external 失败会回退 UI）。
     claim_mode: ui
-    command: '"C:\Users\Hunter\.workbuddy\binaries\python\versions\3.13.12\python.exe" "C:\Users\Hunter\Documents\Warpeas\agent-credit\vendor\minimax-auto-signin\signin.py" auto'
+    command: 'python "{REPO}\vendor\minimax-auto-signin\signin.py" auto'
     streak:
       cycle_days: 7
       # 每天都有 400 连签加成（不是只有第4/7天）；第 4/7 天在此基础上再额外 +1000
@@ -113,7 +113,7 @@ accounts:
     mobile: true
     mobile_note: "能看到桌面端的项目并继续对话（比 AutoClaw 移动端强）；模型同样只有 MiniMax 自家"
     open_when_needed: false
-    notes: "签到卡在主页左下角。【2026-09-26 起改为 external 直签：全自动、不依赖客户端运行、不开窗口】端点 GET/POST /minimax-cloud/api/v1/signin/{status,claim}，host=https://agent.minimax.cn，鉴权 Authorization: Bearer（读本机明文凭据 C:\\Users\\Hunter\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json；token 不进命令行、不进日志、不进输出）。**必须带 timezone_id=Asia/Shanghai**：缺失时 HTTP 仍 200 但业务返回 1406010011 invalid timezone_id；只有 IANA 名有效，8 / +8 / 28800 / Shanghai 全被拒。【2026-10-04 额度规则按服务端实测重写】GET /signin/status 返回的 days[] 直接下发真实额度，字段是 points(基础) + bonus_points(加成)，7 天实测：day1-3=800+400、day4=2000+1000、day5-6=800+400、day7=2000+1000→ **平时 1200/天、第4/7天 3000、整周期 12000**。旧记「400/天、第4/7天加1000」与真实值差 3 倍，已改。枚举 SigninDayStatus{Upcoming=1,Claimable=2,Claimed=3,Disabled=4}，已签判定用 status==3；**status==1(Upcoming) 表示当天额度还没到可领时间，此时 claim 会被拒**——10-04 凌晨 00:14 那轮就是 Upcoming，所以没领成，不是脚本坏了。已签判定以服务端为准不重复领取（2026-09-26 实测幂等）。**有效期 30天是官方口径**（asar 内 usage_resource_tooltip_rule1 原文：「赠予积分（如签到奖励，30天有效）仅限 MiniMax Code 使用」），但要注意**付费积分有效期 1 年**（同段 rule2），台账只跟签到赠予的 30 天。扣费顺序 Token Plan > 积分。【2026-09-27 修正·最终】弃用 UI 路线的旧理由「无法冷启动」已被实测推翻；真实约束是本自动化会话只能以 runas 拉起 GUI，非提权起不来。冷启动渲染延迟约 12s，过早 OCR 只能看到标题栏。【2026-09-30 · 国庆活动推广干扰 UI 路线】9.28-10.07 活动推广文案同时含「每日签到」「领取」，会劫持锚点/按钮识别并吞掉点击，已加固限定左侧栏 x<600 + 文本长度上限 12/16；该推广层当日 UI 路线实际不可用，故 external 为主路线。失效条件：token 过期（脚本打印剩余小时；沙箱内 Popen 拉不起 GUI，需用非提权计划任务 RunLevel=Limited+LogonType=Interactive 拉起）、端点改路径、timezone 校验变更、当天额度处于 Upcoming 状态。此前「isTrusted 过滤」只对 UIA InvokePattern 成立，不要再拿它当否决理由。"
+    notes: "签到卡在主页左下角。【2026-09-26 起改为 external 直签：全自动、不依赖客户端运行、不开窗口】端点 GET/POST /minimax-cloud/api/v1/signin/{status,claim}，host=https://agent.minimax.cn，鉴权 Authorization: Bearer（读本机明文凭据 %USERPROFILE%\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json；token 不进命令行、不进日志、不进输出）。**必须带 timezone_id=Asia/Shanghai**：缺失时 HTTP 仍 200 但业务返回 1406010011 invalid timezone_id；只有 IANA 名有效，8 / +8 / 28800 / Shanghai 全被拒。【2026-10-04 额度规则按服务端实测重写】GET /signin/status 返回的 days[] 直接下发真实额度，字段是 points(基础) + bonus_points(加成)，7 天实测：day1-3=800+400、day4=2000+1000、day5-6=800+400、day7=2000+1000→ **平时 1200/天、第4/7天 3000、整周期 12000**。旧记「400/天、第4/7天加1000」与真实值差 3 倍，已改。枚举 SigninDayStatus{Upcoming=1,Claimable=2,Claimed=3,Disabled=4}，已签判定用 status==3；**status==1(Upcoming) 表示当天额度还没到可领时间，此时 claim 会被拒**——10-04 凌晨 00:14 那轮就是 Upcoming，所以没领成，不是脚本坏了。已签判定以服务端为准不重复领取（2026-09-26 实测幂等）。**有效期 30天是官方口径**（asar 内 usage_resource_tooltip_rule1 原文：「赠予积分（如签到奖励，30天有效）仅限 MiniMax Code 使用」），但要注意**付费积分有效期 1 年**（同段 rule2），台账只跟签到赠予的 30 天。扣费顺序 Token Plan > 积分。【2026-09-27 修正·最终】弃用 UI 路线的旧理由「无法冷启动」已被实测推翻；真实约束是本自动化会话只能以 runas 拉起 GUI，非提权起不来。冷启动渲染延迟约 12s，过早 OCR 只能看到标题栏。【2026-09-30 · 国庆活动推广干扰 UI 路线】9.28-10.07 活动推广文案同时含「每日签到」「领取」，会劫持锚点/按钮识别并吞掉点击，已加固限定左侧栏 x<600 + 文本长度上限 12/16；该推广层当日 UI 路线实际不可用，故 external 为主路线。失效条件：token 过期（脚本打印剩余小时；沙箱内 Popen 拉不起 GUI，需用非提权计划任务 RunLevel=Limited+LogonType=Interactive 拉起）、端点改路径、timezone 校验变更、当天额度处于 Upcoming 状态。此前「isTrusted 过滤」只对 UIA InvokePattern 成立，不要再拿它当否决理由。"
     models_note: "MiniMax-M3 / M2.7 / H3"
     rating:
       value: 5
@@ -166,7 +166,7 @@ accounts:
     mobile: true
     mobile_note: "与桌面端项目不同步，是独立的云端 claw 环境；模型与桌面端一致，同为智谱 GLM 系列"
     open_when_needed: false
-    notes: "2026-09-24 自述调研（v1.19.0，端点自 resources/app.asar 反编译，已本机复核命中）：签到是任务体系，task_id='daily_signin'，端点 /autoclaw-proxy/proxy/autoclaw-task-{list,complete}，host=autoglm-acceleration-api.zhipuai.cn，鉴权 X-Auth-Appid/TimeStamp/Sign + Bearer。token 在 C:\\Users\\Hunter\\AppData\\Roaming\\autoclaw\\auth.json 为 safeStorage 加密（enc: 前缀），external 直调需解密登录态 -> 按 research/SAFETY.md 否决。首页「每日签到」横幅受实验开关 show_checkin_banner 控制（defaultValue off，生产默认不展示），点击只打开「灵感中心」视图，签到动作在灵感中心任务卡片里（i18n：标题「每日签到」/ 副「赚 {{points}} 分/天」/ 已完成「已完成」）。横幅 onClick 是普通 React 事件，无 isTrusted 校验 -> OCR 点击路线可行，此前长期 pending 是入口定位与加载等待问题，不是被过滤。失效条件：v1.19.0 改版、端点改路径、或横幅开关改为默认 on。额度/连签/有效期由服务端下发，代码无硬编码（reliability: 未实测）。2026-09-24 提权实测跑通：入口 = 侧边栏「灵感与活动」→ 赚积分任务首卡「每日签到」→ 卡片内黑色「签到」按钮；已签态 OCR 文案为「已完成 / 已签到N天」，幂等判定靠它；脚本在 ok/already 分支会 taskkill 客户端。日额度 200 主人已确认（卡片副标题「签到得@20 积分」是显示/OCR 误差）。积分并非永久：客户端曾提示「152 积分将于 3 天内到期」，与 points/expiring 端点吻合，但整体有效期天数仍由服务端下发，validity_days 保持 null。"
+    notes: "2026-09-24 自述调研（v1.19.0，端点自 resources/app.asar 反编译，已本机复核命中）：签到是任务体系，task_id='daily_signin'，端点 /autoclaw-proxy/proxy/autoclaw-task-{list,complete}，host=autoglm-acceleration-api.zhipuai.cn，鉴权 X-Auth-Appid/TimeStamp/Sign + Bearer。token 在 %USERPROFILE%\\AppData\\Roaming\\autoclaw\\auth.json 为 safeStorage 加密（enc: 前缀），external 直调需解密登录态 -> 按 research/SAFETY.md 否决。首页「每日签到」横幅受实验开关 show_checkin_banner 控制（defaultValue off，生产默认不展示），点击只打开「灵感中心」视图，签到动作在灵感中心任务卡片里（i18n：标题「每日签到」/ 副「赚 {{points}} 分/天」/ 已完成「已完成」）。横幅 onClick 是普通 React 事件，无 isTrusted 校验 -> OCR 点击路线可行，此前长期 pending 是入口定位与加载等待问题，不是被过滤。失效条件：v1.19.0 改版、端点改路径、或横幅开关改为默认 on。额度/连签/有效期由服务端下发，代码无硬编码（reliability: 未实测）。2026-09-24 提权实测跑通：入口 = 侧边栏「灵感与活动」→ 赚积分任务首卡「每日签到」→ 卡片内黑色「签到」按钮；已签态 OCR 文案为「已完成 / 已签到N天」，幂等判定靠它；脚本在 ok/already 分支会 taskkill 客户端。日额度 200 主人已确认（卡片副标题「签到得@20 积分」是显示/OCR 误差）。积分并非永久：客户端曾提示「152 积分将于 3 天内到期」，与 points/expiring 端点吻合，但整体有效期天数仍由服务端下发，validity_days 保持 null。"
     models_note: "GLM 系列（智谱）【2026-10-03 主人更正：桌面端与移动端都只有 GLM，旧记录 Pony-Alpha-2/DeepSeek/Kimi/MiniMax 有误】"
     rating:
       value: 4
@@ -387,7 +387,7 @@ accounts:
     cap: null
     claim_policy: always
     claim_mode: ui
-    command: "python C:\\Users\\Hunter\\Documents\\Warpeas\\agent-credit\\scripts\\ui_claim_monkeycode.py"
+    command: "python {REPO}\\scripts\\ui_claim_monkeycode.py"
     capabilities: [coding]
     open_when_needed: false
     notes: "【2026-10-04 UI 路线打通，claim_mode 改 ui】入口=左下「设置」→ 弹层→ 左侧「账号」页 → 「积分」卡片下方绿色「签到 +100」。脚本 scripts/ui_claim_monkeycode.py（Tauri客户端，纯 ctypes，屏幕捕获 BitBlt + 绝对坐标注入）。【2026-10-07 补】脚本带恢复现场：launched_by_us 标记 + try/finally 包住主流程，收尾只关**脚本自己拉起**的实例（WM_CLOSE + 8s 超时后 TerminateProcess，不用 taskkill /IM 以免误杀主人自己开着的）；复用已开实例时保留并打日志 cleanup: skipped。**签到本身不弹验证码**——服务端只在 external 直签路径（POST /api/v1/users/wallet/checkin）才要求 captcha，UI 路径点击即可，实测一次成功。**【2026-10-04 balance 语义定案】**主人 10-03 质疑的 balance 单位问题已解决：/api/v1/users/wallet 的 balance 就是签到积分，签到后 195267 → 295267（+100），与界面「积分 195 → 295」严格同步。此前 10-03 误判为「语义待确认、不要入账」是错的，已撤销。**external 直签仍不可行**（逆向实证）：POST checkin → code 10701「兑换验证码失败」；captcha 链路为 POST /api/v1/public/captcha/challenge（GET 404）→ 201 {challenge:{c:50,s:32,d:3}, expires, token} → POST /api/v1/public/captcha/redeem → 500 invalid solutions。连采 6 个 challenge，c/s/d 恒为 50/32/3 = 固定规格图形验证码（画布50/块32/容差3），需真渲染+图像识别+模拟拖动，成本远高于点一次UI。**坐标体系是本脚本最大坑**：客户端是 Tauri(webview2)，窗口 rect 物理尺寸实测 2426x1615（跨屏大字），但截图 PNG 真实像素==窗口 rect，Read 展示时又缩略到 1088 宽——三套坐标系混用导致连错4 次（按窗口比例/颜色扫描求原点/完全不缩放/固定716 网格），最终方案：lx,ly 用缩略图(1088 宽)坐标，scale=w/1088 统一缩放后加窗口原点。已验证 abs 落点正确。客户端窗口类= `Tauri Window`，同pid 还有 tray_icon_app(2880x1511隐藏黑窗) 与 MonkeyCodeNativePetLayeredWindow(桌宠232x240)，find_main 必须按 class+标题双重排除。PrintWindow 抓不到 webview 内容，必须屏幕捕获。"

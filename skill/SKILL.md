@@ -5,17 +5,17 @@ description: 查询或登记 AI Agent 软件积分、每日签到待办、以及
 
 # Agent Credit
 
-本地台账在 `C:\Users\Hunter\Documents\Warpeas\agent-credit`。所有写账只通过 CLI，不要手改 `data/ledger.json`。
+本地台账在 `<REPO>`。所有写账只通过 CLI，不要手改 `data/ledger.json`。
 
 ## 调用
 
 在该目录执行（Windows）：
 
 ```bat
-python C:\Users\Hunter\Documents\Warpeas\agent-credit\credit.py <命令>
+python <REPO>\credit.py <命令>
 ```
 
-也可用 `C:\Users\Hunter\Documents\Warpeas\agent-credit\credit.cmd`。
+也可用 `<REPO>\credit.cmd`。
 
 | 用户意图 | 命令 |
 |---|---|

@@ -35,7 +35,7 @@ abs = 窗口原点 + 缩略图坐标 * scale
 
 ### MiniMax Code
 - Electron 42.8.0 / app 3.0.73，安装路径
-  `C:\Users\Hunter\AppData\Local\Programs\MiniMax Code\MiniMax Code.exe`
+  `%LOCALAPPDATA%\Programs\MiniMax Code\MiniMax Code.exe`
 - ⚠️ **额度规则 2026-10-04 按服务端实测重写**：GET `/signin/status` 的 `days[]`
   直接下发真实额度（`points` 基础 + `bonus_points` 加成）：
   day1-3=800+400、day4=2000+1000、day5-6=800+400、day7=2000+1000
@@ -70,7 +70,7 @@ abs = 窗口原点 + 缩略图坐标 * scale
   device id），只轮换 token 不改它会人为制造不一致。
 
 ### MonkeyCode（长亭百川）
-- 原生 exe `C:\Users\Hunter\AppData\Local\MonkeyCode\monkeycode-desktop.exe`，
+- 原生 exe `%LOCALAPPDATA%\MonkeyCode\monkeycode-desktop.exe`，
   实为 **Tauri(webview2)** 应用（窗口 class=`Tauri Window`，title=`工作台 — MonkeyCode`）。
   同 pid 另有 `tray_icon_app`（2880x1511 隐藏黑窗）与
   `MonkeyCodeNativePetLayeredWindow`（桌宠 232x240），find_main 必须 class+标题双重排除。

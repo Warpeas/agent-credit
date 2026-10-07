@@ -126,7 +126,8 @@ from pathlib import Path
 
 mm_pids = set()
 cmd_map = {}
-_procs = Path(r"C:\Users\Hunter\Documents\Warpeas\agent-credit\logs\_mm_procs.json")
+ROOT = Path(__file__).resolve().parents[2]
+_procs = ROOT / "logs" / "_mm_procs.json"
 if _procs.exists():
     _body = "\n".join(_procs.read_text(encoding="utf-8-sig").strip().splitlines()[:-1])
     try:

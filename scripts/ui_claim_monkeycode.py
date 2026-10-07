@@ -105,6 +105,79 @@ def proc_pids(name: str) -> list[int]:
     return out
 
 
+def close_client(timeout: float = 8.0) -> int:
+    """关闭 MonkeyCode 客户端，返回关掉的进程数。
+
+    顺序：先 WM_CLOSE 让主窗口走正常退出（能存配置、不留脏状态），
+    超时才对剩余进程 TerminateProcess。
+    不用 taskkill /IM —— 那个会无差别杀掉所有同名进程，
+    而我们要精确只清理由本脚本拉起的那一批。
+    """
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    pids = set(proc_pids(PROC))
+    if not pids:
+        return 0
+
+    targets: list[int] = []
+
+    def cb(h, _):
+        p = wt.DWORD()
+        user32.GetWindowThreadProcessId(h, ctypes.byref(p))
+        if int(p.value) in pids and user32.IsWindowVisible(h):
+            targets.append(int(h))
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(cb), 0)
+    for h in targets:
+        user32.PostMessageW(h, 0x0010, 0, 0)      # WM_CLOSE
+
+    t0 = time.time()
+    killed = 0
+    while time.time() - t0 < timeout:
+        if not proc_pids(PROC):
+            return len(pids)
+        time.sleep(0.5)
+    for pid in proc_pids(PROC):                  # 还剩的强杀
+        h = kernel32.OpenProcess(0x0001 | 0x0400, False, pid)  # SYNCHRONIZE|TERMINATE
+        if h:
+            kernel32.TerminateProcess(h, 0)
+            kernel32.CloseHandle(h)
+            killed += 1
+    return len(pids)
+
+
+def restore_foreground(hwnd: int) -> None:
+    """把前台还给运行前的窗口，别让用户对着一个死掉的客户端。"""
+    fg = user32.GetForegroundWindow()
+    if fg and fg != hwnd and user32.IsWindow(fg):
+        try:
+            user32.ShowWindow(fg, SW_RESTORE)
+            user32.SetForegroundWindow(fg)
+        except OSError:
+            pass
+
+
+def _cleanup(launched_by_us: bool, prev_foreground: int) -> None:
+    """运行结束一律恢复现场。
+
+    1) 只关**本次由脚本拉起**的实例——签到前就开着的必须保留
+       （那是主人自己开的，可能是他正在用的工作窗口）；
+    2) 把前台还给运行前的窗口。
+
+    失败时也要清：无人值守跑完桌面不该堆着客户端。
+    这个逻辑对齐 ui_claim_autoclaw.ps1 的 $script:LaunchedByUs
+    与 ui_claim_traework.ps1 的 taskkill 收尾。
+    """
+    if launched_by_us:
+        n = close_client()
+        log(f"cleanup: closed {n} client process(es) we launched")
+    else:
+        log("cleanup: skipped (client was already running before us)")
+    restore_foreground(prev_foreground)
+
+
 def win_text(h: int) -> str:
     n = user32.GetWindowTextLengthW(h)
     b = ctypes.create_unicode_buffer(n + 1)
@@ -349,6 +422,9 @@ def main() -> int:
         log(f"pre-check failed ({e}); continue to UI path")
 
     pids = set(proc_pids(PROC))
+    # 签到前的前台窗口，收尾时还回去（别让主人对着一个死掉的客户端）
+    prev_foreground = int(user32.GetForegroundWindow())
+    launched_by_us = False
     log(f"preexisting procs={len(pids)}")
     if not pids:
         if args.explore:
@@ -356,6 +432,7 @@ def main() -> int:
             return 1
         log("launching MonkeyCode")
         subprocess.Popen([EXE], close_fds=True)
+        launched_by_us = True
         t0 = time.time()
         while time.time() - t0 < 40:
             time.sleep(2)
@@ -368,12 +445,14 @@ def main() -> int:
     pids = set(proc_pids(PROC))
     if not pids:
         log("no process")
+        _cleanup(launched_by_us, prev_foreground)
         write_result("notfound", "client did not start")
         return 1
 
     hwnd = find_main(pids)
     if not hwnd:
         log("main window not found")
+        _cleanup(launched_by_us, prev_foreground)
         write_result("notfound", "no main window")
         return 1
     user32.ShowWindow(hwnd, SW_RESTORE)
@@ -387,48 +466,56 @@ def main() -> int:
         px, w, h = screen_shot(X, Y, W, H)
         write_png(LOGDIR / "_monkey_explore.png", px, w, h)
         log(f"shot -> logs/_monkey_explore.png ({w}x{h})")
+        # explore 模式也收尾：它可能自己拉起了客户端
+        _cleanup(launched_by_us, prev_foreground)
         return 0
 
-    # 初始位图，供content_click 做内容边界检测
-    px, w, h = screen_shot(X, Y, W, H)
-
-    # 路径：左下「设置」-> 弹层 -> 左侧「账号」页 -> 「签到 +100」。
-    # lx/ly 是 Read 展示的缩略图(1088 宽)坐标系下的坐标，由 content_click 换算。
-    steps = [
-        (52, 692, "click 设置"),
-        (165, 170, "click 账号 tab"),
-        (563, 380, "click 签到 +100"),
-    ]
-    for lx, ly, what in steps:
-        cx, cy = content_click(px, w, h, lx, ly, X, Y)
-        log(f"{what} logic=({lx},{ly}) abs=({cx},{cy})")
-        click(cx, cy)
-        time.sleep(1.8)
-        px, w, h = screen_shot(X, Y, W, H)   # 每步后重抓，弹层会改变内容
-
-    write_png(LOGDIR / "_monkey_account.png", px, w, h)
-    log("shot -> logs/_monkey_account.png")
-
-    # ---- 结果判定：以接口复认为准，OCR 只作辅助日志 ----
-    time.sleep(1.5)
-    detail = "已点击签到；请复核接口"
-    status = "ok"
+    # 从这里往后的所有退出路径都必须走_cleanup，
+    # 否则无人值守跑完桌面会留着一个客户端窗口。
     try:
-        req = urllib.request.Request(
-            "https://monkeycode-ai.com/api/v1/users/wallet/checkin",
-            headers={"Accept": "application/json", "Cookie": jar,
-                     "User-Agent": "monkeycode-ui-claim/1.0"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            ok = bool((json.loads(resp.read().decode("utf-8")).get("data") or {})
-                      .get("checked_in"))
-        if ok:
-            status, detail = "ok", "签到成功（接口确认 checked_in=true）"
-        else:
-            status, detail = "pending", "已点击但接口仍显示未签到，可能弹了验证码"
-    except Exception as e:  # noqa: BLE001
-        detail = f"点击完成但复核失败: {e}"
+        # 初始位图，供content_click 做内容边界检测
+        px, w, h = screen_shot(X, Y, W, H)
 
-    log(f"result status={status} detail={detail}")
+        # 路径：左下「设置」-> 弹层 -> 左侧「账号」页 -> 「签到 +100」。
+        # lx/ly 是 Read 展示的缩略图(1088宽)坐标系下的坐标，由 content_click 换算。
+        steps = [
+            (52, 692, "click 设置"),
+            (165, 170, "click 账号 tab"),
+            (563, 380, "click 签到 +100"),
+        ]
+        for lx, ly, what in steps:
+            cx, cy = content_click(px, w, h, lx, ly, X, Y)
+            log(f"{what} logic=({lx},{ly}) abs=({cx},{cy})")
+            click(cx, cy)
+            time.sleep(1.8)
+            px, w, h = screen_shot(X, Y, W, H)   # 每步后重抓，弹层会改变内容
+
+        write_png(LOGDIR / "_monkey_account.png", px, w, h)
+        log("shot -> logs/_monkey_account.png")
+
+        # ---- 结果判定：以接口复认为准，OCR 只作辅助日志 ----
+        time.sleep(1.5)
+        detail = "已点击签到；请复核接口"
+        status = "ok"
+        try:
+            req = urllib.request.Request(
+                "https://monkeycode-ai.com/api/v1/users/wallet/checkin",
+                headers={"Accept": "application/json", "Cookie": jar,
+                         "User-Agent": "monkeycode-ui-claim/1.0"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                ok = bool((json.loads(resp.read().decode("utf-8")).get("data") or {})
+                          .get("checked_in"))
+            if ok:
+                status, detail = "ok", "签到成功（接口确认 checked_in=true）"
+            else:
+                status, detail = "pending", "已点击但接口仍显示未签到，可能弹了验证码"
+        except Exception as e:  # noqa: BLE001
+            detail = f"点击完成但复核失败: {e}"
+
+        log(f"result status={status} detail={detail}")
+    finally:
+        _cleanup(launched_by_us, prev_foreground)
+
     write_result(status, detail)
     return 0 if status == "ok" else 1
 

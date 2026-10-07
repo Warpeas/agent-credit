@@ -96,8 +96,14 @@ abs = 窗口原点 + 缩略图坐标 * scale
   需真渲染+图像识别+模拟拖动，成本远高于点一次 UI。
 - ✅ **UI 签到已打通**（2026-10-04）：`scripts/ui_claim_monkeycode.py`，
   入口 = 左下「设置」→ 弹层 → 左侧「账号」→ 「积分」卡片下方绿色「签到 +100」。
-  **UI 路径不弹验证码**（验证码只拦 external）。
+  **UI 路径不弹验证码**（验证码只拦external）。
   实测冷启动 rect 在 49/147/196/294/392/441 之间随机跳，坐标方案已用缩放覆盖。
+  ⚠️ **写这类脚本必须带「恢复现场」**（2026-10-07 补）：`launched_by_us` 标记 +
+  `try/finally` 包住主流程 + 收尾关客户端。只关**脚本自己拉起**的，
+  复用主人已开着的实例时保留（日志打 `cleanup: skipped`）。
+  同项目 autoclaw（`$script:LaunchedByUs`）与 traework（`taskkill`）一直都有，
+  新写脚本时漏了，是教训。**关客户端用 WM_CLOSE + 超时 TerminateProcess，
+  不要 `taskkill /IM`**（会无差别杀所有同名进程）。
 - **幂等闸门必须在拉起客户端之前**：先 `GET .../wallet/checkin`，
   `checked_in=true` 就直接返回，不启客户端不点击（实测 0.4s / 0 进程 / 0 点击）。
   点完再调同一接口复核，以接口为准，不信 OCR 文案。

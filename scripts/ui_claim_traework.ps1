@@ -34,6 +34,9 @@ using System.Runtime.InteropServices;
 public static class Cap32 {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  // 2026-10-08: needed by Reset-WindowRect (clamping an off-screen cold-start rect)
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
@@ -247,8 +250,41 @@ function Get-OcrLinesSafe {
     return Get-OcrLines
 }
 
+# --- window rect sanity: force it back on-screen -----------------------
+# 2026-10-08: TraeWork had NO equivalent of LobsterAI's Reset-WindowRect, and
+# that is why it kept failing. Cold start restores the window to a rect larger
+# than the desktop (observed win=3866x2090 on a 3840x2160 screen, click target
+# y=2031 — off the bottom). Symptoms looked like "OCR sees the workspace but
+# never the check-in entry": the anchor lives in the bottom-left, which is
+# exactly the part hanging off-screen. LobsterAI fixed the same class of bug
+# on 2026-10-03; this is the port of that fix.
+$sw = [Cap32]::GetSystemMetrics(0)
+$sh = [Cap32]::GetSystemMetrics(1)
+function Reset-WindowRect {
+    param([IntPtr]$h)
+    $rr = New-Object Cap32+RECT
+    [Cap32]::GetWindowRect($h, [ref]$rr) | Out-Null
+    $w = $rr.Right - $rr.Left
+    $hgt = $rr.Bottom - $rr.Top
+    if ($w -le 0 -or $hgt -le 0) { return $false }
+    if ($rr.Left -ge 0 -and $rr.Top -ge 0 -and $rr.Right -le $sw -and $rr.Bottom -le $sh) { return $false }
+    if ($w -gt $sw) { $w = $sw }
+    if ($hgt -gt $sh) { $hgt = $sh }
+    $nx = [Math]::Max(0, [Math]::Min($rr.Left, $sw - $w))
+    $ny = [Math]::Max(0, [Math]::Min($rr.Top, $sh - $hgt))
+    # SWP_NOZORDER(0x0004) | SWP_NOACTIVATE(0x0010)
+    [Cap32]::SetWindowPos($h, [IntPtr]::Zero, $nx, $ny, $w, $hgt, 0x0014) | Out-Null
+    Start-Sleep -Milliseconds 400
+    return $true
+}
+
 $rect = New-Object Cap32+RECT
 [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+if (Reset-WindowRect -h $hwnd) {
+    [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+    Write-Host ("rect was off-screen, clamped to {0},{1} {2}x{3} (screen {4}x{5})" -f `
+        $rect.Left, $rect.Top, ($rect.Right - $rect.Left), ($rect.Bottom - $rect.Top), $sw, $sh)
+}
 $winW = $rect.Right - $rect.Left
 $winH = $rect.Bottom - $rect.Top
 $winX = $rect.Left

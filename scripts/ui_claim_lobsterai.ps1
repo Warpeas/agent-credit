@@ -53,13 +53,53 @@ $asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
 function Await($op,$t){ $m=$asTask.MakeGenericMethod($t); $x=$m.Invoke($null,@($op)); $x.Wait(-1)|Out-Null; return $x.Result }
 
 [void][L32]::SetProcessDPIAware()
-$exe='$env:APPDATA\AppData\Local\Programs\LobsterAI\LobsterAI.exe'
+# 2026-10-08 修：原来是 '$env:APPDATA\AppData\Local\Programs\...' —— APPDATA 后面
+# 又拼了一段 AppData\Local，拼出C:\Users\Hunter\AppData\Roaming\AppData\Local\...
+# 这个路径不存在，于是 Test-Path 恒为 false，日志只打 "EXE MISSING" 就一路等超时。
+# 2026-10-07 及之前能跑是因为那次实例是别的脚本先拉起来的，本脚本走的是
+# "existing window" 分支，从没验证过 $exe。
+$exe=Join-Path $env:LOCALAPPDATA 'Programs\LobsterAI\LobsterAI.exe'
 $AppProcess='LobsterAI'
-$shotPath='$root\logs\lobsterai_shot.png'
-$ocrPath='$root\logs\lobsterai_explore_ocr.txt'
-$frameDir='$root\logs'
+# 2026-10-08 修：这三行原来用单引号，$root 不会被展开，实际路径是字面量
+# "$root\logs\lobsterai_shot.png"。GDI+ 保存到不存在的目录 →
+# "使用"2"个参数调用"Save"时发生异常:"GDI+ 中发生一般性错误。"，
+# Get-OcrLines 每次带 pngPath 都会炸，整条 OCR 链路直接崩在第一张截图上。
+$shotPath = Join-Path $root 'logs\lobsterai_shot.png'
+$ocrPath  = Join-Path $root 'logs\lobsterai_explore_ocr.txt'
+$frameDir = Join-Path $root 'logs'
 
 function Get-PidSet { $s=@{}; Get-Process $AppProcess -ErrorAction SilentlyContinue | ForEach-Object { $s[[uint32]$_.Id]=$true }; return $s }
+
+# --- 现场恢复函数组（必须定义在启动流程之前）---------------------------
+# 2026-10-08 修：这三个函数原先定义在脚本中段（Restore-Scene 在 ~279 行），
+# 但启动流程里的两处早退分支（-NoLaunch 未运行 / NO WINDOW）在 ~128/~142 行
+# 就调用 Restore-Scene。PowerShell 顺序执行，调用时函数尚未定义 →
+# "无法将"Restore-Scene"项识别为 cmdlet"，早退路径直接崩在清理上。
+$script:SavedForeground=[IntPtr]::Zero
+function Save-Foreground {
+    if($script:SavedForeground -eq [IntPtr]::Zero){
+        $f=[L32]::GetForegroundWindow()
+        if($f -ne $hwnd){ $script:SavedForeground=$f }
+    }
+}
+function Restore-Foreground {
+    try{ if($script:SavedForeground -ne [IntPtr]::Zero){ [void][L32]::SetForegroundWindow($script:SavedForeground) } }catch{}
+}
+function Close-LaunchedApp {
+    if (-not $script:LaunchedByUs) { Log "cleanup: skipped (was already running)"; return }
+    Log "closing the client we launched"
+    Start-Sleep -Seconds 2
+    foreach($p in @(Get-Process $AppProcess -ErrorAction SilentlyContinue)){
+        try { $p.CloseMainWindow() | Out-Null } catch { }
+    }
+    Start-Sleep -Seconds 5
+    foreach($p in @(Get-Process $AppProcess -ErrorAction SilentlyContinue)){
+        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+# 运行结束一律恢复现场：关掉本次自己拉起的实例（签到前就开着的保留），
+# 并把前台还给运行前那个窗口。失败也不留窗口——无人值守跑完桌面不该堆着客户端。
+function Restore-Scene { Close-LaunchedApp; Restore-Foreground }
 
 function Find-AppWindow($pids) {
     # 2026-10-04 取证结论（logs/_lobster_windows.json）：
@@ -264,19 +304,9 @@ function Click-At($ax,$ay) {
     [L32]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero)
 }
 
-$script:SavedForeground=[IntPtr]::Zero
-function Save-Foreground {
-    if($script:SavedForeground -eq [IntPtr]::Zero){
-        $f=[L32]::GetForegroundWindow()
-        if($f -ne $hwnd){ $script:SavedForeground=$f }
-    }
-}
-function Restore-Foreground {
-    try{ if($script:SavedForeground -ne [IntPtr]::Zero){ [void][L32]::SetForegroundWindow($script:SavedForeground) } }catch{}
-}
-# 运行结束一律恢复现场：关掉本次自己拉起的实例（签到前就开着的保留），
-# 并把前台还给运行前那个窗口。失败也不留窗口——无人值守跑完桌面不该堆着客户端。
-function Restore-Scene { Close-LaunchedApp; Restore-Foreground }
+# 2026-10-08：此处原有第二处 `$script:LaunchedByUs = $false`，位于启动流程之后，
+# 会把 168 行刚置的 true 冲回false → 脚本自己拉起的客户端永远不会被关闭。
+# 初始化统一留在 157 行（启动流程之前），此处删除。
 
 function Ensure-Foreground {
     Save-Foreground
@@ -309,19 +339,8 @@ function Dismiss-Ads {
     return $true
 }
 
-# 只关本次由脚本拉起的实例；签到前用户已开着的必须保留（三段式的「退出」步骤）。
-function Close-LaunchedApp {
-    if (-not $script:LaunchedByUs) { Log "keep client (was already running)"; return }
-    Log "closing the client we launched"
-    Start-Sleep -Seconds 2
-    foreach($p in @(Get-Process $AppProcess -ErrorAction SilentlyContinue)){
-        try { $p.CloseMainWindow() | Out-Null } catch { }
-    }
-    Start-Sleep -Seconds 5
-    foreach($p in @(Get-Process $AppProcess -ErrorAction SilentlyContinue)){
-        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
-    }
-}
+# 2026-10-08：Close-LaunchedApp 已上移到启动流程之前（与 Save/Restore-Foreground、
+# Restore-Scene 一起），此处删除重复定义。
 
 # --- wait until the loading screen is gone (LobsterAI boots an "AI engine") ---
 $lines=@()
@@ -357,6 +376,35 @@ Log ("OCR lines="+$out.Count)
 
 if($Explore){ Log "EXPLORE done (no click)"; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"explored","detail":"layout only"}',(New-Object System.Text.UTF8Encoding($false))) } exit 0 }
 
+# --- user-bar locator ----------------------------------------------------
+# 2026-10-08 事故：原选择器是 `x<15%W 且 y>80%H 取第一条`。面板展开时该区域
+# 同时有「退出登录」(103,1064) 和「我的」(97,1145)，OCR 返回顺序不保证，
+# 21:56 那轮 break 在「退出登录」上 → 脚本把登录态点没了，auth_tokens 从
+# sqlite 消失（external 也跟着报「未登录」）。
+# 修：① 黑名单挡掉菜单行/ ② 优先精确命中「我的」③ 面板已展开时不再重复点。
+$script:PanelRowExclusion = '退出登录|退出登陆|立即登录|登录|token|积分礼|邀请|充值|用量|额度|查看|明细|设置|账号'
+
+function Find-UserBar($lines) {
+    $cands = @()
+    foreach($l in $lines){
+        if($l.x -ge ($winW*0.15) -or $l.y -le ($winH*0.80)){ continue }
+        if($l.text -match $script:PanelRowExclusion){ continue }
+        $cands += $l
+    }
+    # 「我的」是锚点，优先；否则取最靠下的一条（用户栏总在面板最底部）
+    foreach($l in $cands){ if($l.text -eq '我的' -or $l.text -match '^我的$|^@?我的$'){ return $l } }
+    if($cands.Count -eq 0){ return $null }
+    return ($cands | Sort-Object { $_.y } -Descending)[0]
+}
+
+# 面板是否已展开：左侧出现「每日积分礼」行（收起状态下这行不存在）
+function Test-PanelOpen($lines) {
+    foreach($l in $lines){
+        if($l.x -lt ($winW*0.35) -and $l.text -match '每日积分礼'){ return $true }
+    }
+    return $false
+}
+
 # --- VERIFY: open the bottom-left user bar and read today's check-in state ---
 # Phase-2 only: never launches/closes anything else, safe to run repeatedly
 # against an already-open client (no extra UAC beyond this run's elevation).
@@ -364,12 +412,16 @@ if($Verify){
     Ensure-Foreground
     [void](Dismiss-Ads)
     $lines = Get-OcrLines $shotPath
-    $bar=$null
-    foreach($l in $lines){ if($l.x -lt ($winW*0.15) -and $l.y -gt ($winH*0.80)){ $bar=$l; break } }
-    if(-not $bar){ $bar = @{ text="(fallback)"; x=[int]($winW*0.03); y=[int]($winH*0.93); w=140; h=44 } }
-    $bx=$bar.x+[int]($bar.w/2); $by=$bar.y+[int]($bar.h/2)
-    Log ("verify: click user bar '"+$bar.text+"' at "+$bx+","+$by)
-    Click-At $bx $by
+    $panelOpen = Test-PanelOpen $lines
+    if($panelOpen){
+        Log "verify: panel already open, skip toggling (clicking again would close it)"
+    } else {
+        $bar = Find-UserBar $lines
+        if(-not $bar){ $bar = @{ text="(fallback)"; x=[int]($winW*0.03); y=[int]($winH*0.93); w=140; h=44 } }
+        $bx=$bar.x+[int]($bar.w/2); $by=$bar.y+[int]($bar.h/2)
+        Log ("verify: click user bar '"+$bar.text+"' at "+$bx+","+$by)
+        Click-At $bx $by
+    }
 
     $verdict="unknown"; $hit=""; $unclaimed=$null; $giftRow=$null
     $vi=0
@@ -484,8 +536,7 @@ if($chip){
     }
 }
 
-$bar=$null
-foreach($l in $lines){ if($l.x -lt ($winW*0.15) -and $l.y -gt ($winH*0.80)){ $bar=$l; break } }
+$bar = Find-UserBar $lines
 if(-not $bar){
     # Same fallback the verify path already uses: the user bar sits at a fixed
     # spot at the bottom-left. Better to click the known coordinate than to give
@@ -494,7 +545,11 @@ if(-not $bar){
 }
 
 $claimBtn=$null; $alreadyHit=$null
-if($bar){
+if(Test-PanelOpen $lines){
+    # 面板已经开着（Path C 走chip 判定后没关）。再点一次用户栏会把它关掉，
+    # 后面 3 帧都读不到「立即领取」→ 必然 no claim path worked。直接读当前面板。
+    Log "panel already open, skip toggling"
+} elseif($bar){
     $bx=$bar.x+[int]($bar.w/2); $by=$bar.y+[int]($bar.h/2)
     Log ("open user panel '"+$bar.text+"' at "+$bx+","+$by)
     Click-At $bx $by

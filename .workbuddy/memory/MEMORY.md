@@ -16,6 +16,46 @@
 - ⚠️ `Remove-ScheduledTask` **不存在**，用 `Unregister-ScheduledTask -TaskName X -Confirm:$false`。
 - 计划任务里跑 Python 崩了看不到 stderr → 脚本必须自己try/except 把 traceback 落盘。
 - 屏幕 3840x2160 物理像素，有 DPI 缩放（`GetSystemMetrics(0/1)` 实测）。
+- ⚠️ **拉起GUI 客户端的任务跑完不要 Unregister** —— 任务生命周期 == 应用生命周期，
+  `Stop/Unregister-ScheduledTask` 会连带杀掉客户端。2026-10-08 踩过：
+  claim 跑完自动关客户端，下一轮直接 notfound，得重新拉。
+
+## 沙箱拉不起 GUI 客户端的通用解法（非提权计划任务）
+
+沙箱会话里 `Start-Process` / `Popen` 拉 GUI 客户端，进程数**恒为 0**，静默失败。
+解法：`RunLevel=Limited` + `LogonType=Interactive` 的计划任务能在真实桌面会话里拉起，
+**且不弹 UAC**（RunLevel=Limited 而非 HighestAvailable）。
+
+```powershell
+$action= New-ScheduledTaskAction -Execute $exe -WorkingDirectory (Split-Path -Parent $exe)
+$principal = New-ScheduledTaskPrincipal -UserId "Hunter" -LogonType Interactive -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName X -Action $action -Principal $principal -Settings $settings | Out-Null
+Start-ScheduledTask -TaskName X
+```
+
+**同完整性原理**：客户端既然是 Limited 任务拉起的（中完整性），
+后续驱动它的 UI 脚本同完整性跑即可，**不需要 UAC**——
+UIPI 只拦 LOW→HIGH 注入，两边同级不受影响。
+这推翻了「Electron 客户端签到必须提权」的旧结论（见 TraeWork 段）。
+
+现成启动器（都在 `scripts/`，用完Unregister 任务，但别 Unregister 客户端本身）：
+- `_task_lobsterai.ps1 -Mode claim|verify`
+- `_task_traework.ps1 -ProcessName <name> [-WaitReady]` — 只拉客户端
+- `_task_traework_claim.ps1 -Mode claim|dry-run|explore` — 跑 TraeWork
+
+## PowerShell 脚本两个反复出现的 bug 类型
+
+1. **单引号里的 `$` 不展开**：`$x='$root\logs\a.png'` 实际是字面量 `$root\logs\a.png`。
+   2026-10-08 在 LobsterAI 里一次撞了 3 处（`$exe`/`$shotPath`/`$ocrPath`/`$frameDir`），
+   表现为 `GDI+ 中发生一般性错误` 与 `EXE MISSING`。
+   **凡 `$var='...\...'` 立刻可疑，不管包的是 `$root` 还是 `$env:X`。改用 `Join-Path`。**
+2. **函数定义顺序**：`Restore-Scene` 定义在 ~279 行却在 ~128 行被调用 →
+   `无法将"Restore-Scene"项识别为 cmdlet`。PowerShell 顺序执行，
+   **凡在启动流程里调用的函数，定义必须放在启动流程之前**。
+3. 补 P/Invoke 时记得核对：新调用的 Win32 API 是否已在 `Add-Type` 块里声明
+   （`SetWindowPos`/`GetSystemMetrics` 在 TraeWork 里就原本没声明）。
 
 ## UI 坐标换算（跨客户端通用，最易踩坑）
 
@@ -127,11 +167,45 @@ abs = 窗口原点 + 缩略图坐标 * scale
   i18n `creditsDetail.ledger.expiresAt` = 「{{date}} 到期」，
   `expiresAt` 是 Unix 秒级时间戳）。⚠️ UI 上「N 积分将于 N 天内到期」是**滚动提示**
   （只显示最近一批剩余天数，见过「152→3 天」与「542→3 天」两条），不能反推固定天数。
-- 积分礼**不走活动下发**（`slot` 永久 empty），只能界面领。
+- 积分礼**不走 `daily_check_in` 槽位**（`slot` 永久 empty，已于 2026-10-08 复核）。
+  asar 里另有**第二条通道**：`startupCredit*` / `AlreadyClaimed: 51104` /
+  `ActivityTemplate.NativeStartupCreditV1` / `ActivityType.OneTimeCreditReward`，
+  UI 上那个「每日积分礼」大概率走这条。完整端点未挖（探索预算用尽，按 SAFETY 停手）。
+  ⚠️ 所以**判定今天是否已领不能只看 external 槽位**，要看 UI 面板：
+  「积分额度」数值 + 有无「立即领取」按钮。实测 10-08面板额度 1800 且无按钮
+  （10-07 是 1100/900 且有按钮），据此判已入账。
+  ⚠️ **日志时间戳不保证单调**（多轮追加、跨午夜未排序，日志第一行可能是前一晚），
+  判断"哪天领的"要用积分额度数值变化对齐，不能只看行首时间。
   入口两处等价：左下「我的」展开面板里的「立即领取」、右上角「每日积分礼」chip。
 - 冷启动后需等登录态同步，chip 才会渲染（Path C 有 75s 等待循环）。
 - **没有可用的 external 余额查询端点**（`/api/user/profile` 只返回 yid/nickname/id，
   10 个balance 类候选全 404）→ 余额只能靠 UI OCR。
+  本地 sqlite `%APPDATA%\LobsterAI\lobsterai.sqlite` 只有 `kv` 表 22 行，
+  **无积分/活动缓存**（2026-10-08 实测，别再指望查本地库拿状态）。
+- ⚠️ **用户栏选择器不能只按空间位置挑**（2026-10-08 事故）：
+  面板**展开态**时左下角同时有「退出登录」和「我的」，
+  `y>80%H 取第一条`会 break 在「退出登录」上 → **脚本把登录态点没了**
+  （`auth_tokens` 从 sqlite kv 消失，external 跟着报未登录，需人工重新登录）。
+  ✅ 修法见 `ui_claim_lobsterai.ps1` 的 `Find-UserBar` + `Test-PanelOpen`：
+  ①黑名单挡菜单行 ② 优先精确命中「我的」③ 面板已展开时不再点 toggle。
+  **通用教训：toggle 类 UI 的展开态与收起态布局完全不同，
+  "判当前是开是关"必须单独做，不能靠点之前的位置假设。**
+
+### TraeWork / TraeCode
+- ⚠️ **「冷启动 60s 无窗口」从来不是环境问题，是脚本缺窗口归位**
+  （2026-10-08 定案）。`ui_claim_traework.ps1` 一直缺 LobsterAI 早在 10-03
+  就有的 `Reset-WindowRect`：冷启动把窗口恢复到比桌面还大的 rect
+  （实测 `win=3866x2090` on 3840x2160，点击点 `y=2031` 已在屏幕外），
+  而签到锚点在**左下角**，正好是挂在屏幕外的那部分
+  → OCR 看得见工作区、永远看不见签到入口。
+  ✅ 已补齐（连同 `SetWindowPos`/`GetSystemMetrics` 的 DllImport 声明，
+  这两个 API 原本也没声明）。补完 dry-run 立刻从「未找到签到入口」
+  变成「将点击签到入口: 每日领」，真实点击返回「本账号今日已签到，明日再来」。
+- ⚠️ **UIPI 结论已推翻**：旧文档说「必须提权，否则点击被 UIPI 丢弃」。
+  实测客户端既然是**非提权计划任务**拉起的（中完整性），
+  签到脚本同完整性跑点击**正常生效**，不需要 UAC。
+  UIPI 只拦 LOW→HIGH，两边同级不受影响。
+  → 首选 `scripts\_task_traework_claim.ps1`（非提权），别再弹 UAC。
 
 ## 工程约定
 

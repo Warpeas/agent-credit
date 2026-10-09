@@ -383,6 +383,10 @@ if($Explore){ Log "EXPLORE done (no click)"; if($OutFile){ [System.IO.File]::Wri
 # sqlite 消失（external 也跟着报「未登录」）。
 # 修：① 黑名单挡掉菜单行/ ② 优先精确命中「我的」③ 面板已展开时不再重复点。
 $script:PanelRowExclusion = '退出登录|退出登陆|立即登录|登录|token|积分礼|邀请|充值|用量|额度|查看|明细|设置|账号'
+# 「立即领取」按钮是黑底白字，Windows OCR 经常只认出前两个字（2026-10-10 实证：
+# 完整识别过「立即领取」，也识别成过「立即」）。匹配放宽到「立即」，但排除「登录」，
+# 否则未登录态的「立即登录」会被当成领取按钮点下去。
+$script:ClaimBtnRe = '立即领取|立即领|立即'
 
 function Find-UserBar($lines) {
     $cands = @()
@@ -434,7 +438,7 @@ if($Verify){
         foreach($l in $cap){
             if($l.text -match '今日已签到|已签到|今日已领|已领取|连续签到|签到成功'){ $verdict="claimed"; $hit=$l.text }
             if(-not $giftRow -and $l.x -lt ($winW*0.35) -and $l.text -match '每日积分礼'){ $giftRow=$l }
-            if(-not $unclaimed -and $l.x -lt ($winW*0.35) -and $l.text -match '立即领取'){ $unclaimed=$l }
+            if(-not $unclaimed -and $l.x -lt ($winW*0.35) -and $l.text -match $ClaimBtnRe -and $l.text -notmatch '登录'){ $unclaimed=$l }
         }
         if($verdict -ne "unknown"){ break }
     }
@@ -505,7 +509,7 @@ if($chip){
         $chipBtn=$null; $chipDone=$null
         foreach($l in $cap){
             if(-not $chipDone -and $l.text -match '今日已领|已领取|本期已完成'){ $chipDone=$l }
-            if(-not $chipBtn -and $l.text -match '立即领取'){ $chipBtn=$l }
+            if(-not $chipBtn -and $l.text -match $ClaimBtnRe -and $l.text -notmatch '登录'){ $chipBtn=$l }
         }
         if($chipDone){
             Log ("chip already: "+$chipDone.text); Close-LaunchedApp
@@ -521,7 +525,7 @@ if($chip){
                 $f = Get-OcrLines ""
                 $chipHit=$null; $btnGone=$true
                 foreach($l in $f){
-                    if($l.text -match '立即领取'){ $btnGone=$false }
+                    if($l.text -match $ClaimBtnRe -and $l.text -notmatch '登录'){ $btnGone=$false }
                     if(-not $chipHit -and $l.text -match '今日已领|已领取|领取成功|成功'){ $chipHit=$l }
                 }
                 if($chipHit -or $btnGone){
@@ -562,7 +566,7 @@ if(Test-PanelOpen $lines){
         Log ("panel"+$pi+": "+$dump.Substring(0,[Math]::Min(500,$dump.Length)))
         foreach($l in $cap){
             if(-not $alreadyHit -and $l.text -match '今日已领|已领取|已签到'){ $alreadyHit=$l }
-            if(-not $claimBtn -and $l.x -lt ($winW*0.35) -and $l.text -match '立即领取'){ $claimBtn=$l }
+            if(-not $claimBtn -and $l.x -lt ($winW*0.35) -and $l.text -match $ClaimBtnRe -and $l.text -notmatch '登录'){ $claimBtn=$l }
         }
         if($claimBtn -or $alreadyHit){ break }
     }
@@ -585,7 +589,7 @@ if($claimBtn){
             $btnStill=$false; $rowStill=$false
             foreach($l in $fcap){
                 if($l.x -lt ($winW*0.35)){
-                    if($l.text -match '立即领取'){ $btnStill=$true }
+                    if($l.text -match $ClaimBtnRe -and $l.text -notmatch '登录'){ $btnStill=$true }
                     if($l.text -match '每日积分礼'){ $rowStill=$true }
                 }
             }

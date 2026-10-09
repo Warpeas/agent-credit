@@ -390,6 +390,8 @@ def write_result(status: str, detail: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--explore", action="store_true", help="只截图，不点击")
+    ap.add_argument("--steps", type=int, default=0,
+                    help="explore 模式下先执行前 N 步导航再截图（用于观察深层页面）")
     ap.add_argument("--force", action="store_true", help="即使接口显示已签也照点（调试用）")
     ap.add_argument("--settle", type=int, default=20)
     args = ap.parse_args()
@@ -428,9 +430,8 @@ def main() -> int:
     launched_by_us = False
     log(f"preexisting procs={len(pids)}")
     if not pids:
-        if args.explore:
-            log("not running and --explore; abort")
-            return 1
+        # explore 也允许自己拉起（收尾时会关掉自己启动的实例）——
+        # 沙箱/计划任务会话无法在脚本外预先把客户端开好。
         log("launching MonkeyCode")
         subprocess.Popen([EXE], close_fds=True)
         launched_by_us = True
@@ -463,10 +464,27 @@ def main() -> int:
     X, Y, W, H = r.left, r.top, r.right - r.left, r.bottom - r.top
     log(f"hwnd={hwnd} RECT={X},{Y} {W}x{H}")
 
+    # 路径：左下「设置」-> 弹层（默认/记忆落在「账号」页）-> 「签到 +100」。
+    # lx/ly 是 Read 展示的缩略图(1088宽)坐标系下的坐标，由 content_click 换算。
+    # 2026-10-10：弹层点开即停在「账号」页，原第二步「账号 tab」已删——
+    # 它在弹层未开时会把点击漏进主界面，反而把后续流程带偏。
+    steps = [
+        (52, 692, "click 设置"),
+        (553, 379, "click 签到 +100"),
+    ]
+
     if args.explore:
         px, w, h = screen_shot(X, Y, W, H)
-        write_png(LOGDIR / "_monkey_explore.png", px, w, h)
-        log(f"shot -> logs/_monkey_explore.png ({w}x{h})")
+        # 逐步导航但不点最后的目标按钮，用于定位改版后的入口。
+        for lx, ly, what in steps[: max(0, args.steps)]:
+            cx, cy = content_click(px, w, h, lx, ly, X, Y)
+            log(f"{what} logic=({lx},{ly}) abs=({cx},{cy})")
+            click(cx, cy)
+            time.sleep(1.8)
+            px, w, h = screen_shot(X, Y, W, H)
+        tag = f"_monkey_explore{'_nav' if args.steps else ''}.png"
+        write_png(LOGDIR / tag, px, w, h)
+        log(f"shot -> logs/{tag} ({w}x{h})")
         # explore 模式也收尾：它可能自己拉起了客户端
         _cleanup(launched_by_us, prev_foreground)
         return 0
@@ -477,19 +495,50 @@ def main() -> int:
         # 初始位图，供content_click 做内容边界检测
         px, w, h = screen_shot(X, Y, W, H)
 
-        # 路径：左下「设置」-> 弹层 -> 左侧「账号」页 -> 「签到 +100」。
-        # lx/ly 是 Read 展示的缩略图(1088宽)坐标系下的坐标，由 content_click 换算。
-        steps = [
-            (52, 692, "click 设置"),
-            (165, 170, "click 账号 tab"),
-            (563, 380, "click 签到 +100"),
-        ]
-        for lx, ly, what in steps:
-            cx, cy = content_click(px, w, h, lx, ly, X, Y)
-            log(f"{what} logic=({lx},{ly}) abs=({cx},{cy})")
+        def count_green(img) -> int:
+            """积分卡片的绿色特征（「695」数字 + 「签到 +100」链接）。
+            区域 x∈[0.48,0.70]W, y∈[0.40,0.70]H —— 从 x=0.48 起避开左侧
+            绿色进度条（终点 ~0.47）。>阈值 即认为账号页弹层当前开着。
+            2026-10-10 教训：「设置」按钮是 toggle，弹层残留开着时点它反而
+            会把弹层关掉，后续点击全部落空——所以动手前必须先判状态。
+            """
+            p2, w2, h2 = img
+            x0, x1 = int(w2 * 0.48), int(w2 * 0.70)
+            y0, y1 = int(h2 * 0.40), int(h2 * 0.70)
+            n = 0
+            for y in range(y0, y1, 3):
+                base = y * w2
+                for x in range(x0, x1, 3):
+                    o = (base + x) * 4          # BGRA
+                    b_, g_, r_ = p2[o], p2[o + 1], p2[o + 2]
+                    if g_ > 110 and g_ > r_ * 1.4 and g_ > b_ * 1.3:
+                        n += 1
+            return n
+
+        # 步骤1：确保账号页弹层开着。最多点两次「设置」，每次点击后都重新判定，
+        # 弹层本来就开（比如上一轮残留）时一次都不点。
+        for attempt in range(2):
+            g = count_green((px, w, h))
+            log(f"account-page green={g} (attempt {attempt})")
+            if g >= 15:
+                break
+            cx, cy = content_click(px, w, h, steps[0][0], steps[0][1], X, Y)
+            log(f"click 设置 abs=({cx},{cy})")
             click(cx, cy)
             time.sleep(1.8)
-            px, w, h = screen_shot(X, Y, W, H)   # 每步后重抓，弹层会改变内容
+            px, w, h = screen_shot(X, Y, W, H)
+        else:
+            write_png(LOGDIR / "_monkey_account.png", px, w, h)
+            write_result("pending", "两次点击设置后仍未检测到账号页（积分卡片绿色特征缺失），未点签到，不入账")
+            log("result status=pending detail=账号页未打开")
+            return 1
+
+        # 步骤2：点「签到 +100」（弹层内固定相对位，content_click 负责坐标换算）
+        cx, cy = content_click(px, w, h, steps[1][0], steps[1][1], X, Y)
+        log(f"click 签到 +100 abs=({cx},{cy})")
+        click(cx, cy)
+        time.sleep(1.8)
+        px, w, h = screen_shot(X, Y, W, H)
 
         write_png(LOGDIR / "_monkey_account.png", px, w, h)
         log("shot -> logs/_monkey_account.png")
@@ -511,7 +560,11 @@ def main() -> int:
             else:
                 status, detail = "pending", "已点击但接口仍显示未签到，可能弹了验证码"
         except Exception as e:  # noqa: BLE001
-            detail = f"点击完成但复核失败: {e}"
+            # 复核失败绝不能报 ok。2026-10-10 实证：账号页 UI 改版后「积分」卡片
+            # 消失，脚本按旧坐标点击落在空白处，报 ok 导致账本虚记 100（已回滚）。
+            # 宁可 pending 不入账，不可无凭据记成功。
+            status = "pending"
+            detail = f"点击完成但复核失败: {e}（不入账，待人工确认）"
 
         log(f"result status={status} detail={detail}")
     finally:

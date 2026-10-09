@@ -17,6 +17,9 @@ SCRIPT_AUTOCLAW_OCR = ROOT / "scripts" / "ui_claim_autoclaw.ps1"
 SCRIPT_MINIMAX_OCR = ROOT / "scripts" / "ui_claim_minimax.ps1"
 SCRIPT_LOBSTERAI_OCR = ROOT / "scripts" / "ui_claim_lobsterai.ps1"
 SCRIPT_TRAEWORK_OCR = ROOT / "scripts" / "ui_claim_traework.ps1"
+TASK_TRAEWORK_LAUNCHER = ROOT / "scripts" / "_task_traework.ps1"
+
+PS = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"]
 
 DEFAULT_CLICK = ("签到", "立即签到", "立即领取", "打卡")
 DEFAULT_ALREADY = ("已签到", "今日已签", "已领取", "已打卡")
@@ -131,14 +134,89 @@ def _claim_minimax() -> tuple[bool, str]:
     return _run_elevated_ps1(SCRIPT_MINIMAX_OCR, LOG_DIR / "minimax_claim.json")
 
 
-def _claim_traework() -> tuple[bool, str]:
-    """TraeWork route: elevated screenshot+OCR+click.
+def _read_result(result_path: Path) -> tuple[bool, str]:
+    """Interpret the JSON the ps1 helpers write."""
+    if not result_path.exists():
+        return False, "签到脚本未产出结果文件"
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False, "签到结果文件无法解析"
+    if not isinstance(payload, dict):
+        return False, "签到结果格式异常"
+    status = str(payload.get("status") or "")
+    detail = str(payload.get("detail") or status)
+    return status in ("ok", "already"), detail
 
-    Uses its own dedicated ps1 (not the generic recipe) because the button text
-    is non-obvious and the menu is a toggle. Needs elevation: a non-elevated
-    launch cannot cold-start the client in this environment.
+
+def _run_ps1(script: Path, result_path: Path, timeout: int = 240) -> tuple[bool, str]:
+    """Run a claim ps1 at the CURRENT integrity level and read its JSON result."""
+    if not script.is_file():
+        return False, f"缺少 {script}"
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    if result_path.exists():
+        result_path.unlink()
+
+    cmd = PS + ["-WindowStyle", "Hidden", "-File", str(script), "-OutFile", str(result_path)]
+    try:
+        subprocess.run(cmd, cwd=str(ROOT), timeout=timeout, capture_output=True)
+    except subprocess.TimeoutExpired:
+        return False, f"签到脚本超时（{timeout}s）"
+    return _read_result(result_path)
+
+
+def _launch_via_limited_task(launcher: Path, timeout: int = 150) -> tuple[bool, str]:
+    """Cold-start a GUI client through a RunLevel=Limited scheduled task.
+
+    Every direct launch path fails here: os.startfile, ShellExecute and
+    subprocess.Popen all report success while producing zero processes, because
+    the caller runs inside Task Scheduler / an automation sandbox rather than the
+    interactive desktop. A Limited + Interactive scheduled task does land in the
+    real desktop session, and Limited means no UAC prompt.
+
+    The launcher must NOT unregister the task afterwards — its lifetime is the
+    client's lifetime. Verified 2026-10-08 and 2026-10-09.
     """
-    return _run_elevated_ps1(SCRIPT_TRAEWORK_OCR, LOG_DIR / "traework_claim.json")
+    if not launcher.is_file():
+        return False, f"缺少 {launcher}"
+    try:
+        proc = subprocess.run(
+            PS + ["-File", str(launcher), "-WaitReady"],
+            cwd=str(ROOT), timeout=timeout, capture_output=True, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"拉起客户端超时（{timeout}s）"
+    out = (proc.stdout or "").strip()
+    if proc.returncode != 0:
+        return False, f"拉起客户端失败 rc={proc.returncode}: {out[:200]}"
+    if "EXE MISSING" in out:
+        return False, out[:200]
+    return True, out[-200:]
+
+
+def _claim_traework() -> tuple[bool, str]:
+    """TraeWork route: cold-start via scheduled task, then click at medium integrity.
+
+    Deliberately NOT elevated. The previous implementation used
+    ShellExecute("runas"), but elevation does not help spawn a visible window —
+    it still reported "no main window within 60s" every time the client was not
+    already open, which is what broke the 2026-10-08 and 2026-10-09 check-ins.
+
+    Both halves are medium integrity here, so UIPI does not block the synthetic
+    clicks (it only gates LOW -> HIGH). Same reasoning as the other helpers, just
+    without the UAC detour. Fixed 2026-10-09.
+    """
+    if not SCRIPT_TRAEWORK_OCR.is_file():
+        return False, f"缺少 {SCRIPT_TRAEWORK_OCR}"
+
+    ok, note = _launch_via_limited_task(TASK_TRAEWORK_LAUNCHER)
+    if not ok:
+        return False, note
+    ok, detail = _run_ps1(SCRIPT_TRAEWORK_OCR, LOG_DIR / "traework_claim.json", timeout=200)
+    if not ok:
+        return False, f"{detail}（启动日志: {note}）"
+    return True, detail
 
 
 def _claim_lobsterai() -> tuple[bool, str]:

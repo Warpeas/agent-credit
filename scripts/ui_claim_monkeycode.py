@@ -42,6 +42,12 @@ EXE = str(Path(os.environ["LOCALAPPDATA"]) / "MonkeyCode" / "monkeycode-desktop.
 PROC = "monkeycode-desktop.exe"
 RESULT = LOGDIR / "monkeycode_claim.json"
 
+# webview 渲染就绪阈值（content_ink 的千分比）。空白/半空白窗口远低于此，
+# 画完的客户端工作台远高于此。10-11 冷启动失败那轮 ink 停在低位徘徊，
+# 之前没有这个判断，直接把「没渲染」当成「弹层没开」而多点了 toggle。
+INK_MIN = 40
+INK_WAIT_MAX = 60.0
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 user32.SetProcessDPIAware()
@@ -201,6 +207,18 @@ def win_pid(h: int) -> int:
 def win_rect(h: int):
     r = RECT()
     return r if user32.GetWindowRect(h, ctypes.byref(r)) else None
+
+
+def win_rect_tuple(h: int) -> tuple[int, int, int, int] | None:
+    """win_rect 的元组版 (left, top, width, height)，拿不到返回 None。
+
+    win_rect 返回的是 ctypes RECT 结构体，直接解包会抛
+    "cannot unpack non-iterable RECT object"（11-22 实踩）。
+    """
+    r = win_rect(h)
+    if r is None:
+        return None
+    return int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top)
 
 
 def enum_windows():
@@ -382,6 +400,44 @@ def click(x: int, y: int) -> None:
     time.sleep(0.5)
 
 
+def content_ink(img) -> int:
+    """内容区「非纯色像素」占比×1000，衡量 webview 画了多少东西。
+
+    2026-10-11 新增。冷启动失败那轮（10:59）根因就是这个：
+      settle=20s 后webview 还是空白/半空白，count_green 读到 0 → 判定「弹层没开」
+      → 再点一次「设置」→ 「设置」是 toggle，把刚开的弹层又关掉了 → 全盘落空。
+    空白窗口的 ink 极低（只剩标题栏和边框），画完的窗口 ink 上千。
+    有了这个量，就能在点「设置」之前确认「至少画面已经画出来」，
+    避免把「没渲染」误当成「弹层没开」而触发 toggle 反噬。
+    """
+    p, w, h = img
+    stride = w * 4
+    votes: dict[tuple[int, int, int], int] = {}
+    for y in range(0, min(40, h), 4):
+        for x in range(0, min(40, w), 4):
+            o = (y * w + x) * 4
+            c = (p[o + 2], p[o + 1], p[o])
+            votes[c] = votes.get(c, 0) + 1
+    if not votes:
+        return 0
+    bg = max(votes.items(), key=lambda kv: kv[1])[0]
+
+    def is_bg(c: tuple[int, int, int]) -> bool:
+        return abs(c[0] - bg[0]) < 12 and abs(c[1] - bg[1]) < 12 and abs(c[2] - bg[2]) < 12
+
+    ink = 0
+    total = 0
+    # 跳过标题栏：只采样内容区（y 从 8% 起）
+    for y in range(int(h * 0.08), h, 6):
+        base = y * stride
+        for x in range(0, w, 6):
+            o = base + x * 4
+            total += 1
+            if not is_bg((p[o + 2], p[o + 1], p[o])):
+                ink += 1
+    return int(ink * 1000 / total) if total else 0
+
+
 def write_result(status: str, detail: str) -> None:
     RESULT.write_text(json.dumps({"status": status, "detail": detail},
                                 ensure_ascii=False), encoding="utf-8")
@@ -495,6 +551,36 @@ def main() -> int:
         # 初始位图，供content_click 做内容边界检测
         px, w, h = screen_shot(X, Y, W, H)
 
+        # ---- 等 webview 画完（2026-10-11 新增）----
+        # 自己拉起的客户端必须等：空白窗口下count_green 恒为 0，会被误判成
+        # 「弹层没开」，而「设置」是 toggle —— 第二次点击会把弹层关掉。
+        # 已在运行的客户端画面早就画好了，这一轮立即通过，不浪费时间。
+        ink = content_ink((px, w, h))
+        log(f"content_ink={ink} (settle={args.settle}s)")
+        waited = 0.0
+        while ink < INK_MIN and waited < INK_WAIT_MAX:
+            time.sleep(2.0)
+            waited += 2.0
+            px, w, h = screen_shot(X, Y, W, H)
+            ink = content_ink((px, w, h))
+            log(f"content_ink={ink} after +{waited:.0f}s")
+        if ink < INK_MIN:
+            write_png(LOGDIR / "_monkey_account.png", px, w, h)
+            _cleanup(launched_by_us, prev_foreground)
+            write_result("pending",
+                         f"webview 等待 {waited:.0f}s 仍未渲染（ink={ink} < {INK_MIN}），"
+                         "未做任何点击，不入账")
+            log(f"result status=pending detail=webview not rendered (ink={ink})")
+            return 1
+        # 窗口刚画完时 rect 可能仍在变（冷启动实测 495,344 2728x1816 vs
+        # 稳态 294,294 2426x1615）。重取一次 rect 并重截，避免坐标基于旧 rect。
+        new_rect = win_rect_tuple(hwnd)
+        if new_rect is not None and new_rect != (X, Y, W, H):
+            log(f"rect changed after render: {X},{Y} {W}x{H} -> "
+                f"{new_rect[0]},{new_rect[1]} {new_rect[2]}x{new_rect[3]}")
+            X, Y, W, H = new_rect
+            px, w, h = screen_shot(X, Y, W, H)
+
         def count_green(img) -> int:
             """积分卡片的绿色特征（「695」数字 + 「签到 +100」链接）。
             区域 x∈[0.48,0.70]W, y∈[0.40,0.70]H —— 从 x=0.48 起避开左侧
@@ -517,10 +603,17 @@ def main() -> int:
 
         # 步骤1：确保账号页弹层开着。最多点两次「设置」，每次点击后都重新判定，
         # 弹层本来就开（比如上一轮残留）时一次都不点。
+        panel_ready = False
         for attempt in range(2):
             g = count_green((px, w, h))
             log(f"account-page green={g} (attempt {attempt})")
             if g >= 15:
+                panel_ready = True
+                break
+            # 点了「设置」却仍然 green=0 时，先确认画面真的画出来了：
+            # 没渲染就再点是拿 toggle 互flip（开→关），只会把流程带偏。
+            if attempt > 0 and content_ink((px, w, h)) < INK_MIN:
+                log("picture still blank after click; treat as not-rendered, stop clicking")
                 break
             cx, cy = content_click(px, w, h, steps[0][0], steps[0][1], X, Y)
             log(f"click 设置 abs=({cx},{cy})")
@@ -528,9 +621,15 @@ def main() -> int:
             time.sleep(1.8)
             px, w, h = screen_shot(X, Y, W, H)
         else:
+            panel_ready = False
+        # 无论走break 还是走完两轮，没拿到 green 证据就一律不点签到。
+        # 10-11 教训：条件循环里break 出去极易让后续步骤失去状态闸门，
+        # 一旦这里放过，下一步就是盲点 UI——比漏签一天糟得多。
+        if not panel_ready:
             write_png(LOGDIR / "_monkey_account.png", px, w, h)
-            write_result("pending", "两次点击设置后仍未检测到账号页（积分卡片绿色特征缺失），未点签到，不入账")
-            log("result status=pending detail=账号页未打开")
+            write_result("pending",
+                         "未能确认账号页弹层已打开（积分卡片绿色特征缺失），未点签到，不入账")
+            log("result status=pending detail=账号页未确认打开")
             return 1
 
         # 步骤2：点「签到 +100」（弹层内固定相对位，content_click 负责坐标换算）

@@ -50,8 +50,10 @@ LAUNCH_CANDIDATES: dict[str, list[Path]] = {
     "workbuddy": [LOCAL_PROGRAMS / "WorkBuddy" / "WorkBuddy.exe"],
     "minimax": [LOCAL_PROGRAMS / "MiniMax Code" / "MiniMax Code.exe"],
     "traework": [
-        LOCAL_PROGRAMS / "TRAE SOLO CN" / "TRAE SOLO CN.exe",
+        # 2026-10-11: TRAE SOLO CN 已并入 Trae CN，旧目录只剩 debug.log。
+        # 活的那个排前面，「first existing wins」才不会白 stat 一条死路径。
         LOCAL_PROGRAMS / "Trae CN" / "Trae CN.exe",
+        LOCAL_PROGRAMS / "TRAE SOLO CN" / "TRAE SOLO CN.exe",
     ],
     "lobsterai": [LOCAL_PROGRAMS / "LobsterAI" / "LobsterAI.exe"],
     "dumate": [LOCAL_PROGRAMS / "DuMate" / "DuMate.exe"],

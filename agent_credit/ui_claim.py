@@ -18,6 +18,9 @@ SCRIPT_MINIMAX_OCR = ROOT / "scripts" / "ui_claim_minimax.ps1"
 SCRIPT_LOBSTERAI_OCR = ROOT / "scripts" / "ui_claim_lobsterai.ps1"
 SCRIPT_TRAEWORK_OCR = ROOT / "scripts" / "ui_claim_traework.ps1"
 TASK_TRAEWORK_LAUNCHER = ROOT / "scripts" / "_task_traework.ps1"
+# 2026-10-11：TRAE SOLO CN（TraeWork）已合并进 Trae CN，旧安装目录只剩 debug.log。
+# 两个产品向来共用同一个积分账户，所以台账继续只用 `traework` 一条，不新增账户。
+TRAEWORK_PROCESS = "Trae CN"
 
 PS = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"]
 
@@ -149,8 +152,13 @@ def _read_result(result_path: Path) -> tuple[bool, str]:
     return status in ("ok", "already"), detail
 
 
-def _run_ps1(script: Path, result_path: Path, timeout: int = 240) -> tuple[bool, str]:
-    """Run a claim ps1 at the CURRENT integrity level and read its JSON result."""
+def _run_ps1(script: Path, result_path: Path, timeout: int = 240,
+             process_name: str = "") -> tuple[bool, str]:
+    """Run a claim ps1 at the CURRENT integrity level and read its JSON result.
+
+    `process_name` is forwarded as -ProcessName; without it the script falls back
+    to its own default, which is how a renamed client silently breaks the route.
+    """
     if not script.is_file():
         return False, f"缺少 {script}"
 
@@ -159,6 +167,8 @@ def _run_ps1(script: Path, result_path: Path, timeout: int = 240) -> tuple[bool,
         result_path.unlink()
 
     cmd = PS + ["-WindowStyle", "Hidden", "-File", str(script), "-OutFile", str(result_path)]
+    if process_name:
+        cmd += ["-ProcessName", process_name]
     try:
         subprocess.run(cmd, cwd=str(ROOT), timeout=timeout, capture_output=True)
     except subprocess.TimeoutExpired:
@@ -166,7 +176,8 @@ def _run_ps1(script: Path, result_path: Path, timeout: int = 240) -> tuple[bool,
     return _read_result(result_path)
 
 
-def _launch_via_limited_task(launcher: Path, timeout: int = 150) -> tuple[bool, str]:
+def _launch_via_limited_task(launcher: Path, timeout: int = 150,
+                             process_name: str = "") -> tuple[bool, str]:
     """Cold-start a GUI client through a RunLevel=Limited scheduled task.
 
     Every direct launch path fails here: os.startfile, ShellExecute and
@@ -180,10 +191,12 @@ def _launch_via_limited_task(launcher: Path, timeout: int = 150) -> tuple[bool, 
     """
     if not launcher.is_file():
         return False, f"缺少 {launcher}"
+    cmd = PS + ["-File", str(launcher), "-WaitReady"]
+    if process_name:
+        cmd += ["-ProcessName", process_name]
     try:
         proc = subprocess.run(
-            PS + ["-File", str(launcher), "-WaitReady"],
-            cwd=str(ROOT), timeout=timeout, capture_output=True, text=True,
+            cmd, cwd=str(ROOT), timeout=timeout, capture_output=True, text=True,
         )
     except subprocess.TimeoutExpired:
         return False, f"拉起客户端超时（{timeout}s）"
@@ -196,7 +209,7 @@ def _launch_via_limited_task(launcher: Path, timeout: int = 150) -> tuple[bool, 
 
 
 def _claim_traework() -> tuple[bool, str]:
-    """TraeWork route: cold-start via scheduled task, then click at medium integrity.
+    """Trae route: cold-start via scheduled task, then click at medium integrity.
 
     Deliberately NOT elevated. The previous implementation used
     ShellExecute("runas"), but elevation does not help spawn a visible window —
@@ -206,14 +219,19 @@ def _claim_traework() -> tuple[bool, str]:
     Both halves are medium integrity here, so UIPI does not block the synthetic
     clicks (it only gates LOW -> HIGH). Same reasoning as the other helpers, just
     without the UAC detour. Fixed 2026-10-09.
+
+    2026-10-11: TRAE SOLO CN was merged into Trae CN, so both steps are now told
+    the new process name explicitly instead of relying on their own defaults.
     """
     if not SCRIPT_TRAEWORK_OCR.is_file():
         return False, f"缺少 {SCRIPT_TRAEWORK_OCR}"
 
-    ok, note = _launch_via_limited_task(TASK_TRAEWORK_LAUNCHER)
+    ok, note = _launch_via_limited_task(TASK_TRAEWORK_LAUNCHER,
+                                        process_name=TRAEWORK_PROCESS)
     if not ok:
         return False, note
-    ok, detail = _run_ps1(SCRIPT_TRAEWORK_OCR, LOG_DIR / "traework_claim.json", timeout=200)
+    ok, detail = _run_ps1(SCRIPT_TRAEWORK_OCR, LOG_DIR / "traework_claim.json",
+                          timeout=200, process_name=TRAEWORK_PROCESS)
     if not ok:
         return False, f"{detail}（启动日志: {note}）"
     return True, detail

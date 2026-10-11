@@ -9,21 +9,19 @@
 #
 # Usage (from PowerShell tool):
 #   powershell -ExecutionPolicy Bypass -File scripts\_task_traework.ps1
-#   ... -ProcessName "Trae CN"     # TraeCode variant
+#   ... -ProcessName "Trae CN"     # 2026-10-11: 默认已改成合并后的客户端
 
 param(
-    [string]$ProcessName = "TRAE SOLO CN",
+    [string]$ProcessName = "Trae CN",
     [switch]$WaitReady
 )
 
 $root = Split-Path -Parent $PSScriptRoot
 $name = "agent-credit-traework-once"
 
-if ($ProcessName -eq "TRAE SOLO CN") {
-    $exe = Join-Path $env:LOCALAPPDATA 'Programs\TRAE SOLO CN\TRAE SOLO CN.exe'
-} else {
-    $exe = Join-Path $env:LOCALAPPDATA "Programs\$ProcessName\$ProcessName.exe"
-}
+# 2026-10-11：TRAE SOLO CN 已合并进 Trae CN，旧目录只剩 debug.log。
+# 统一按「<ProcessName>\<ProcessName>.exe」推导，与 _task_traework_claim.ps1 一致。
+$exe = Join-Path $env:LOCALAPPDATA "Programs\$ProcessName\$ProcessName.exe"
 
 if (-not (Test-Path $exe)) { Write-Host "EXE MISSING: $exe"; exit 1 }
 

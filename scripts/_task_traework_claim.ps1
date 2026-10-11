@@ -13,7 +13,7 @@
 
 param(
     [string]$Mode = "claim",            # claim | dry-run | explore
-    [string]$ProcessName = "TRAE SOLO CN"
+    [string]$ProcessName = "Trae CN"    # 2026-10-11: TRAE SOLO CN 已并入 Trae CN
 )
 
 $root = Split-Path -Parent $PSScriptRoot

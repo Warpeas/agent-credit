@@ -1,11 +1,17 @@
-﻿# $ProcessName OCR check-in: find anchors via screenshot+OCR, click the daily check-in button.
-# Requires: $ProcessName foreground (interactive) or elevated runner (scheduled task).
+﻿# Trae OCR check-in: find anchors via screenshot+OCR, click the daily check-in button.
+# Requires: the client foreground (interactive) or a non-elevated runner.
+#
+# 2026-10-11: TRAE SOLO CN (TraeWork) was merged into "Trae CN" and the old
+# install dir was emptied (only debug.log left) — so the defaults now point at
+# the merged client (Trae CN v3.4.2, main window title "Agent"). Both products
+# always shared one credit account, so the ledger keeps a single `traework`
+# entry; do NOT add a second one for the merged client.
 param(
     [switch]$DryRun,
     [switch]$Explore,
     [string]$OutFile,
-    [string]$ProcessName = 'TRAE SOLO CN',
-    [string]$ExePath = '$env:APPDATA\AppData\Local\Programs\TRAE SOLO CN\TRAE SOLO CN.exe',
+    [string]$ProcessName = 'Trae CN',
+    [string]$ExePath = '',
     [string]$ShotDir = '',
     [int]$AvatarX = 0,
     [int]$AvatarY = 0
@@ -96,7 +102,8 @@ function Out-Json([string]$status, [string]$detail) {
     # 运行结束一律恢复现场：关掉本次拉起的实例（签到前就开着的保留），并把前台
     # 还给运行前的窗口。失败时也不留窗口——无人值守跑完桌面不该堆着客户端。
     if (-not $DryRun -and $script:LaunchedByUs) {
-        taskkill /IM "TRAE SOLO CN.exe" /F 2>$null | Out-Null
+        # 同样别写死名字（2026-10-11 客户端从 TRAE SOLO CN 换成 Trae CN）。
+        taskkill /IM "$ProcessName.exe" /F 2>$null | Out-Null
         $detail = $detail + "；已关闭本次启动的客户端"
     }
     Restore-Foreground
@@ -111,7 +118,14 @@ function Out-Json([string]$status, [string]$detail) {
 
 $null = [Cap32]::SetProcessDPIAware()
 
-$exe = '$env:APPDATA\AppData\Local\Programs\TRAE SOLO CN\TRAE SOLO CN.exe'
+# exe 路径由 -ProcessName 推导。旧版这里是单引号字面量
+# '$env:APPDATA\AppData\Local\Programs\TRAE SOLO CN\TRAE SOLO CN.exe'
+# ——单引号里的 $ 不展开，是条恒假路径，一直靠调用方显式传 -ExePath 掩盖。
+# 改成派生后，缺 -ExePath 也能走冷启动自愈分支。
+if (-not $ExePath) {
+    $ExePath = Join-Path $env:LOCALAPPDATA "Programs\$ProcessName\$ProcessName.exe"
+}
+$exe = $ExePath
 
 # OCR 布局落盘：调锚点全靠它。失败路径也要写，否则永远看不到二跳页面长什么样。
 $dumpPath = "$root\logs\ocr_dump_traework.txt"
@@ -185,7 +199,9 @@ if ($hwnd -eq [IntPtr]::Zero) {
     # user. Killing an instance the human had open is never acceptable.
     if ($preexistingApp.Count -eq 0) {
         if (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue) {
-            taskkill /IM "TRAE SOLO CN.exe" /F 2>$null | Out-Null
+            # 按 $ProcessName 派生，别写死名字：客户端改版换名过一次
+            # （TRAE SOLO CN -> Trae CN），写死会拿去杀一个不存在的进程。
+            taskkill /IM "$ProcessName.exe" /F 2>$null | Out-Null
             Start-Sleep -Seconds 3
         }
         if (Test-Path $exe) { Start-Process $exe; $script:LaunchedByUs = $true }
@@ -405,10 +421,38 @@ function Find-CheckinAnchor($lines) {
     return $null
 }
 
-# The real claim button is dark-on-dark ("签到" in white on a black pill), which
-# OCR misses entirely - so its position cannot be read from text. Scan the row
-# to the right of the entry label for a dark horizontal run instead.
-function Find-DarkButton([int]$rowY, [int]$x0, [int]$x1) {
+# 候选比较：先看离入口行谁更近（药丸垂直居中在入口行上），同样近才比宽度。
+# 不能只取「最长区段」——菜单右边界之外是更暗的应用背景，也是一段长对比区段。
+function Add-PillCandidate($best, [int]$runStart, [int]$len, [int]$yy, [int]$bg, [int]$rowY) {
+    $cand = @{ x = [int]($runStart + ($len / 2)); y = $yy; len = $len; bg = $bg }
+    if (-not $best) { return $cand }
+    $dCand = [Math]::Abs($yy - $rowY)
+    $dBest = [Math]::Abs([int]$best.y - $rowY)
+    if ($dCand -lt $dBest) { return $cand }
+    if ($dCand -eq $dBest -and $len -gt [int]$best.len) { return $cand }
+    return $best
+}
+
+# 签到按钮是「签到」两个字，但 OCR 漏检它（旧版黑底白字、新版深灰底白字都漏），
+# 所以只能靠像素找。**关键是别用绝对亮度阈值**：
+#   旧实现找 R,G,B 都 < 90 的像素。这在浅色主题下等于「找深色药丸」，能用；
+#   但 2026-10-11 起客户端菜单是**深色卡片**（底色 ~32），阈值把整片底色都判成
+#   按钮，回了一段 356px 的假区段（真按钮只有 ~138px），点击全部落空。
+# 正确判据是**与当前行底色的对比**：行底色取该行像素的众数，再找长度 >= 40px
+# 且与底色差 >= 6 的连续区段。深色药丸(42) on 深底(32)、浅底上的深药丸，都成立。
+function Get-RowBg([System.Drawing.Bitmap]$bmp, [int]$yy, [int]$x0, [int]$x1) {
+    $hist = @{}
+    for ($x = $x0; $x -lt $x1; $x++) {
+        $c = $bmp.GetPixel($x, $yy)
+        $b = [int](($c.R + $c.G + $c.B) / 3 / 4) * 4   # 4 级分桶，抗轻微噪点
+        if ($hist.ContainsKey($b)) { $hist[$b]++ } else { $hist[$b] = 1 }
+    }
+    $bestB = -1; $bestN = -1
+    foreach ($k in $hist.Keys) { if ($hist[$k] -gt $bestN) { $bestN = $hist[$k]; $bestB = $k } }
+    return $bestB
+}
+
+function Find-ButtonPill([int]$rowY, [int]$x0, [int]$x1) {
     try {
         if ($x1 -gt $winW) { $x1 = $winW - 1 }
         if ($x0 -lt 0) { $x0 = 0 }
@@ -423,25 +467,29 @@ function Find-DarkButton([int]$rowY, [int]$x0, [int]$x1) {
             if (-not $pw -or (Test-Blank $bmp)) { $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size) }
             $g.Dispose()
         }
-        # 多行扫描：按钮可能比说明文字略高或略低；只有 hover 之后它才渲染出来
+        # 多行扫描：药丸可能比说明文字略高或略低，也可能只有 hover 后才渲染
         $best = $null
         $log = New-Object System.Collections.ArrayList
-        for ($yy = ($rowY - 30); $yy -le ($rowY + 90); $yy += 6) {
+        for ($yy = ($rowY - 30); $yy -le ($rowY + 90); $yy += 4) {
             if ($yy -lt 0 -or $yy -ge $winH) { continue }
+            $bg = Get-RowBg $bmp $yy $x0 $x1
             $runStart = -1
             for ($x = $x0; $x -lt $x1; $x++) {
                 $c = $bmp.GetPixel($x, $yy)
-                $dark = ($c.R -lt 90 -and $c.G -lt 90 -and $c.B -lt 90)
-                if ($dark -and $runStart -lt 0) { $runStart = $x }
-                if (-not $dark -and $runStart -ge 0) {
+                $lum = [int](($c.R + $c.G + $c.B) / 3)
+                $contrast = ($lum - $bg)
+                if ($contrast -lt 0) { $contrast = -$contrast }
+                $on = ($contrast -ge 6)
+                if ($on -and $runStart -lt 0) { $runStart = $x }
+                if (-not $on -and $runStart -ge 0) {
                     $len = $x - $runStart
-                    if ($len -ge 30 -and (-not $best -or $len -gt $best.len)) { $best = @{ x = [int]($runStart + ($len / 2)); y = $yy; len = $len } }
+                    if ($len -ge 40 -and $len -le 260) { $best = Add-PillCandidate $best $runStart $len $yy $bg $rowY }
                     $runStart = -1
                 }
             }
             if ($runStart -ge 0) {
                 $len = $x1 - $runStart
-                if ($len -ge 30 -and (-not $best -or $len -gt $best.len)) { $best = @{ x = [int]($runStart + ($len / 2)); y = $yy; len = $len } }
+                if ($len -ge 40 -and $len -le 260) { $best = Add-PillCandidate $best $runStart $len $yy $bg $rowY }
             }
             if ([Math]::Abs($yy - $rowY) -lt 7) {
                 $samples = New-Object System.Collections.ArrayList
@@ -449,17 +497,37 @@ function Find-DarkButton([int]$rowY, [int]$x0, [int]$x1) {
                     $cc = $bmp.GetPixel($sx2, $yy)
                     [void]$samples.Add("$sx2`:$($cc.R),$($cc.G),$($cc.B)")
                 }
-                [void]$log.Add("row=$yy " + ($samples -join ' '))
+                [void]$log.Add("row=$yy bg=$bg " + ($samples -join ' '))
             }
         }
         try {
-            $lns = "$(Get-Date -Format HH:mm:ss) x0=$x0 x1=$x1 src=" + $(if ($script:ShotBmp) { 'ocr-frame' } else { 'fresh' }) + " " + ($log -join ' | ') + " best=" + $(if ($best) { "$($best.x),$($best.y) len=$($best.len)" } else { 'none' }) + "`n"
+            $lns = "$(Get-Date -Format HH:mm:ss) x0=$x0 x1=$x1 src=" + $(if ($script:ShotBmp) { 'ocr-frame' } else { 'fresh' }) + " " + ($log -join ' | ') + " best=" + $(if ($best) { "$($best.x),$($best.y) len=$($best.len) bg=$($best.bg)" } else { 'none' }) + "`n"
             [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_scan.txt", $lns)
         } catch { }
         if (-not $script:ShotBmp) { $bmp.Dispose() }
         if ($best) { return $best }
     } catch { }
     return $null
+}
+
+# 账户菜单里的积分余额（形如「3，527」，千分位是全角逗号）。
+# 这是**唯一可靠的「这次点击到底有没有到账」判据**：文本「今日已签」只在领取的
+# 那一次菜单会话里出现，重开菜单又会变回「每日领100积分」（2026-10-11 实测），
+# 所以「重开菜单→看有没有已签文案」这种方式根本判不出已签。
+# 读不到返回 -1，此时退回文本判据（宁可漏记不可虚记）。
+function Find-Balance($lines) {
+    # 不能锚行首：OCR 经常把账户条整行并成一个文本
+    # （实测「．用户712942281“．免费3，527」），余额会跟在用户名后面。
+    # 取「第一个含千分位数字的行」里的**最后一个**匹配——账户条上余额在最右。
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        $val = -1
+        foreach ($m in [regex]::Matches($l.text, '([0-9]{1,3}(?:[，,][0-9]{3})+)')) {
+            $val = [int]($m.Groups[1].Value -replace '[，,]', '')
+        }
+        if ($val -gt 0) { return $val }
+    }
+    return -1
 }
 
 function Click-At([int]$ax, [int]$ay) {
@@ -783,17 +851,24 @@ if ($menuRight -gt 0) {
     $offsets = @($d, $d1, $d2, 0)
 }
 
-# 黑底白字的「签到」按钮 OCR 整行漏检，靠像素扫描在入口行右侧找深色块，
+# 「签到」按钮 OCR 整行漏检，靠像素扫描在入口行右侧找对比色药丸，
 # 命中后以它为主点击点（比按偏移猜可靠得多）。
 $x1 = [int]($winW * 0.3)
 if ($menuRight -gt 0) { $x1 = [int]($menuRight + 80) }
-# 黑色「签到」按钮是 hover 才渲染的元素：实测没有 hover 时入口行右侧
-# x=263~431 全是 250,250,250 纯白，OCR 与像素扫描都看不到它。
-# 先把真实光标移到入口行触发 hover，等它渲染，再刷新一帧去扫描。
+# ⚠️ 上面这版窗口不够宽：menuRight 是由「文字右边界」推的，而新布局里药丸比任何
+# 文字都靠右（实测文字右缘 394，药丸跨 432~570）-> 扫到 474 就把药丸截断了，
+# 只会回一段 44px 的假区段。取一个覆盖到菜单右缘之外的宽窗口，
+# 再用 Find-ButtonPill 里的 260px 上限把「菜单外更暗的背景」排掉。
+if ($menuRight -gt 0) { $x1 = [int]($menuRight + 300) }
+if ($x1 -gt ($winW - 1)) { $x1 = $winW - 1 }
+# 按钮可能只有 hover 才渲染：先把真实光标移到入口行触发 hover，等它渲染，
+# 再刷新一帧去扫描。
 [Cap32]::SetCursorPos(($winX + [int]$bx + 60), ($winY + $by)) | Out-Null
 Start-Sleep -Milliseconds 800
 $null = Get-OcrLines
-$btn = Find-DarkButton $by ([int]([int]$bx + 40)) $x1
+# 点击前的余额：菜单重开后「今日已签」文案会消失，余额差才是唯一可靠的到账证据。
+$bal0 = Find-Balance $lines
+$btn = Find-ButtonPill $by ([int]([int]$bx + 40)) $x1
 if ($btn) {
     $d0 = [int]($btn.x - [int]$bx)
     $dm = $d0 - 40
@@ -801,7 +876,12 @@ if ($btn) {
     $offsets = @($d0, $dm, $dp, 0)
     $by = $btn.y
     try {
-        $ln = "$(Get-Date -Format HH:mm:ss) darkBtn x=$($btn.x) y=$($btn.y) len=$($btn.len) entryX=$bx offsets=" + ($offsets -join ',') + "`n"
+        $ln = "$(Get-Date -Format HH:mm:ss) buttonPill x=$($btn.x) y=$($btn.y) len=$($btn.len) bg=$($btn.bg) entryX=$bx bal0=$bal0 offsets=" + ($offsets -join ',') + "`n"
+        [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
+    } catch { }
+} else {
+    try {
+        $ln = "$(Get-Date -Format HH:mm:ss) buttonPill none entryX=$bx by=$by bal0=$bal0`n"
         [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
     } catch { }
 }
@@ -816,7 +896,16 @@ for ($i = 0; $i -lt $offsets.Count; $i++) {
         if ($c) {
             Out-Json "ok" ("签到成功（点击后显示: " + $c.text + "）")
         }
+        # 余额增长了才算真到账。今天已签时按钮仍在、点了不会变文案，
+        # 只靠「今日已签」会永远判不出来；靠余额差则既不会虚记也不会漏记。
+        $bal1 = Find-Balance $lines
+        if ($bal0 -ge 0 -and $bal1 -ge 0 -and $bal1 -gt $bal0) {
+            Out-Json "ok" ("签到成功（余额 $bal0 -> $bal1）")
+        }
     }
 }
 $peek2 = ($lines | Select-Object -First 10 | ForEach-Object { $_.text }) -join "/"
+if ($bal0 -ge 0) {
+    Out-Json "pending" ("点击各候选位置后余额未增长（$bal0，未变），判定未到账，不入账；页面: " + $peek2)
+}
 Out-Json "pending" ("点击各候选位置后均未出现已签状态，页面: " + $peek2)

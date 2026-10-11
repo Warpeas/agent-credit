@@ -10,7 +10,7 @@ from typing import Any
 
 from . import ledger
 from .catalog import accounts, find_account, threshold_ratio
-from .ui_claim import claim as ui_claim, skip_ui
+from .ui_claim import claim as ui_claim, has_ui_route, skip_ui
 
 # Repo root, so catalog.yaml never has to hardcode a checkout path.
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -117,9 +117,20 @@ def checkin(
             if "未配置 command" in detail or "外部命令已跳过" in detail:
                 if mode != "ui":
                     mode = "manual"
+            elif mode == "ui" and not has_ui_route(acc["id"]):
+                # 声明了 ui 却**根本没有 UI 配方**，此时回落到 UI 路由只是走一条
+                # 死路，还会报出「无 UI 配方」把外部命令的真实失败原因盖掉
+                # （2026-10-11 MonkeyCode 上午的失败就是这样被掩盖的，白查一轮）。
+                # 直接如实上报外部命令的失败。
+                status = "pending" if "exit=2" in detail else "failed"
+                results.append(
+                    CheckinResult(acc["id"], acc["name"], status,
+                                  f"外部命令失败，且该账户没有 UI 路径可回落：{detail}")
+                )
+                continue
             elif mode == "ui":
-                # External route failed (expired token / endpoint change). Fall
-                # through to the UI route below instead of declaring failure --
+                # External route failed (expired token / endpoint change) and a UI
+                # route exists. Fall through to it instead of declaring failure --
                 # the UI route is the designated fallback and may still succeed.
                 pass
             else:

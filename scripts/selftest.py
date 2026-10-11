@@ -52,6 +52,16 @@ def main() -> None:
     assert checkin._parse_granted("签到成功（余额 3427 -> 3527）") is None
     assert checkin._parse_granted("") is None
 
+    # 有 UI 配方的账户才允许「外部失败 → 回落 UI」；没有配方的（MonkeyCode 这种
+    # 声明了 claim_mode=ui 但走 command: 的）必须如实上报外部失败，
+    # 否则报出来的是「无 UI 配方」，把真实原因盖掉（10-11 踩过）。
+    from agent_credit import ui_claim as _uic
+    assert _uic.has_ui_route("traework") is True
+    assert _uic.has_ui_route("autoclaw") is True
+    assert _uic.has_ui_route("lobsterai") is True
+    assert _uic.has_ui_route("monkeycode_credit") is False
+    assert _uic.has_ui_route("workbuddy") is True   # 在 RECIPES 里
+
     data = ledger.load()
     r1 = checkin.record_claimed("autoclaw", 200, data=data)
     assert r1["entry"]["amount"] == 200

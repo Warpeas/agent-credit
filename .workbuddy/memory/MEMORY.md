@@ -184,7 +184,7 @@ abs   = 窗口原点 + 缩略图坐标 * scale
   ⚠️ 余额会被 OCR 并进账户条整行（`．用户712942281…免费3，527`），
   正则**不能锚行首**，要整行搜最后一个千分位数字。
 
-## UI 自动化三条通用铁律（10-11 立，跨客户端）
+## UI 自动化五条通用铁律（10-11 立，跨客户端）
 
 1. **别用绝对亮度阈值找元素**——客户端可能随时切深/浅主题。
    正常态菜单深色底 ~32、药丸 ~42、白字 77+：找「<90 的暗像素」会把整片底色
@@ -218,11 +218,19 @@ abs   = 窗口原点 + 缩略图坐标 * scale
    Chrome_WidgetWin_0(客户端) → WRY_WEBVIEW(客户端) → Tauri Window(主窗口)`。
    比 pid 会把**正常情况误判成被遮挡**（10-11 白拦一轮）。
 4. **启动上下文决定窗口是否可见/已落笔**（10-11 MonkeyCode 实证）：
-   从 agent 会话 `subprocess.Popen` 直拉 → 主窗口 `IsWindowVisible=False`
-   （托盘态）、PrintWindow 纯黑；改用 **RunLevel=Limited + LogonType=Interactive
-   计划任务**拉 → 窗口可见、PrintWindow uniq=718 色、直接在前台。
-   「主人手动打开才成功」的真因是这个上下文，不是"手动"本身。
+   **agent 会话里直接 `subprocess.Popen` 拉客户端不可靠**——实测两次一次
+   `IsWindowVisible=False`（托盘态）、一次 `vis=True` 但 PrintWindow 只有 3 色
+   （根本没画）；而且**该会话拉起的子进程会随命令结束被回收**。
+   改用 **RunLevel=Limited + LogonType=Interactive 计划任务**拉 →
+   窗口可见、PrintWindow **uniq=718**（真画了）、直接在前台。
+   ⚠️ 生产链路本来就是「一套计划任务」（`agent-credit-checkin` →
+   `credit.py checkin` → `command:` → 脚本 → Popen 客户端），**客户端也在任务后代里**，
+   所以生产路径是成立的；只有「在会话里手跑脚本」才需要先手工拉任务。
    同理：`content_ink` 的**值恒定不变**本身就是异常信号（正常 UI 会波动）。
+5. **`claim_mode: ui` 不等于有 UI 配方**。`checkin.py` 原来在外部命令失败后
+   只要 mode=ui 就回落 UI 路由——没有配方的账户会走死路、报出
+   「无 UI 配方」，把外部命令**真实的**失败原因盖掉（10-11 MonkeyCode 上午白查一轮）。
+   现在用 `ui_claim.has_ui_route()` 判过再回落。
 
 ## 工程约定
 

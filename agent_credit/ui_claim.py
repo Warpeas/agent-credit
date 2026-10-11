@@ -243,6 +243,20 @@ def _claim_lobsterai() -> tuple[bool, str]:
     return _run_elevated_ps1(SCRIPT_LOBSTERAI_OCR, LOG_DIR / "lobsterai_claim.json")
 
 
+UI_ROUTE_IDS = ("autoclaw", "minimax", "lobsterai", "traework")
+
+
+def has_ui_route(account_id: str) -> bool:
+    """该账户是否有**可用的** UI 路径。
+
+    checkin() 用它决定「外部命令失败后要不要回落到 UI」。没有这个判断时，
+    一个声明了 `claim_mode: ui` 但其实没有 UI 配方的账户会白回落到一条死路，
+    最终报出「无 UI 配方」，把外部命令**真实的**失败原因盖掉。
+    2026-10-11 MonkeyCode 上午那轮就是这么被掩盖的——排查时白绕了一圈。
+    """
+    return account_id in UI_ROUTE_IDS or account_id in RECIPES
+
+
 def claim(account_id: str) -> tuple[bool, str]:
     """Drive the installed desktop client. True only if UI reports claimed/already."""
     if account_id == "autoclaw":

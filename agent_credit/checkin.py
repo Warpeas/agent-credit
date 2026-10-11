@@ -142,7 +142,12 @@ def checkin(
                 continue
             ok, detail = ui_claim(acc["id"])
             if ok:
-                results.append(_grant_success(acc, data, on, detail))
+                # UI 脚本也可以用 detail 里的 `[granted] N` 上报实发额
+                # （TraeWork 靠菜单余额差算出来）。catalog 的 daily_amount 是预估，
+                # 服务端活动期随时会调：Trae 的免费日额度 2026-09-30 就从 150 变 100，
+                # 按常额入账会连续多记。上报多少就记多少。
+                results.append(_grant_success(acc, data, on, detail,
+                                              override=_parse_granted(detail)))
                 continue
             hint = (
                 f"{detail}。请在 {acc['name']} 里手动签到 {acc.get('daily_amount') or 0}，"

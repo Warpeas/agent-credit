@@ -46,6 +46,12 @@ def main() -> None:
     assert checkin._grant_amounts({"daily_amount": 100,
                                    "streak": {"bonus_on": [3], "bonus_amount": 50}}, 1) == (100, 0)
 
+    # 实发额上报：UI 脚本也会在 detail 里带 `[granted] N`（TraeWork 用菜单余额差
+    # 算实际到账），checkin 必须认，否则又退回按 catalog 常额入账。
+    assert checkin._parse_granted("签到成功（余额 3427 -> 3527）[granted] 100") == 100
+    assert checkin._parse_granted("签到成功（余额 3427 -> 3527）") is None
+    assert checkin._parse_granted("") is None
+
     data = ledger.load()
     r1 = checkin.record_claimed("autoclaw", 200, data=data)
     assert r1["entry"]["amount"] == 200

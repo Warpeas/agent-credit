@@ -98,7 +98,7 @@ function Restore-Foreground {
     } catch { }
 }
 
-function Out-Json([string]$status, [string]$detail) {
+function Out-Json([string]$status, [string]$detail, [int]$Amount = 0) {
     # 运行结束一律恢复现场：关掉本次拉起的实例（签到前就开着的保留），并把前台
     # 还给运行前的窗口。失败时也不留窗口——无人值守跑完桌面不该堆着客户端。
     if (-not $DryRun -and $script:LaunchedByUs) {
@@ -107,7 +107,14 @@ function Out-Json([string]$status, [string]$detail) {
         $detail = $detail + "；已关闭本次启动的客户端"
     }
     Restore-Foreground
-    $payload = @{ status = $status; detail = $detail } | ConvertTo-Json -Compress
+    # $Amount>0 时同时给两个出口：detail 里的 `[granted] N` 标记走
+    # checkin.py 的 _parse_granted（框架已认这个约定，external 脚本也这么报），
+    # 独立字段给人和 JSON 消费方看。
+    if ($Amount -gt 0) {
+        $payload = @{ status = $status; detail = $detail; amount = $Amount } | ConvertTo-Json -Compress
+    } else {
+        $payload = @{ status = $status; detail = $detail } | ConvertTo-Json -Compress
+    }
     if ($OutFile) {
         [System.IO.File]::WriteAllText($OutFile, $payload, (New-Object System.Text.UTF8Encoding($false)))
     }
@@ -896,11 +903,13 @@ for ($i = 0; $i -lt $offsets.Count; $i++) {
         if ($c) {
             Out-Json "ok" ("签到成功（点击后显示: " + $c.text + "）")
         }
-        # 余额增长了才算真到账。今天已签时按钮仍在、点了不会变文案，
-        # 只靠「今日已签」会永远判不出来；靠余额差则既不会虚记也不会漏记。
+        # 余额增长了才算真到账，并且**以实测差额为准入账**（服务端随时可能调额：
+        # 免费日额度 2026-09-30 就从 150 变成 100）。catalog 的 daily_amount
+        # 只作为预估，实发多少由这里上报。
         $bal1 = Find-Balance $lines
         if ($bal0 -ge 0 -and $bal1 -ge 0 -and $bal1 -gt $bal0) {
-            Out-Json "ok" ("签到成功（余额 $bal0 -> $bal1）")
+            $delta = $bal1 - $bal0
+            Out-Json "ok" ("签到成功（余额 $bal0 -> $bal1）[granted] $delta") $delta
         }
     }
 }

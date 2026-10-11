@@ -43,9 +43,14 @@ PROC = "monkeycode-desktop.exe"
 RESULT = LOGDIR / "monkeycode_claim.json"
 
 # webview 渲染就绪阈值（content_ink 的千分比）。空白/半空白窗口远低于此，
-# 画完的客户端工作台远高于此。10-11 冷启动失败那轮 ink 停在低位徘徊，
-# 之前没有这个判断，直接把「没渲染」当成「弹层没开」而多点了 toggle。
-INK_MIN = 40
+# 画完的客户端工作台远高于此。没有这个判断时，会把「没渲染」当成「弹层没开」
+# 而多点一次「设置」——「设置」是 toggle，第二次点击会把刚开的弹层关掉。
+#
+# ⚠️ 2026-10-11 校准：初值 40 是**错的**。实测未渲染的窗口 ink 恰好就是 40，
+# 于是 `while ink < INK_MIN` 一次都不循环、闸门形同虚设，19:51 那轮照样点了
+# 两次「设置」→ toggle 反噬 → pending。真实阈值由 --ink-min 覆盖，
+# 用 --explore 看 ink 随时间的变化即可重新标定。
+INK_MIN_DEFAULT = 40
 INK_WAIT_MAX = 60.0
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -155,6 +160,84 @@ def close_client(timeout: float = 8.0) -> int:
     return len(pids)
 
 
+VK_MENU = 0x12
+KEYEVENTF_KEYUP = 0x0002
+SW_SHOW = 5
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+def client_owns_point(hwnd: int, x: int, y: int) -> bool:
+    """点 (x,y) 处最上层的窗口是否属于 hwnd 所属进程。
+
+    这是「屏幕捕获到底拍到了谁」的直接校验：本脚本用 CopyFromScreen 抓窗口 rect，
+    只要那个矩形里盖着别的窗口，抓到的就是别人的画面，而 OCR/像素判定会全部失真
+    （2026-09-11 实测抓到 WorkBuddy，症状伪装成「webview 没渲染」）。
+    WindowFromPoint 会跳过隐藏窗口，正好用来识别「窗口不可见、下面盖着别人」。
+    """
+    pt = _POINT(x, y)
+    top = int(user32.WindowFromPoint(pt) or 0)
+    if not top:
+        return False
+    a, b = wt.DWORD(), wt.DWORD()
+    user32.GetWindowThreadProcessId(top, ctypes.byref(a))
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(b))
+    return int(a.value) == int(b.value)
+
+
+def ensure_foreground(hwnd: int) -> bool:
+    """把客户端逐级顶到前台，返回它最终是否真的可见且在前台。
+
+    为什么不能只靠一次 SetForegroundWindow：Windows 会拒绝**非前台进程**发起的
+    前台切换（SetForegroundWindow 的既定规则）。另一个窗口占着前台时，单次切换
+    静默失败——而本脚本用**屏幕捕获**取图，抓到的就是别人窗口。
+
+    ⚠️ 2026-10-11 实测更阴的一种：主窗口本身是**隐藏**的（MonkeyCode 会以「只驻留
+    托盘」的方式启动：IsWindowVisible=False、tray_icon_app 在、主窗口 rect 照旧）。
+    隐藏窗口上 SetForegroundWindow 不报错也不生效，GetForegroundWindow 甚至还会
+    返回它——所以「前台」这个判据不够，必须先把它显示出来，并额外校验可见性。
+    症状极具误导性：content_ink 恒为 40、green 恒为 0，看着像「webview 没渲染」，
+    实际是「抓错窗口」（那张 _monkey_account.png 里出现的是 WorkBuddy 字样）。
+
+    逐级加码：显示 → 还原 → Alt 技巧 → 绑输入队列强切。
+    与 ui_claim_traework.ps1 的 Ensure-Foreground 同一套做法，跨客户端统一。
+    """
+    if not user32.IsWindowVisible(hwnd):
+        user32.ShowWindow(hwnd, SW_SHOW)
+        time.sleep(0.6)
+    if int(user32.GetForegroundWindow() or 0) == hwnd:
+        return True
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        time.sleep(0.4)
+        if int(user32.GetForegroundWindow() or 0) == hwnd:
+            return True
+
+    # Alt 技巧：按下 Alt（不抬起）再切，Windows 通常放行，随后补 keyup
+    user32.keybd_event(VK_MENU, 0, 0, 0)
+    user32.SetForegroundWindow(hwnd)
+    user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+    time.sleep(0.5)
+    if int(user32.GetForegroundWindow() or 0) == hwnd:
+        return True
+
+    # 绑输入队列后强切
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+    cur_tid = kernel32.GetCurrentThreadId()
+    if target_tid:
+        user32.AttachThreadInput(cur_tid, target_tid, True)
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetForegroundWindow(hwnd)
+        user32.AttachThreadInput(cur_tid, target_tid, False)
+        time.sleep(0.5)
+    if not user32.IsWindowVisible(hwnd):
+        return False
+    return int(user32.GetForegroundWindow() or 0) == hwnd
+
+
 def restore_foreground(hwnd: int) -> None:
     """把前台还给运行前的窗口，别让用户对着一个死掉的客户端。"""
     fg = user32.GetForegroundWindow()
@@ -238,8 +321,13 @@ def find_main(pids: set[int]) -> int:
     2026-10-04 实测：该客户端还存在 `tray_icon_app`（2880x1511，隐藏黑窗）
     与 `MonkeyCodeNativePetLayeredWindow`（桌宠 232x240）两个同pid 窗口，
     必须按 class + 标题双重排除，否则会抓到托盘黑窗。
+
+    ⚠️ 2026-10-11：**可见性优先**。客户端有时以「只驻留托盘」的方式启动
+    （主窗口 IsWindowVisible=False），此时同 class 同标题的隐藏主窗口面积最大，
+    只按面积筛就会选中它——一切照旧却什么都点不到。可见的优先；
+    全都不可见时仍返回面积最大者，交给调用方 ShowWindow 再当面校验。
     """
-    best, area = 0, 0
+    best, best_score = 0, -1
     for h in enum_windows():
         if win_pid(h) not in pids or win_class(h) != "Tauri Window":
             continue
@@ -247,9 +335,10 @@ def find_main(pids: set[int]) -> int:
         r = win_rect(h)
         if not r or "MonkeyCode" not in t or "桌宠" in t:
             continue
-        a = (r.right - r.left) * (r.bottom - r.top)
-        if a > area:
-            best, area = h, a
+        area = (r.right - r.left) * (r.bottom - r.top)
+        score = area * (10 if user32.IsWindowVisible(h) else 1)
+        if score > best_score:
+            best, best_score = h, score
     return best
 
 
@@ -450,7 +539,11 @@ def main() -> int:
                     help="explore 模式下先执行前 N 步导航再截图（用于观察深层页面）")
     ap.add_argument("--force", action="store_true", help="即使接口显示已签也照点（调试用）")
     ap.add_argument("--settle", type=int, default=20)
+    ap.add_argument("--ink-min", type=int, default=INK_MIN_DEFAULT,
+                    help="webview 渲染就绪阈值（content_ink 千分比）。空白窗口约 40，"
+                         "画完的工作台远高于此；用 --explore 观察 content_ink 曲线即可标定")
     args = ap.parse_args()
+    ink_min = args.ink_min
     if RESULT.exists():
         RESULT.unlink()
 
@@ -513,12 +606,32 @@ def main() -> int:
         _cleanup(launched_by_us, prev_foreground)
         write_result("notfound", "no main window")
         return 1
-    user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(1.2)
+    if not ensure_foreground(hwnd):
+        # ⚠️ 硬闸门：这个脚本用**屏幕捕获**取图，客户端不在前台时抓到的是
+        # 别人窗口（2026-10-11 实测抓到了 WorkBuddy），继续跑就等于在别人的
+        # 窗口上按坐标盲点——那正是「把登录态点没了」这类事故的成因。
+        # 宁可漏签一天，也不能盲点。
+        log("ensure_foreground FAILED; refusing to click on an unverified window")
+        _cleanup(launched_by_us, prev_foreground)
+        write_result("pending",
+                     "MonkeyCode 未能置于前台或仍不可见，无法确认截图来自本客户端；"
+                     "为避免在别的窗口上盲点，未做任何点击，不入账")
+        return 1
+    time.sleep(0.6)
     r = win_rect(hwnd)
     X, Y, W, H = r.left, r.top, r.right - r.left, r.bottom - r.top
-    log(f"hwnd={hwnd} RECT={X},{Y} {W}x{H}")
+    visible = bool(user32.IsWindowVisible(hwnd))
+    owns = client_owns_point(hwnd, X + W // 2, Y + H // 2)
+    log(f"hwnd={hwnd} RECT={X},{Y} {W}x{H} foreground=ok visible={visible} center_owned_by_client={owns}")
+    if not visible or not owns:
+        # 「前台」这个判据会被隐藏窗口骗过（GetForegroundWindow 会返回隐藏窗口），
+        # 所以再加一道**像素归属**校验：窗口中心那一点最上层的窗口必须是本客户端的。
+        log("window center is not owned by the client; refusing to click")
+        _cleanup(launched_by_us, prev_foreground)
+        write_result("pending",
+                     "MonkeyCode 窗口中心被其它窗口覆盖（或窗口仍不可见），"
+                     "截图不可信；为避免盲点未做任何点击，不入账")
+        return 1
 
     # 路径：左下「设置」-> 弹层（默认/记忆落在「账号」页）-> 「签到 +100」。
     # lx/ly 是 Read 展示的缩略图(1088宽)坐标系下的坐标，由 content_click 换算。
@@ -556,19 +669,19 @@ def main() -> int:
         # 「弹层没开」，而「设置」是 toggle —— 第二次点击会把弹层关掉。
         # 已在运行的客户端画面早就画好了，这一轮立即通过，不浪费时间。
         ink = content_ink((px, w, h))
-        log(f"content_ink={ink} (settle={args.settle}s)")
+        log(f"content_ink={ink} (settle={args.settle}s, ink_min={ink_min})")
         waited = 0.0
-        while ink < INK_MIN and waited < INK_WAIT_MAX:
+        while ink < ink_min and waited < INK_WAIT_MAX:
             time.sleep(2.0)
             waited += 2.0
             px, w, h = screen_shot(X, Y, W, H)
             ink = content_ink((px, w, h))
             log(f"content_ink={ink} after +{waited:.0f}s")
-        if ink < INK_MIN:
+        if ink < ink_min:
             write_png(LOGDIR / "_monkey_account.png", px, w, h)
             _cleanup(launched_by_us, prev_foreground)
             write_result("pending",
-                         f"webview 等待 {waited:.0f}s 仍未渲染（ink={ink} < {INK_MIN}），"
+                         f"webview 等待 {waited:.0f}s 仍未渲染（ink={ink} < {ink_min}），"
                          "未做任何点击，不入账")
             log(f"result status=pending detail=webview not rendered (ink={ink})")
             return 1
@@ -580,6 +693,18 @@ def main() -> int:
                 f"{new_rect[0]},{new_rect[1]} {new_rect[2]}x{new_rect[3]}")
             X, Y, W, H = new_rect
             px, w, h = screen_shot(X, Y, W, H)
+
+        # 等渲染这段时间里焦点可能被别人抢走，动坐标前再确认一次：
+        # 前台 + 可见 + 窗口中心确实属于本客户端，否则后面所有点击都会落在别人的窗口上。
+        if not (ensure_foreground(hwnd)
+                and user32.IsWindowVisible(hwnd)
+                and client_owns_point(hwnd, X + W // 2, Y + H // 2)):
+            log("foreground/visibility/ownership lost before clicking; abort instead of blind-clicking")
+            _cleanup(launched_by_us, prev_foreground)
+            write_result("pending",
+                         "MonkeyCode 在前台确认环节失去焦点或被遮挡；为避免在别的窗口上盲点，"
+                         "未做任何点击，不入账")
+            return 1
 
         def count_green(img) -> int:
             """积分卡片的绿色特征（「695」数字 + 「签到 +100」链接）。
@@ -604,20 +729,35 @@ def main() -> int:
         # 步骤1：确保账号页弹层开着。最多点两次「设置」，每次点击后都重新判定，
         # 弹层本来就开（比如上一轮残留）时一次都不点。
         panel_ready = False
+        clicked = 0
         for attempt in range(2):
             g = count_green((px, w, h))
             log(f"account-page green={g} (attempt {attempt})")
             if g >= 15:
                 panel_ready = True
                 break
-            # 点了「设置」却仍然 green=0 时，先确认画面真的画出来了：
-            # 没渲染就再点是拿 toggle 互flip（开→关），只会把流程带偏。
-            if attempt > 0 and content_ink((px, w, h)) < INK_MIN:
-                log("picture still blank after click; treat as not-rendered, stop clicking")
-                break
+            if clicked > 0:
+                # 已经点过一次却还没看到账号页：**先把等待拉长**再决定要不要补点。
+                # 「设置」是 toggle，第二次点击可能把刚开的弹层关掉（10-10 踩过），
+                # 而弹层从点击到渲染完有明显延迟。所以补点的前提是
+                # 「画面确实已经画好 且 等够了仍然 green=0」。
+                if content_ink((px, w, h)) < ink_min:
+                    log("picture still blank after click; treat as not-rendered, stop clicking")
+                    break
+                for _ in range(6):
+                    time.sleep(2.0)
+                    px, w, h = screen_shot(X, Y, W, H)
+                    g = count_green((px, w, h))
+                    log(f"account-page green={g} (recheck)")
+                    if g >= 15:
+                        panel_ready = True
+                        break
+                if panel_ready:
+                    break
             cx, cy = content_click(px, w, h, steps[0][0], steps[0][1], X, Y)
             log(f"click 设置 abs=({cx},{cy})")
             click(cx, cy)
+            clicked += 1
             time.sleep(1.8)
             px, w, h = screen_shot(X, Y, W, H)
         else:

@@ -46,11 +46,13 @@ RESULT = LOGDIR / "monkeycode_claim.json"
 # 画完的客户端工作台远高于此。没有这个判断时，会把「没渲染」当成「弹层没开」
 # 而多点一次「设置」——「设置」是 toggle，第二次点击会把刚开的弹层关掉。
 #
-# ⚠️ 2026-10-11 校准：初值 40 是**错的**。实测未渲染的窗口 ink 恰好就是 40，
-# 于是 `while ink < INK_MIN` 一次都不循环、闸门形同虚设，19:51 那轮照样点了
-# 两次「设置」→ toggle 反噬 → pending。真实阈值由 --ink-min 覆盖，
-# 用 --explore 看 ink 随时间的变化即可重新标定。
-INK_MIN_DEFAULT = 40
+# ⚠️ 2026-10-11 标定完毕。此前 40 是**错的**：40 恰好就等于「窗口没画出来/抓错
+# 窗口」的水平，于是 `while ink < INK_MIN` 一次都不循环、闸门形同虚设。
+# 实测两个锚点：
+#   未渲染 / 抓错窗口 ....... 40（三轮 60s 内**恒定不变**，本身即异常信号）
+#   已渲染的工作台 ......... 995（23:12 成功那轮）
+# 取 300：远高于噪声、远低于真值，中间留足余量。仍可用 --ink-min 覆盖。
+INK_MIN_DEFAULT = 300
 INK_WAIT_MAX = 60.0
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -169,22 +171,35 @@ class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
+GA_ROOT = 2
+
+
 def client_owns_point(hwnd: int, x: int, y: int) -> bool:
-    """点 (x,y) 处最上层的窗口是否属于 hwnd 所属进程。
+    """点 (x,y) 处最上层的窗口是否**属于本客户端的窗口树**。
 
     这是「屏幕捕获到底拍到了谁」的直接校验：本脚本用 CopyFromScreen 抓窗口 rect，
-    只要那个矩形里盖着别的窗口，抓到的就是别人的画面，而 OCR/像素判定会全部失真
-    （2026-09-11 实测抓到 WorkBuddy，症状伪装成「webview 没渲染」）。
-    WindowFromPoint 会跳过隐藏窗口，正好用来识别「窗口不可见、下面盖着别人」。
+    只要那个矩形里盖着别的窗口，抓到的就是别人的画面，而 OCR/像素判定会全部失真。
+
+    ⚠️ 判据不能直接比 pid。MonkeyCode 是 **Tauri + WebView2**：网页内容跑在
+    `msedgewebview2.exe` **子进程**里，该进程的窗口盖在客户端的 rect 上，于是
+    「点上的窗口 pid ≠ monkeycode-desktop.exe 的 pid」——2026-10-11 我先写成比 pid，
+    结果把**正常情况误判成被遮挡**，白拦了一轮。实测祖先链：
+        Chrome_RenderWidgetHostHWND(webview2 子进程)
+          -> Chrome_WidgetWin_1(webview2 子进程)
+          -> Chrome_WidgetWin_0(客户端)
+          -> WRY_WEBVIEW(客户端)          ← Tauri 的 webview 包装
+          -> Tauri Window(客户端)          ← 主窗口
+    所以正确判据是 **GetAncestor(pointWin, GA_ROOT) == 主窗口 hwnd**：
+    点确实在客户端窗口里就是它；点了别人的窗口则 GA_ROOT 是别人的，照样能拦。
     """
     pt = _POINT(x, y)
     top = int(user32.WindowFromPoint(pt) or 0)
     if not top:
         return False
-    a, b = wt.DWORD(), wt.DWORD()
-    user32.GetWindowThreadProcessId(top, ctypes.byref(a))
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(b))
-    return int(a.value) == int(b.value)
+    if top == hwnd:
+        return True
+    root = int(user32.GetAncestor(top, GA_ROOT) or 0)
+    return root == hwnd
 
 
 def ensure_foreground(hwnd: int) -> bool:

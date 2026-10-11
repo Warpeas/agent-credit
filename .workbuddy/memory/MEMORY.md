@@ -204,13 +204,25 @@ abs   = 窗口原点 + 缩略图坐标 * scale
    只按面积筛 → 活动窗一变高就「必然选中黑窗」，之后所有 OCR/点击都在黑窗上。
    LobsterAI 10-03 踩过，**Trae 的 `Find-TargetWindow` 直到 10-11 才补上**
    （补时发现它连 class/标题都没看）。
+   （Trae 那个窗口的出处：`main.js` 的 `CommercialActivity` 子系统 +
+   整点轮询 `/trae/api/v2/ug/activity/info` + `www.trae.cn/api/tcc/events?key=code_fission`
+   返回 200，即当时有活着的裂变活动。**它首绘前就是纯黑**，不是故障。）
    ⚠️ 反向也要防：主窗口可能**隐藏/托盘**（`IsWindowVisible=False`），
    此时 `SetForegroundWindow` 静默无效、**`GetForegroundWindow()` 还会返回它**，
    所以「前台」不足以验证。MonkeyCode 10-11 就栽在这——屏幕捕获抓到了 WorkBuddy。
-   ✅ 终判据：`WindowFromPoint(窗口中心)` 是否属于本客户端进程；不通过就**拒绝点击**。
-   （Trae 的 `main.js` 证据：`CommercialActivity` 子系统 + 整点轮询
-   `/trae/api/v2/ug/activity/info` + `www.trae.cn/api/tcc/events?key=code_fission` 200，
-   当前有活着的裂变活动。）
+   ✅ 终判据：`WindowFromPoint(窗口中心)` 的**顶层祖先**是否 == 本客户端主窗口
+   （`GetAncestor(ptWin, GA_ROOT) == hwnd`）；不通过就**拒绝点击**。
+   ⚠️ **不能比 pid**：MonkeyCode 是 Tauri + **WebView2**，网页在
+   `msedgewebview2.exe` **子进程**里，祖先链是
+   `Chrome_RenderWidgetHostHWND(子进程) → Chrome_WidgetWin_1(子进程) →
+   Chrome_WidgetWin_0(客户端) → WRY_WEBVIEW(客户端) → Tauri Window(主窗口)`。
+   比 pid 会把**正常情况误判成被遮挡**（10-11 白拦一轮）。
+4. **启动上下文决定窗口是否可见/已落笔**（10-11 MonkeyCode 实证）：
+   从 agent 会话 `subprocess.Popen` 直拉 → 主窗口 `IsWindowVisible=False`
+   （托盘态）、PrintWindow 纯黑；改用 **RunLevel=Limited + LogonType=Interactive
+   计划任务**拉 → 窗口可见、PrintWindow uniq=718 色、直接在前台。
+   「主人手动打开才成功」的真因是这个上下文，不是"手动"本身。
+   同理：`content_ink` 的**值恒定不变**本身就是异常信号（正常 UI 会波动）。
 
 ## 工程约定
 

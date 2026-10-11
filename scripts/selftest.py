@@ -30,6 +30,22 @@ def main() -> None:
     mavis = find_account("mavis")
     assert mavis["claim_policy"] == "never_auto"
 
+    # MiniMax 按天整档额度：必须逐日等于 2026-10-11 服务端下发的值，
+    # 且整周期 = cycle_total。回归防护——服务端调额或有人把表改成两段式时立刻炸。
+    # 实测值：1200/400/400/1000/400/400/1000 = 4800（day1 基础额度是 800 而非 400，
+    # 所以单个 daily_amount + bonus 表达不了，必须走 daily_amount_by_day）。
+    mm = find_account("minimax")
+    mm_streak = mm.get("streak") or {}
+    per_day = [checkin._grant_amounts(mm, s)[0] + checkin._grant_amounts(mm, s)[1]
+               for s in range(1, 8)]
+    assert per_day == [1200, 400, 400, 1000, 400, 400, 1000], per_day
+    assert sum(per_day) == mm_streak["cycle_total"] == 4800
+    # 没配整档表的账户仍走「daily + bonus」两段式，不能被这次改动带偏。
+    assert checkin._grant_amounts({"daily_amount": 100,
+                                   "streak": {"bonus_on": [3], "bonus_amount": 50}}, 3) == (100, 50)
+    assert checkin._grant_amounts({"daily_amount": 100,
+                                   "streak": {"bonus_on": [3], "bonus_amount": 50}}, 1) == (100, 0)
+
     data = ledger.load()
     r1 = checkin.record_claimed("autoclaw", 200, data=data)
     assert r1["entry"]["amount"] == 200

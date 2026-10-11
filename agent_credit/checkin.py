@@ -182,16 +182,35 @@ def _grant_success(acc: dict[str, Any], data: dict[str, Any], on: date, detail: 
     )
 
 
+def _lookup_day_table(table: Any, streak: int) -> int | None:
+    """按天整档表查值。yaml_lite 会把 key 读成字符串、pyyaml 读成 int，两边都试。"""
+    if not isinstance(table, dict):
+        return None
+    for key in (streak, str(streak)):
+        if key in table:
+            return int(table[key])
+    return None
+
+
 def _grant_amounts(acc: dict[str, Any], streak: int) -> tuple[int, int]:
     daily = int(acc.get("daily_amount") or 0)
     info = acc.get("streak") or {}
+    # 有按天整档表就直接用它，不再走「daily + bonus」两段式。
+    # 起因：MiniMax 的 day1 基础额度是 800、其他天是 400，单个 daily_amount
+    # 表达不了这种「同周期内基础额度自己会变」的情况，硬套会少算/多算 400。
+    total = _lookup_day_table(info.get("daily_amount_by_day"), streak)
+    if total is not None:
+        return total, 0
     bonus_on = info.get("bonus_on") or []
     if streak not in bonus_on:
         return daily, 0
-    bonus_amount = int(info.get("bonus_amount") or 0)
     mode = info.get("mode") or "extra"
+    # 按天分档的加成（MiniMax：day1=400、day4/7=600），没有就退回单一 bonus_amount。
+    bonus_amount = _lookup_day_table(info.get("bonus_amount_by_day"), streak)
+    if bonus_amount is None:
+        bonus_amount = int(info.get("bonus_amount") or 0)
     if mode == "set_daily":
-        return bonus_amount, 0
+        return daily + bonus_amount, 0
     return daily, bonus_amount
 
 

@@ -50,6 +50,11 @@ public static class Cap32 {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  // 2026-10-11: needed by Find-TargetWindow. Electron 客户端同 pid 下会有
+  // Chrome_WidgetWin_0 这类「推广/活动」辅助窗口（实测 Trae 也有，空标题、
+  // 渲染前纯黑、尺寸随内容变），只按面积选窗必然翻车（LobsterAI 10-03 踩过）。
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
@@ -169,11 +174,30 @@ function Test-SamePage($before, $lines) {
     return (($inter / $union) -gt 0.9)
 }
 
+function Get-WinClass([IntPtr]$h) {
+    $sb = New-Object System.Text.StringBuilder 256
+    [void][Cap32]::GetClassName($h, $sb, 256)
+    return $sb.ToString()
+}
+
+function Get-WinTitle([IntPtr]$h) {
+    $sb = New-Object System.Text.StringBuilder 512
+    [void][Cap32]::GetWindowTextW($h, $sb, 512)
+    return $sb.ToString()
+}
+
 function Find-TargetWindow {
-    # Largest visible top-level window of any $ProcessName process. MainWindowHandle
-    # can point at tiny helper popups (update banners etc.), so enumerate.
+    # 主窗口 = **可见 + class 不是辅助窗口 + 标题非空 + 面积最大**。
+    #
+    # 2026-10-11：原实现只按「可见 + 宽>500 + 高>400 + 面积最大」筛，**既不看 class
+    # 也不看标题**。Electron 客户端的推广/活动窗口是 `Chrome_WidgetWin_0`、标题为空、
+    # 首绘前纯黑、尺寸随活动内容变化——一旦它比主窗口大就会被选中，之后所有 OCR 与
+    # 点击都在一个黑窗口上（LobsterAI 2026-10-03 的「必然选中黑窗」就是这处；
+    # MiniMax 同源）。Trae 合并版同样有这类窗口，故补齐同一条修复。
+    # MainWindowHandle 会指向 tiny helper popup，所以仍需枚举。
     $script:BestHwnd = [IntPtr]::Zero
     $script:BestArea = 0
+    $script:WinProbe = New-Object System.Collections.ArrayList
     $pidSet = @{}
     Get-Process -Name $ProcessName -ErrorAction SilentlyContinue | ForEach-Object { $pidSet[[uint32]$_.Id] = $true }
     if ($pidSet.Count -eq 0) { return [IntPtr]::Zero }
@@ -181,14 +205,25 @@ function Find-TargetWindow {
         param($h, $lp)
         $owner = [uint32]0
         [Cap32]::GetWindowThreadProcessId($h, [ref]$owner) | Out-Null
-        if ($pidSet.ContainsKey($owner) -and [Cap32]::IsWindowVisible($h)) {
+        if ($pidSet.ContainsKey($owner)) {
             $r = New-Object Cap32+RECT
             [Cap32]::GetWindowRect($h, [ref]$r) | Out-Null
             $w = $r.Right - $r.Left
             $hh = $r.Bottom - $r.Top
-            if ($w -gt 500 -and $hh -gt 400 -and ($w * $hh) -gt $script:BestArea) {
-                $script:BestHwnd = $h
-                $script:BestArea = $w * $hh
+            $vis = [Cap32]::IsWindowVisible($h)
+            $cls = Get-WinClass $h
+            $title = Get-WinTitle $h
+            $big = ($w -gt 500 -and $hh -gt 400)
+            if ($big) {
+                [void]$script:WinProbe.Add(("{0} vis={1} cls={2} title='{3}' {4}x{5}" -f `
+                    ([int]$h), $vis, $cls, $title, $w, $hh))
+            }
+            # 三条硬条件，缺一不可。黑窗/推广浮层因此永远不入选。
+            if ($vis -and $big -and $cls -ne 'Chrome_WidgetWin_0' -and $title -and $title.Trim()) {
+                if (($w * $hh) -gt $script:BestArea) {
+                    $script:BestHwnd = $h
+                    $script:BestArea = $w * $hh
+                }
             }
         }
         return $true
@@ -200,7 +235,22 @@ function Find-TargetWindow {
 $script:LaunchedByUs = $false
 $preexistingApp = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
 $hwnd = Find-TargetWindow
+# 把「同 pid 且够大」的全部候选窗口落盘。选窗出问题时（比如又选中了推广黑窗）
+# 这份清单是第一手证据，不用再重新写一遍枚举脚本。
+try {
+    $pick = if ($hwnd -ne [IntPtr]::Zero) { "PICK hwnd=$hwnd area=$($script:BestArea)" } else { "PICK none" }
+    [System.IO.File]::AppendAllText("$root\logs\_trae_windows.txt",
+        ("[{0}] {1} {2}`n" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $ProcessName, $pick) +
+        (($script:WinProbe | ForEach-Object { "  $_" }) -join "`n") + "`n")
+} catch { }
+
 if ($hwnd -eq [IntPtr]::Zero) {
+    # 主窗口被隐藏（Trae 关窗 = 最小化到托盘）时不能当「没开」处理：报 notfound
+    # 会误导成「客户端有问题」，实际只要主人把窗口打开就能签。
+    $hiddenMain = @($script:WinProbe | Where-Object { $_ -match 'vis=False' -and $_ -match 'Chrome_WidgetWin_1' })
+    if ($hiddenMain.Count -gt 0) {
+        Out-Json "pending" "$ProcessName 在运行但主窗口处于隐藏/托盘状态，找不到可签到的窗口；请打开客户端窗口后重跑（本次未做任何点击）"
+    }
     # Self-heal: background survivors can never regain a window, so clear them
     # and start fresh -- but ONLY when the client was not already running for the
     # user. Killing an instance the human had open is never acceptable.

@@ -160,8 +160,7 @@ abs   = 窗口原点 + 缩略图坐标 * scale
   （`_run_ps1` + `_launch_via_limited_task`）。冷启动到返回结果 22s。
 - UIPI 结论已推翻（见「同完整性原理」）：首选非提权路径，别再弹 UAC。
 
-### Trae 客户端合并（10-11，覆盖上面几段的前提）
-- **TRAE SOLO CN 已并入 Trae CN**：旧安装目录只剩 `debug.log`，
+### Trae 客户端合并（10-11，覆盖上面几段的前提）- **TRAE SOLO CN 已并入 Trae CN**：旧安装目录只剩 `debug.log`，
   活的是 `%LOCALAPPDATA%\Programs\Trae CN\Trae CN.exe` v3.4.2（卸载项 `TRAE CN (User)`）。
   合并由 `trae-cn://migration` 触发。**主窗口标题变成 `Agent`**（class 仍 `Chrome_WidgetWin_1`）。
   ⚠️ 同 pid 另有一个 **128×200** 小窗 title='Trae CN' → 窗口筛选必须
@@ -185,7 +184,7 @@ abs   = 窗口原点 + 缩略图坐标 * scale
   ⚠️ 余额会被 OCR 并进账户条整行（`．用户712942281…免费3，527`），
   正则**不能锚行首**，要整行搜最后一个千分位数字。
 
-## UI 自动化两条通用铁律（10-11 立，跨客户端）
+## UI 自动化三条通用铁律（10-11 立，跨客户端）
 
 1. **别用绝对亮度阈值找元素**——客户端可能随时切深/浅主题。
    正常态菜单深色底 ~32、药丸 ~42、白字 77+：找「<90 的暗像素」会把整片底色
@@ -198,6 +197,20 @@ abs   = 窗口原点 + 缩略图坐标 * scale
    写在**登录时**，会话内改缩放不会更新（10-11 实测：生效 200%/192dpi，
    注册表仍是 216=225%）。脚本一律 `SetProcessDPIAware()`，
    截图与点击同一坐标系即可自洽。
+3. **选窗必须三条硬条件：可见 + class ≠ `Chrome_WidgetWin_0` + 标题非空**，
+   面积只作同级比较。Electron 客户端（MiniMax / LobsterAI / AutoClaw / **Trae**）
+   都会另建一个 `Chrome_WidgetWin_0` 推广·活动窗口：**空标题、首绘前纯黑、
+   尺寸随内容变**（实测 Trae 见过 1206x666 / 2880x1506 / 2560x1331 三种）。
+   只按面积筛 → 活动窗一变高就「必然选中黑窗」，之后所有 OCR/点击都在黑窗上。
+   LobsterAI 10-03 踩过，**Trae 的 `Find-TargetWindow` 直到 10-11 才补上**
+   （补时发现它连 class/标题都没看）。
+   ⚠️ 反向也要防：主窗口可能**隐藏/托盘**（`IsWindowVisible=False`），
+   此时 `SetForegroundWindow` 静默无效、**`GetForegroundWindow()` 还会返回它**，
+   所以「前台」不足以验证。MonkeyCode 10-11 就栽在这——屏幕捕获抓到了 WorkBuddy。
+   ✅ 终判据：`WindowFromPoint(窗口中心)` 是否属于本客户端进程；不通过就**拒绝点击**。
+   （Trae 的 `main.js` 证据：`CommercialActivity` 子系统 + 整点轮询
+   `/trae/api/v2/ug/activity/info` + `www.trae.cn/api/tcc/events?key=code_fission` 200，
+   当前有活着的裂变活动。）
 
 ## 工程约定
 

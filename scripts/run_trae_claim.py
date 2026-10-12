@@ -1,16 +1,16 @@
-"""手动/调试入口：跑 scripts/ui_claim_traework.ps1，并把结果 JSON 读回来。
+"""手动/调试入口：跑 scripts/ui_claim_trae.ps1，并把结果 JSON 读回来。
 
-⚠️ 这不是生产路径。生产路径是 agent_credit/ui_claim.py 的 _claim_traework()：
-先用 _task_traework.ps1 以「非提权计划任务」冷启动客户端，再同完整性跑 ps1
+⚠️ 这不是生产路径。生产路径是 agent_credit/ui_claim.py 的 _claim_trae()：
+先用 _task_trae.ps1 以「非提权计划任务」冷启动客户端，再同完整性跑 ps1
 （2026-10-09 起，见 .workbuddy/memory/2026-10-09.md）。本脚本保留提权只是给
 人工排查用；提权并不能让窗口出现，客户端没开时照样报 notfound。
 
 2026-10-11 起默认客户端是合并后的 Trae CN（TRAE SOLO CN 已并入）。
 
 用法：
-    python scripts/run_traework_claim.py --explore    # 只抓布局，不点击
-    python scripts/run_traework_claim.py --dry-run    # 定位但不点签到
-    python scripts/run_traework_claim.py              # 真签到
+    python scripts/run_trae_claim.py --explore    # 只抓布局，不点击
+    python scripts/run_trae_claim.py --dry-run    # 定位但不点签到
+    python scripts/run_trae_claim.py              # 真签到
 """
 import argparse
 import ctypes
@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "ui_claim_traework.ps1"
+SCRIPT = ROOT / "scripts" / "ui_claim_trae.ps1"
 
 
 def main() -> int:
@@ -31,7 +31,7 @@ def main() -> int:
     ap.add_argument("--extra", default="", help="原样透传给 ps1 的额外参数")
     args = ap.parse_args()
 
-    result = ROOT / "logs" / "traework_claim.json"
+    result = ROOT / "logs" / "trae_claim.json"
     if result.exists():
         result.unlink()
 

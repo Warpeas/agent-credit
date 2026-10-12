@@ -1,4 +1,4 @@
-# One-shot: run TraeWork claim NON-elevated via scheduled task.
+﻿# One-shot: run Trae claim NON-elevated via scheduled task.
 # The client was launched by a RunLevel=Limited task, so it runs at medium
 # integrity — a medium-integrity claim script can drive it without UAC.
 # (UIPI only blocks LOW -> HIGH injection; both sides are equal here.)
@@ -8,7 +8,7 @@
 # Derived from the current identity rather than hardcoded, to stay portable.
 #
 # Usage (from PowerShell tool):
-#   powershell -ExecutionPolicy Bypass -File scripts\_task_traework_claim.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\_task_trae_claim.ps1
 #   ... -Mode dry-run -ProcessName "Trae CN"
 
 param(
@@ -17,9 +17,9 @@ param(
 )
 
 $root = Split-Path -Parent $PSScriptRoot
-$name = "agent-credit-traework-claim"
-$script = Join-Path $root "scripts\ui_claim_traework.ps1"
-$out   = Join-Path $root "logs\traework_claim.json"
+$name = "agent-credit-trae-claim"
+$script = Join-Path $root "scripts\ui_claim_trae.ps1"
+$out   = Join-Path $root "logs\trae_claim.json"
 
 if (Test-Path $out) { Remove-Item $out -Force }
 

@@ -19,7 +19,7 @@ validity_audit_2026_10_04:
     days: 30
     confidence: confirmed
     evidence: "asar i18n usage_resource_tooltip_rule1 原文「赠予积分（如签到奖励，30天有效）仅限 MiniMax Code 使用」；且 POST /signin/claim 返回 expire_at_ms=1793635200000 = 2026-11-03 00:00:00，与今天 10-04 相差正好 30 天。**注意付费积分有效期 1 年**（同段 rule2）"
-  traework:
+  trae:
     days: 31
     confidence: measured
     evidence: "out/main.js 的 checkin_credits 响应只有 credits/checkin_enabled/checked_in，无有效期字段；31 天来自官方规则页 + 双方 Agent 自述（FIFO 自然日）"
@@ -137,8 +137,12 @@ accounts:
       owner_note: "有移动端，能看到桌面端的项目并继续对话（这点比 AutoClaw 强，后者移动端是另一套环境、项目不同步）。模型两端都只有 MiniMax 自家（M3/M2.7/H3）。"
 
 
-  - id: traework
-    name: TraeWork
+  # 2026-10-09 字节官宣 TraeWork 与 TraeCode 合并为「TRAE」，两品牌不再并行
+  # （对外统一叫 Trae）。2026-10-13 主人拍板彻底改名：account id `traework` →
+  # `trae`，ledger 的 key 同步迁移（备份 data/_ledger_backup_20261013_before_trae_rename.json，
+  # 18 条 entries 原样保留）；历史备份文件与历史记忆日志里的旧名不改，保持证据可追溯。
+  - id: trae
+    name: Trae
     aliases: [trae, 字节trae]
     vendor: 字节跳动
     unit: credit
@@ -154,7 +158,7 @@ accounts:
     extra_monthly: 500
     capabilities: [coding]
     open_when_needed: false
-    notes: "【2026-10-11 客户端合并 & 额度修正】TraeWork(TRAE SOLO CN) 已并入 TraeCode(Trae CN)：旧安装目录 %LOCALAPPDATA%\\Programs\\TRAE SOLO CN 现在只剩 debug.log，客户端只剩 Trae CN.exe（v3.4.2），主窗口标题变成 **Agent**（class 仍是 Chrome_WidgetWin_1；同 pid 另有 128x200 的小窗 title='Trae CN'，按「可见+有标题+面积最大」筛才选得对）。合并由 trae-cn://migration 触发，迁移发生在 2026-10-11 11:04~11:10。两个产品向来共用同一积分账户，台账继续只用 traework 一条，**不要新增账户**。本次同步改了默认进程名/可执行路径：scripts/ui_claim_traework.ps1（原默认是单引号字面量 '$env:APPDATA\\...\\TRAE SOLO CN.exe'，$ 不展开=恒假路径）、_task_traework.ps1、_task_traework_claim.ps1、run_traework_claim.py、agent_credit/ui_claim.py（TRAEWORK_PROCESS 显式透传 -ProcessName）。**额度：免费日额度已从 150 降为 100**（菜单文案「每日领100积分」，且 7 组「点击前/点击后」同分钟余额差实测均为 +100：10-06 2927→3027、10-07 3027→3127、10-08 3127→3227、10-09 3227→3327、10-10 3327→3427、10-11 3427→3527；对照 09-29 为 1677→1827 即 +150）。⚠️ 账本 09-30~10-11 共 12 天仍按 150 记账，合计虚记 600，待主人确认后回滚。【自动化路径，2026-09-28 起 claim_mode=ui】由每日计划任务跑 scripts/ui_claim_traework.ps1（OCR 定位+点击）；**非提权**——客户端由 RunLevel=Limited 计划任务拉起（中完整性），脚本同完整性即可驱动（UIPI 只拦 LOW→HIGH），2026-10-09 起不再 runas，别再弹 UAC。签完只关闭本次由脚本拉起的实例，主人已开着的保留。备用方案 run_traework_claim.py 仅作人工排查。共用端点 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}）。【规则 2026-09-26 双方自述 + 官方页确认】会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么 UI 而非 external】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按 research/SAFETY.md 禁止解密登录态 -> external 拿不到凭据；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且每次运行自身消耗积分，未必覆盖日收益，故未启用。入口：桌面端左下角账户条（新布局实测「用户71294228173免费」在 3868x2092 窗口下约 @58,1998）→ 点左侧头像/用户名开账户菜单（菜单向上展开，出口在窗口下方约 62% 高度处）。【OCR 脚本实测】scripts/ui_claim_traework.ps1（--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。四个实测坑：①入口文案不是「签到」，且 OCR 拆成单字（每/日/领/100/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③入口行是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏（偏移由菜单右边界推算，窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「升级会员」推广卡片，含「每日多领」字样，必须排除。已签态文案「今日已签」。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。"
+    notes: "【2026-10-11 客户端合并 & 额度修正】TraeWork(TRAE SOLO CN) 已并入 TraeCode(Trae CN)：旧安装目录 %LOCALAPPDATA%\\Programs\\TRAE SOLO CN 现在只剩 debug.log，客户端只剩 Trae CN.exe（v3.4.2），主窗口标题变成 **Agent**（class 仍是 Chrome_WidgetWin_1；同 pid 另有 128x200 的小窗 title='Trae CN'，按「可见+有标题+面积最大」筛才选得对）。合并由 trae-cn://migration 触发，迁移发生在 2026-10-11 11:04~11:10。两个产品向来共用同一积分账户，台账继续只用 traework 一条，**不要新增账户**。本次同步改了默认进程名/可执行路径：scripts/ui_claim_traework.ps1（原默认是单引号字面量 '$env:APPDATA\\...\\TRAE SOLO CN.exe'，$ 不展开=恒假路径）、_task_traework.ps1、_task_traework_claim.ps1、run_traework_claim.py、agent_credit/ui_claim.py（TRAEWORK_PROCESS 显式透传 -ProcessName）。**额度：免费日额度已从 150 降为 100**（菜单文案「每日领100积分」，且 7 组「点击前/点击后」同分钟余额差实测均为 +100：10-06 2927→3027、10-07 3027→3127、10-08 3127→3227、10-09 3227→3327、10-10 3327→3427、10-11 3427→3527；对照 09-29 为 1677→1827 即 +150）。⚠️ 账本 09-30~10-11 共 12 天仍按 150 记账，合计虚记 600，待主人确认后回滚。【自动化路径，2026-09-28 起 claim_mode=ui】由每日计划任务跑 scripts/ui_claim_traework.ps1（OCR 定位+点击）；**非提权**——客户端由 RunLevel=Limited 计划任务拉起（中完整性），脚本同完整性即可驱动（UIPI 只拦 LOW→HIGH），2026-10-09 起不再 runas，别再弹 UAC。签完只关闭本次由脚本拉起的实例，主人已开着的保留。备用方案 run_traework_claim.py 仅作人工排查。共用端点 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}）。【规则 2026-09-26 双方自述 + 官方页确认】会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么 UI 而非 external】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按 research/SAFETY.md 禁止解密登录态 -> external 拿不到凭据；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且每次运行自身消耗积分，未必覆盖日收益，故未启用。入口：桌面端左下角账户条（新布局实测「用户71294228173免费」在 3868x2092 窗口下约 @58,1998）→ 点左侧头像/用户名开账户菜单（菜单向上展开，出口在窗口下方约 62% 高度处）。【OCR 脚本实测】scripts/ui_claim_traework.ps1（--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。四个实测坑：①入口文案不是「签到」，且 OCR 拆成单字（每/日/领/100/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③入口行是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏（偏移由菜单右边界推算，窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「升级会员」推广卡片，含「每日多领」字样，必须排除。已签态文案「今日已签」。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。【2026-10-13 合并后 UI 改版 & 判据换血】官宣合并后客户端 UI 大改，**账户条不再显示积分余额**（旧「用户71294228173 免费 3,527」-> 新「0用户71294228173免费」，且整行被 OCR 并成一条、words 是单字数组）-> 原「读账户条余额、看点击前后差额」的主判据整体失效，10-12/10-13 连续两天日志出现「复核余额 -1 -> -1」，成功判定退化成「今日已签」文案兜底。本次修复改用**卡片三态**（实测 OCR dump）：①未签：卡片常驻左侧栏底部，文案「每日领100积分」+「升级会员，每日多领100积分」，按钮 [签到][升级权益]；②刚领取：「今日签到，已获得100积分。下次可在头像菜单中签到。」，按钮 [今日已签(3s)]；③已签（稳定）：卡片整块换成会员推广「夺会员首月立减¥30 / 升级会员立即获得大额积分…」，按钮 [立即升级]，**页面上再无任何签到字样**。于是判据改为：主判据 = 正则抓「已获得N积分」取实发额度（比余额差更直接，且服务端调额时能自动跟上）；备用 = 余额差；兜底 = 文案（拿不到额度，退回 daily_amount）。幂等闸门 = 入口词「每日领」消失 + 会员推广态出现。按钮定位也从「像素扫药丸 + 4 个 offset 轮换」改为按 OCR 短文本在入口行下方定位（新布局里药丸扫描会扫到背景深色块，实测 x=664 len=235）。已用当日三态真实 OCR 文本做正则回归，无交叉误判（「升级会员立即获得大额积分」不会被误读成 granted）。"
     models_note: "16+ 模型，CUE / MCP"
     rating:
       value: 3
@@ -214,6 +218,31 @@ accounts:
       automation: 1
       review: "纸面 100/天、10+ 模型（GPT-4o/Claude/Gemini/DeepSeek）看着香，但服务端当前根本没下发签到活动（slot 返回 empty），external 脚本只能报 no-activity。UI 路线已打通，冷启动 20s + 广告遮罩，实测收益仅 +100。属于占着坑不产粮。"
       best_for: "活动下发后再评估；当前只作备用"
+      owner_note: ""
+
+
+  - id: qodercn
+    name: Qoder CN
+    aliases: [qoder, qoder-cn]
+    vendor: 阿里巴巴
+    unit: credit
+    grant_type: accumulating
+    daily_amount: 100
+    validity_days: 30
+    cap: null
+    claim_policy: always
+    claim_mode: ui
+    command: ""
+    capabilities: [coding]
+    open_when_needed: false
+    notes: "Qoder CN 桌面端（Electron，进程名 'Qoder CN'，exe 在 %LOCALAPPDATA%\\Programs\\Qoder CN\\Qoder CN.exe，数据目录 ~/.qoder-cn）。【2026-10-13 主人确认 + 本机实测】有每日签到活动：弹窗「专属活动权益 / 立即查收」里的「每天领 100 Credits」，**每日 10:00 (UTC+8) 刷新，领取后 30 天有效，+100**。两种触发路径：①客户端启动时自动弹窗；②左下角用户名右侧的「用量」仪表图标 → 弹出「我的用量」小窗 → 点小窗里的礼盒图标 → 出现该活动弹窗 → 点「领取」。【机制来源，resources/app.asar 只读反编译】活动内容是服务端下发进 webview 的，bundle 里搜不到「专属活动权益/每天领」等文案（命中 0），且「签到」二字在 bundle 里也命中 0——早期据此误判为「无签到」，已由主人纠正。客户端有 ICampaignService，轮询 GET /sash/api/v1/me/campaigns/{id}/limited-number 取 {showCampaign, claimable}，CAMPAIGN_REFRESH_INTERVAL_MS≈1h，claimable 时左下角礼盒图标带 halo（campaign-claimable-indicator-halo）；领取动作在 webview 内点「领取」触发。【为什么 UI 而非 external】~/.qoder-cn/.auth 下无明文凭据（只有 machine_id 与 dynamic-texts 缓存），登录态不在明文里；按 research/SAFETY.md 不解密登录态 → external 拿不到凭据，故走客户端自身界面的 OCR + OS 级点击（与 AutoClaw/TraeWork/LobsterAI 同路）。【UIA 不可达】主窗口 UIA 树仅 13 个元素、无任何领取相关 Name（实测），活动层是 webview，UIA 看不见 → 必须 OCR。【自动化状态】scripts/ui_claim_qodercn.ps1：启动弹窗路径文案明确（每天领/领取/专属活动权益）、判据稳；经「用量→礼盒」图标导航开弹窗这条依赖图标坐标（图标无文字，只能靠相邻文字锚点推算位置），较脆。失效条件：活动服务端下线或改额度/刷新时间、弹窗文案改版、账户条或用量小窗布局变化。"
+    models_note: "多模型（界面见 Qwen3.8-Flash 等）"
+    rating:
+      value: 3
+      capability: 4
+      automation: 2
+      review: "100/天、领取后 30 天有效、每日 10:00 (UTC+8) 刷新，可累积。Qoder 本身是能打的 agentic IDE（多模型、仓库级理解）。签到藏在服务端下发的活动 webview 里，UIA 看不见只能靠 OCR 点击；启动弹窗那条路判据清晰，但靠「用量→礼盒」图标导航开弹窗这条依赖坐标、改版即脆。"
+      best_for: "作为编码主力顺手领；签到走启动弹窗最稳"
       owner_note: ""
 
 

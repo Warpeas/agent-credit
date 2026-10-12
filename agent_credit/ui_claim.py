@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import trace
 from .apps import find_exe, launch
 from .paths import LOG_DIR
 
@@ -16,11 +17,14 @@ SCRIPT = ROOT / "scripts" / "ui_claim.ps1"
 SCRIPT_AUTOCLAW_OCR = ROOT / "scripts" / "ui_claim_autoclaw.ps1"
 SCRIPT_MINIMAX_OCR = ROOT / "scripts" / "ui_claim_minimax.ps1"
 SCRIPT_LOBSTERAI_OCR = ROOT / "scripts" / "ui_claim_lobsterai.ps1"
-SCRIPT_TRAEWORK_OCR = ROOT / "scripts" / "ui_claim_traework.ps1"
-TASK_TRAEWORK_LAUNCHER = ROOT / "scripts" / "_task_traework.ps1"
-# 2026-10-11：TRAE SOLO CN（TraeWork）已合并进 Trae CN，旧安装目录只剩 debug.log。
-# 两个产品向来共用同一个积分账户，所以台账继续只用 `traework` 一条，不新增账户。
-TRAEWORK_PROCESS = "Trae CN"
+SCRIPT_TRAE_OCR = ROOT / "scripts" / "ui_claim_trae.ps1"
+SCRIPT_QODERCN_OCR = ROOT / "scripts" / "ui_claim_qodercn.ps1"
+TASK_TRAE_LAUNCHER = ROOT / "scripts" / "_task_trae.ps1"
+# 2026-10-11：TRAE SOLO CN（Trae）已合并进 Trae CN，旧安装目录只剩 debug.log。
+# 两个产品向来共用同一个积分账户，所以台账继续只用 `trae` 一条，不新增账户。
+TRAE_PROCESS = "Trae CN"
+# Qoder CN 的进程名/主窗口标题都是 "Qoder CN"（exe 名带空格）。
+QODERCN_PROCESS = "Qoder CN"
 
 PS = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"]
 
@@ -32,7 +36,7 @@ DEFAULT_SUCCESS = ("签到成功", "领取成功", "打卡成功", "连续签到
 RECIPES: dict[str, dict[str, Any]] = {
     "workbuddy": {"process": ["WorkBuddy"], "sendkeys": ""},
     "minimax": {"process": ["MiniMax"], "sendkeys": "/checkin{ENTER}"},
-    "traework": {"process": ["TRAE", "Trae"], "sendkeys": ""},
+    "trae": {"process": ["TRAE", "Trae"], "sendkeys": ""},
     "autoclaw": {"process": ["AutoClaw"], "sendkeys": ""},
     "lobsterai": {"process": ["LobsterAI", "Lobster"], "sendkeys": ""},
 }
@@ -40,6 +44,44 @@ RECIPES: dict[str, dict[str, Any]] = {
 
 def skip_ui() -> bool:
     return os.environ.get("AGENT_CREDIT_SKIP_UI", "").strip() in ("1", "true", "yes")
+
+
+# 提权跑的 ps1 由 UAC 另起一个窗口，它的 stdout 我们拿不到，只能读它自己写的日志。
+# 文件名与各脚本里的 $logPath 对应（见各 ps1 顶部的 Log 函数）。
+_PS1_LOG_NAME = {
+    "ui_claim_lobsterai": "_lobsterai_log.txt",
+}
+
+
+def _ps1_log(script: Path) -> Path:
+    name = script.stem
+    return LOG_DIR / _PS1_LOG_NAME.get(name, "ps1_%s.log" % name.replace("ui_claim_", "", 1))
+
+
+def _read_payload(result_path: Path) -> dict[str, Any] | None:
+    """结果文件可能正被写入（读到半个 JSON 是常态）——解析失败就当还没好。"""
+    if not result_path.exists():
+        return None
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if isinstance(payload, dict) and payload.get("status"):
+        return payload
+    return None
+
+
+def _wait_elevated(script: Path, result_path: Path, timeout: int) -> tuple[bool, str]:
+    """UAC 提权后的等待：tail 日志 + 心跳，别让黑框干等没反馈。"""
+    tailer = trace.LogTailer(_ps1_log(script), label=script.stem)
+    got, payload = trace.wait_for(
+        lambda: _read_payload(result_path), timeout=timeout, label=script.stem, tailer=tailer,
+    )
+    if not got:
+        return False, f"提权签到超时（{timeout}s），请查看客户端窗口状态"
+    status = str(payload.get("status") or "")
+    detail = str(payload.get("detail") or status)
+    return status in ("ok", "already"), detail
 
 
 def _claim_autoclaw() -> tuple[bool, str]:
@@ -63,25 +105,12 @@ def _claim_autoclaw() -> tuple[bool, str]:
         "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \""
         + str(SCRIPT_AUTOCLAW_OCR) + "\" -OutFile \"" + str(result_path) + "\""
     )
+    trace.note("请求 UAC 提权运行 AutoClaw 签到脚本（超时 180s）")
     ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell", args, None, 0)
     if ret <= 32:
         return False, "UAC 未确认，AutoClaw 自动签到需要提权才能点击（可手动签到后 record 入账）"
-
-    deadline = time.time() + 180
-    while time.time() < deadline:
-        if result_path.exists():
-            try:
-                payload = json.loads(result_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                payload = None
-            if isinstance(payload, dict) and payload.get("status"):
-                status = str(payload.get("status") or "")
-                detail = str(payload.get("detail") or status)
-                if status in ("ok", "already"):
-                    return True, detail
-                return False, detail
-        time.sleep(2)
-    return False, "提权签到超时（180s），请查看客户端窗口状态"
+    trace.note("提权窗口已拉起，等待结果文件…")
+    return _wait_elevated(SCRIPT_AUTOCLAW_OCR, result_path, 180)
 
 
 def _run_elevated_ps1(script: Path, result_path: Path, timeout: int = 240) -> tuple[bool, str]:
@@ -103,25 +132,12 @@ def _run_elevated_ps1(script: Path, result_path: Path, timeout: int = 240) -> tu
         "-NoProfile -ExecutionPolicy Bypass -File \""
         + str(script) + "\" -OutFile \"" + str(result_path) + "\""
     )
+    trace.note(f"请求 UAC 提权运行 {script.name}（超时 {timeout}s）")
     ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell", args, None, 0)
     if ret <= 32:
         return False, "UAC 未确认：需要提权才能拉起客户端并点击（可手动签到后用 record 入账）"
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if result_path.exists():
-            try:
-                payload = json.loads(result_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                payload = None
-            if isinstance(payload, dict) and payload.get("status"):
-                status = str(payload.get("status") or "")
-                detail = str(payload.get("detail") or status)
-                if status in ("ok", "already"):
-                    return True, detail
-                return False, detail
-        time.sleep(2)
-    return False, f"提权签到超时（{timeout}s），请查看客户端窗口状态"
+    trace.note("提权窗口已拉起，等待结果文件…")
+    return _wait_elevated(script, result_path, timeout)
 
 
 def _claim_minimax() -> tuple[bool, str]:
@@ -153,7 +169,7 @@ def _read_result(result_path: Path) -> tuple[bool, str]:
 
 
 def _run_ps1(script: Path, result_path: Path, timeout: int = 240,
-             process_name: str = "") -> tuple[bool, str]:
+             process_name: str = "", exe_path: str = "") -> tuple[bool, str]:
     """Run a claim ps1 at the CURRENT integrity level and read its JSON result.
 
     `process_name` is forwarded as -ProcessName; without it the script falls back
@@ -169,15 +185,19 @@ def _run_ps1(script: Path, result_path: Path, timeout: int = 240,
     cmd = PS + ["-WindowStyle", "Hidden", "-File", str(script), "-OutFile", str(result_path)]
     if process_name:
         cmd += ["-ProcessName", process_name]
-    try:
-        subprocess.run(cmd, cwd=str(ROOT), timeout=timeout, capture_output=True)
-    except subprocess.TimeoutExpired:
+    if exe_path:
+        cmd += ["-ExePath", exe_path]
+    rc, _ = trace.stream(cmd, label=script.stem, timeout=timeout, cwd=str(ROOT))
+    if rc is None:
         return False, f"签到脚本超时（{timeout}s）"
+    if rc:
+        # pending/notfound 也会用非 0 退出，最终以结果文件为准，这里只作提示
+        trace.note(f"{script.name} 退出码 {rc}（以结果文件为准）", label=script.stem)
     return _read_result(result_path)
 
 
 def _launch_via_limited_task(launcher: Path, timeout: int = 150,
-                             process_name: str = "") -> tuple[bool, str]:
+                             process_name: str = "", exe_path: str = "") -> tuple[bool, str]:
     """Cold-start a GUI client through a RunLevel=Limited scheduled task.
 
     Every direct launch path fails here: os.startfile, ShellExecute and
@@ -194,21 +214,21 @@ def _launch_via_limited_task(launcher: Path, timeout: int = 150,
     cmd = PS + ["-File", str(launcher), "-WaitReady"]
     if process_name:
         cmd += ["-ProcessName", process_name]
-    try:
-        proc = subprocess.run(
-            cmd, cwd=str(ROOT), timeout=timeout, capture_output=True, text=True,
-        )
-    except subprocess.TimeoutExpired:
+    if exe_path:
+        cmd += ["-ExePath", exe_path]
+    trace.note(f"冷启动客户端（计划任务方式，上限 {timeout}s）", label=launcher.stem)
+    rc, out = trace.stream(cmd, label=launcher.stem, timeout=timeout, cwd=str(ROOT))
+    out = out.strip()
+    if rc is None:
         return False, f"拉起客户端超时（{timeout}s）"
-    out = (proc.stdout or "").strip()
-    if proc.returncode != 0:
-        return False, f"拉起客户端失败 rc={proc.returncode}: {out[:200]}"
+    if rc != 0:
+        return False, f"拉起客户端失败 rc={rc}: {out[:200]}"
     if "EXE MISSING" in out:
         return False, out[:200]
     return True, out[-200:]
 
 
-def _claim_traework() -> tuple[bool, str]:
+def _claim_trae() -> tuple[bool, str]:
     """Trae route: cold-start via scheduled task, then click at medium integrity.
 
     Deliberately NOT elevated. The previous implementation used
@@ -223,18 +243,53 @@ def _claim_traework() -> tuple[bool, str]:
     2026-10-11: TRAE SOLO CN was merged into Trae CN, so both steps are now told
     the new process name explicitly instead of relying on their own defaults.
     """
-    if not SCRIPT_TRAEWORK_OCR.is_file():
-        return False, f"缺少 {SCRIPT_TRAEWORK_OCR}"
+    if not SCRIPT_TRAE_OCR.is_file():
+        return False, f"缺少 {SCRIPT_TRAE_OCR}"
 
-    ok, note = _launch_via_limited_task(TASK_TRAEWORK_LAUNCHER,
-                                        process_name=TRAEWORK_PROCESS)
+    # exe 由 Python 侧探好再显式传给 ps1：ps1 自己在计划任务上下文里推导会拿到
+    # 空值（10-12 00:01 那轮就是这样 —— 客户端没拉起，白等 90s 后报 pending）。
+    exe = find_exe("trae")
+    exe_path = str(exe) if exe else ""
+    ok, note = _launch_via_limited_task(TASK_TRAE_LAUNCHER,
+                                        process_name=TRAE_PROCESS, exe_path=exe_path)
     if not ok:
         return False, note
-    ok, detail = _run_ps1(SCRIPT_TRAEWORK_OCR, LOG_DIR / "traework_claim.json",
-                          timeout=200, process_name=TRAEWORK_PROCESS)
+    ok, detail = _run_ps1(SCRIPT_TRAE_OCR, LOG_DIR / "trae_claim.json",
+                          timeout=200, process_name=TRAE_PROCESS, exe_path=exe_path)
     if not ok:
         return False, f"{detail}（启动日志: {note}）"
     return True, detail
+
+
+def _claim_qodercn() -> tuple[bool, str]:
+    """Qoder CN route: raise the client window, then click 「领取」 in the daily
+    campaign webview (每日领 100 Credits).
+
+    The claim lives in a server-delivered webview that UIA cannot see (main window
+    exposes only ~13 UIA elements, none claim-related), so this is OCR + OS-level
+    click -- same route shape as Trae. Deliberately NOT elevated: Qoder CN is a
+    normal medium-integrity install, and the ps1 runs at the same integrity, so
+    UIPI does not gate the synthetic clicks. No plaintext token lives under
+    ~/.qoder-cn/.auth, so external direct-sign is off the table per SAFETY.md.
+    """
+    if not SCRIPT_QODERCN_OCR.is_file():
+        return False, f"缺少 {SCRIPT_QODERCN_OCR}"
+
+    exe = find_exe("qodercn")
+    exe_path = str(exe) if exe else ""
+    if exe is None:
+        return False, "未找到 Qoder CN 客户端，请手动打开后签到"
+    # 客户端没在跑就先拉起（os.startfile 尽力而为；计划任务上下文里若起不来，
+    # ps1 会以 notfound 退出，checkin 退化为 pending，不会误记账）。
+    if not _has_main_window([QODERCN_PROCESS]):
+        try:
+            launch("qodercn")
+        except FileNotFoundError:
+            return False, "未找到 Qoder CN 客户端，请手动打开后签到"
+        time.sleep(3)
+
+    return _run_ps1(SCRIPT_QODERCN_OCR, LOG_DIR / "qodercn_claim.json",
+                    timeout=180, process_name=QODERCN_PROCESS, exe_path=exe_path)
 
 
 def _claim_lobsterai() -> tuple[bool, str]:
@@ -243,7 +298,7 @@ def _claim_lobsterai() -> tuple[bool, str]:
     return _run_elevated_ps1(SCRIPT_LOBSTERAI_OCR, LOG_DIR / "lobsterai_claim.json")
 
 
-UI_ROUTE_IDS = ("autoclaw", "minimax", "lobsterai", "traework")
+UI_ROUTE_IDS = ("autoclaw", "minimax", "lobsterai", "trae", "qodercn")
 
 
 def has_ui_route(account_id: str) -> bool:
@@ -265,8 +320,10 @@ def claim(account_id: str) -> tuple[bool, str]:
         return _claim_minimax()
     if account_id == "lobsterai":
         return _claim_lobsterai()
-    if account_id == "traework":
-        return _claim_traework()
+    if account_id == "trae":
+        return _claim_trae()
+    if account_id == "qodercn":
+        return _claim_qodercn()
     recipe = RECIPES.get(account_id)
     if recipe is None:
         return False, "无 UI 配方"
@@ -304,22 +361,14 @@ def claim(account_id: str) -> tuple[bool, str]:
     if sendkeys:
         cmd.extend(["-SendKeys", sendkeys])
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except subprocess.TimeoutExpired:
+    rc, out = trace.stream(cmd, label="ui_claim", timeout=90)
+    if rc is None:
         return False, "UI 签到超时"
 
-    payload = _last_json(proc.stdout)
+    payload = _last_json(out)
     if not payload:
-        err = (proc.stderr or proc.stdout or "").strip()[:300]
-        return False, f"UI 脚本无结果 {err or proc.returncode}"
+        err = out.strip()[-300:]
+        return False, f"UI 脚本无结果 {err or rc}"
 
     status = str(payload.get("status") or "")
     detail = str(payload.get("detail") or status)

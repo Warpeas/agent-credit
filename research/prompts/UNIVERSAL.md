@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 适用 | 本机任意一家 Agent 客户端（AutoClaw / TraeWork / LobsterAI / ...） |
+| 适用 | 本机任意一家 Agent 客户端（AutoClaw / Trae / LobsterAI / ...） |
 | 生成日期 | 2026-09-24 |
 | 用法 | 粘进目标客户端的对话框，一次搞定一家 |
 
@@ -48,7 +48,7 @@
 |---|---|---|---|---|
 | `minimax` | MiniMax Code | `%LOCALAPPDATA%\Programs\MiniMax Code` | `%LOCALAPPDATA%\Programs\MiniMax Code\resources` | 400 credit/天 |
 | `autoclaw` | AutoClaw 智谱 | `C:\Program Files\AutoClaw` | `C:\Program Files\AutoClaw\resources` | 200 credit/天 |
-| `traework` | TraeWork | `%LOCALAPPDATA%\Programs\TRAE SOLO CN` | `%LOCALAPPDATA%\Programs\TRAE SOLO CN\resources` | 150 credit/天 |
+| `trae` | Trae | `%LOCALAPPDATA%\Programs\TRAE SOLO CN` | `%LOCALAPPDATA%\Programs\TRAE SOLO CN\resources` | 150 credit/天 |
 | `lobsterai` | LobsterAI | `%LOCALAPPDATA%\Programs\LobsterAI` | `%LOCALAPPDATA%\Programs\LobsterAI\resources` | 100 credit/天 |
 | `workbuddy` | WorkBuddy | `%LOCALAPPDATA%\Programs\WorkBuddy` | `%LOCALAPPDATA%\Programs\WorkBuddy\resources` | 100 credit/天 |
 | `dumate` | DuMate 百度搭子 | `%LOCALAPPDATA%\Programs\DuMate` | `%LOCALAPPDATA%\Programs\DuMate\resources` | 500 credit/天 |

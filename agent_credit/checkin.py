@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from . import ledger
+from . import trace
 from .catalog import accounts, find_account, threshold_ratio
 from .ui_claim import claim as ui_claim, has_ui_route, skip_ui
 
@@ -23,6 +24,8 @@ class CheckinResult:
     status: str  # ok | skipped | pending | failed
     detail: str
     amount: int = 0
+    # 结果产生时刻：汇总打印时能看出这一条是在第几秒落定的
+    at: float = field(default_factory=time.time)
 
 
 def _should_claim(acc: dict[str, Any], data: dict[str, Any], on: date) -> tuple[bool, str]:
@@ -53,27 +56,20 @@ def _run_external(acc: dict[str, Any]) -> tuple[bool, str, str]:
     command = command.replace("{REPO}", str(REPO_ROOT))
     if os.environ.get("AGENT_CREDIT_SKIP_EXTERNAL", "").strip().lower() in ("1", "true", "yes"):
         return False, "外部命令已跳过（AGENT_CREDIT_SKIP_EXTERNAL）", ""
-    try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except subprocess.TimeoutExpired:
-        return False, "外部命令超时", ""
-    if proc.returncode != 0:
+    # 实时转发：以前是 capture_output，黑框里几十秒没有任何动静，
+    # 看不出是卡住还是在跑（monkeycode 的 UI 签到尤其慢）。
+    rc, out = trace.stream(command, shell=True, label=acc["id"], timeout=60)
+    if rc is None:
+        return False, "外部命令超时", out
+    if rc != 0:
         # 把脚本最后一行输出带出来，否则只看得到退出码，没法判断是没活动还是真失败
-        tail = (proc.stdout or "").strip().splitlines()
-        last = tail[-1][:200] if tail else ((proc.stderr or "").strip().splitlines() or [""])[-1][:200]
-        detail = f"外部命令失败 exit={proc.returncode}"
+        tail = out.strip().splitlines()
+        last = tail[-1][:200] if tail else ""
+        detail = f"外部命令失败 exit={rc}"
         if last:
             detail += f" | {last}"
-        return False, detail, (proc.stdout or "")
-    return True, "外部命令成功", (proc.stdout or "")
+        return False, detail, out
+    return True, "外部命令成功", out
 
 
 def _parse_granted(out: str) -> int | None:
@@ -99,14 +95,19 @@ def checkin(
     data = data or ledger.load()
     targets = [find_account(only)] if only else accounts()
     results: list[CheckinResult] = []
+    trace.init()
+    trace.note(f"开始签到 {on.isoformat()}，共 {len(targets)} 个账户")
 
-    for acc in targets:
+    for i, acc in enumerate(targets, 1):
+        tag = f"{i}/{len(targets)} {acc['id']}"
         should, reason = _should_claim(acc, data, on)
         if not should:
             results.append(CheckinResult(acc["id"], acc["name"], "skipped", reason))
+            trace.note(f"{acc['name']} 跳过：{reason}", label=tag)
             continue
 
         mode = acc.get("claim_mode") or "manual"
+        trace.note(f"{acc['name']} 开始（{reason}，mode={mode}）", label=tag)
         command = (acc.get("command") or "").strip()
         if command or mode == "external":
             ok, detail, out = _run_external(acc)
@@ -154,7 +155,7 @@ def checkin(
             ok, detail = ui_claim(acc["id"])
             if ok:
                 # UI 脚本也可以用 detail 里的 `[granted] N` 上报实发额
-                # （TraeWork 靠菜单余额差算出来）。catalog 的 daily_amount 是预估，
+                # （Trae 靠菜单余额差算出来）。catalog 的 daily_amount 是预估，
                 # 服务端活动期随时会调：Trae 的免费日额度 2026-09-30 就从 150 变 100，
                 # 按常额入账会连续多记。上报多少就记多少。
                 results.append(_grant_success(acc, data, on, detail,
@@ -176,6 +177,7 @@ def checkin(
         results.append(CheckinResult(acc["id"], acc["name"], "skipped", f"claim_mode={mode}"))
 
     ledger.save(data)
+    trace.note("台账已写回 " + str(ledger.LEDGER_PATH))
     return results, data
 
 

@@ -88,7 +88,7 @@ research/prompts/UNIVERSAL.md
 （答案文件按这个顺序生成，速查表也按这个顺序排）：
 
 **已打通**（2026-10-04）：`workbuddy`(external) / `minimax`(external+UI 回退) /
-`traework`(UI) / `autoclaw`(UI) / `lobsterai`(UI) / `monkeycode_credit`(UI)
+`trae`(UI) / `autoclaw`(UI) / `lobsterai`(UI) / `monkeycode_credit`(UI)
 
 **仍待探索**：
 

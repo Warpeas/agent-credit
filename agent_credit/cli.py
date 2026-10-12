@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from typing import Any
 
 from . import checkin as checkin_mod
 from . import ledger
+from . import trace
 from .apps import launch
 from .catalog import accounts, find_account
 from .doctor import format_report, report
@@ -38,23 +40,41 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
 
 def cmd_checkin(args: argparse.Namespace) -> int:
+    trace.init()
     results, _ = checkin_mod.checkin(only=args.only)
-    pending = failed = 0
+    pending = failed = ok = skipped = 0
     for r in results:
-        print(f"[{r.status}] {r.name}: {r.detail}" + (f"  +{r.amount}" if r.amount else ""))
+        if r.status == "skipped":
+            # 跳过的在循环里已经实时打过一行，汇总里再打一遍纯属噪音
+            skipped += 1
+            continue
+        trace.note(
+            f"{r.name}: {r.detail}" + (f"  +{r.amount}" if r.amount else ""),
+            label=f"{r.status} @{trace.elapsed_at(r.at)}s",
+        )
         if r.status == "pending":
             pending += 1
         elif r.status == "failed":
             failed += 1
+        elif r.status == "ok":
+            ok += 1
+        else:
+            skipped += 1
     if args.open:
         for r in results:
             if r.status != "pending":
                 continue
             try:
                 exe = launch(r.account_id)
-                print(f"  已打开 {r.name}: {exe}")
+                trace.note(f"已打开 {r.name}: {exe}")
             except FileNotFoundError:
-                print(f"  未安装或未知路径：{r.name}，请手动打开")
+                trace.note(f"未安装或未知路径：{r.name}，请手动打开")
+    trace.note(f"汇总：ok {ok} / skipped {skipped} / pending {pending} / failed {failed}")
+    if pending or failed:
+        trace.note(f"明细日志：{trace.init()}")
+    if args.hold > 0:
+        trace.note(f"停留 {args.hold}s 后关闭窗口（Ctrl+C 可提前退出）")
+        time.sleep(args.hold)
     if failed:
         return 1
     if pending:
@@ -181,6 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("checkin", help="按策略签到（ui=本机客户端；失败则提示手签）")
     s.add_argument("--only", help="只处理一个账户 id/别名")
     s.add_argument("--open", action="store_true", help="打开待手签且已安装的客户端（不含当日清零）")
+    s.add_argument("--hold", type=int, default=0, help="结束后停留 N 秒再关窗口（手动跑时用来看清结果）")
     s.set_defaults(func=cmd_checkin)
 
     s = sub.add_parser("recommend", help="根据任务推荐用哪家")

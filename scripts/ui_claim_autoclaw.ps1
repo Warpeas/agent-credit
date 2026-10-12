@@ -5,6 +5,9 @@ param(
     [string]$OutFile = ""
 )
 $root = Split-Path -Parent $PSScriptRoot
+$logPath = "$root\logs\ps1_autoclaw.log"
+function Log($m){ $s=(Get-Date -Format "HH:mm:ss")+" "+$m; try{[System.IO.File]::AppendAllText($logPath,$s+"`n",(New-Object System.Text.UTF8Encoding($false)))}catch{}; Write-Output $s }
+
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -411,6 +414,7 @@ function Close-AdOverlays {
 # 没广告那次才跳过去）。所以先给广告时间冒出来，关掉它，再看页面——
 # 一上来就清广告，清完广告才出现，等于白清。
 Start-Sleep -Seconds 8
+Log "step: 已等 8s，清广告后 OCR 首页"
 Close-AdOverlays
 Start-Sleep -Seconds 2
 $lines = Get-OcrLinesSafe
@@ -441,6 +445,7 @@ if (-not $anchor) {
         # 真正的签到按钮由后面的 DryRun 分支拦住。
         Write-Output ("[dryrun] 点开入口: " + $entry.text + " @ " + ($entry.x + [int]($entry.w / 2)) + "," + ($entry.y + [int]($entry.h / 2)))
     }
+    Log ("step: 点开入口 " + $entry.text)
     $beforeSig = Get-SigSet $lines
     Click-At ($entry.x + [int]($entry.w / 2)) ($entry.y + [int]($entry.h / 2))
 
@@ -461,6 +466,7 @@ if (-not $anchor) {
             }
         }
         # 严格匹配：不能用 Contains，首页「每日签到赚积分」这类引导文案会假阳性命中
+        Log ("step: 等签到卡渲染 round=" + $round)
         $anchor = Find-CheckinAnchor $lines
         if ($anchor) { break }
         Dump-Ocr $lines ("inspiration-loading-round" + $round)
@@ -533,6 +539,7 @@ foreach ($wait in @(1500, 2500, 3500)) {
     }
     if ($alreadyHit) { break }
 }
+Log "step: 复核点击结果"
 if ($okHit) { Out-Json "ok" ("签到成功: " + $okHit.text) }
 # 能走到这里说明卡片是「本次点击之后」才变成已完成的——那就是本次签到成功，
 # 必须判 ok。「点击前就已签」在上面 doneLine 分支提前返回了 already，

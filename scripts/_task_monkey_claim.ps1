@@ -1,5 +1,5 @@
-# One-shot: run MonkeyCode claim NON-elevated via scheduled task.
-# Same trick as _task_traework.ps1 - the sandboxed session cannot start GUI apps.
+﻿# One-shot: run MonkeyCode claim NON-elevated via scheduled task.
+# Same trick as _task_trae.ps1 - the sandboxed session cannot start GUI apps.
 param()
 $root = Split-Path -Parent $PSScriptRoot
 $name = "agent-credit-monkey-claim"

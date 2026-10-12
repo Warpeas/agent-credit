@@ -38,7 +38,7 @@ UNIVERSAL_PATH = PROMPT_DIR / "UNIVERSAL.md"
 RESEARCH_IDS = [
     "minimax",
     "autoclaw",
-    "traework",
+    "trae",
     "lobsterai",
     "workbuddy",
     "dumate",
@@ -96,7 +96,7 @@ UNIVERSAL_TEMPLATE = """# 通用探索调研 prompt
 
 | 项 | 值 |
 |---|---|
-| 适用 | 本机任意一家 Agent 客户端（AutoClaw / TraeWork / LobsterAI / ...） |
+| 适用 | 本机任意一家 Agent 客户端（AutoClaw / Trae / LobsterAI / ...） |
 | 生成日期 | {today} |
 | 用法 | 粘进目标客户端的对话框，一次搞定一家 |
 

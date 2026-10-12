@@ -1,10 +1,10 @@
 ﻿# Trae OCR check-in: find anchors via screenshot+OCR, click the daily check-in button.
 # Requires: the client foreground (interactive) or a non-elevated runner.
 #
-# 2026-10-11: TRAE SOLO CN (TraeWork) was merged into "Trae CN" and the old
+# 2026-10-11: TRAE SOLO CN (Trae) was merged into "Trae CN" and the old
 # install dir was emptied (only debug.log left) — so the defaults now point at
 # the merged client (Trae CN v3.4.2, main window title "Agent"). Both products
-# always shared one credit account, so the ledger keeps a single `traework`
+# always shared one credit account, so the ledger keeps a single `trae`
 # entry; do NOT add a second one for the merged client.
 param(
     [switch]$DryRun,
@@ -17,6 +17,9 @@ param(
     [int]$AvatarY = 0
 )
 $root = Split-Path -Parent $PSScriptRoot
+$logPath = "$root\logs\ps1_trae.log"
+function Log($m){ $s=(Get-Date -Format "HH:mm:ss")+" "+$m; try{[System.IO.File]::AppendAllText($logPath,$s+"`n",(New-Object System.Text.UTF8Encoding($false)))}catch{}; Write-Output $s }
+
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -25,7 +28,7 @@ $ErrorActionPreference = "Stop"
 trap {
     try {
         $m = "FATAL: " + $_.Exception.Message + " @ " + $_.InvocationInfo.PositionMessage
-        $p = "$PSScriptRoot\..\logs\traework_claim.json"
+        $p = "$PSScriptRoot\..\logs\trae_claim.json"
         [System.IO.File]::WriteAllText($p, (ConvertTo-Json -Compress @{ status = 'failed'; detail = $m }))
     } catch { }
     break
@@ -140,7 +143,7 @@ if (-not $ExePath) {
 $exe = $ExePath
 
 # OCR 布局落盘：调锚点全靠它。失败路径也要写，否则永远看不到二跳页面长什么样。
-$dumpPath = "$root\logs\ocr_dump_traework.txt"
+$dumpPath = "$root\logs\ocr_dump_trae.txt"
 function Dump-Ocr($lines, $tag) {
     if (-not $lines) { return }
     try {
@@ -324,7 +327,7 @@ function Get-OcrLinesSafe {
 }
 
 # --- window rect sanity: force it back on-screen -----------------------
-# 2026-10-08: TraeWork had NO equivalent of LobsterAI's Reset-WindowRect, and
+# 2026-10-08: Trae had NO equivalent of LobsterAI's Reset-WindowRect, and
 # that is why it kept failing. Cold start restores the window to a rect larger
 # than the desktop (observed win=3866x2090 on a 3840x2160 screen, click target
 # y=2031 — off the bottom). Symptoms looked like "OCR sees the workspace but
@@ -587,6 +590,91 @@ function Find-Balance($lines) {
     return -1
 }
 
+# ── 2026-10-13 改版修复 ─────────────────────────────────────────────────────
+# 2026-10-09 Trae 与 TraeCode 合并为 TRAE，客户端 UI 随之改版：
+#   ① 账户条不再显示积分余额（旧「用户71294228173 免费 3,527」-> 新「0用户71294228173免费」），
+#      所以 Find-Balance 的千分位正则恒匹配不到、返回 -1，余额判据整体失效
+#      （10-12、10-13 连续两天「复核余额 -1 -> -1」就是它）。
+#   ② 签到卡片常驻左侧栏底部，不再藏在头像菜单里，且**三态文案互斥**（实测）：
+#        未签  ：每日领100积分 / 升级会员，每日多领100积分   按钮 [签到] [升级权益]
+#        刚领取：今日签到，已获得100积分。下次可在头像菜单中签到。 按钮 [今日已签(3s)]
+#        已签  ：夺会员首月立减¥30 / 升级会员立即获得大额积分…  按钮 [立即升级]
+#   ③ 于是「已获得N积分」比余额差更可靠——它直接给出实发额度（服务端随时调额，
+#      免费日额度 2026-09-30 就从 150 改成 100，写死 catalog 必然失真）；
+#      而入口词「每日领」在已签后整块消失，本身就是干净的幂等闸门。
+# 结论：主判据换成 granted，Find-Balance 降级为备用（保留以应对 UI 再次改版）。
+
+# 判据正则集中在这里：scripts/test_trae_states.py 会从源码里把它们抠出来做回归，
+# 避免「脚本里改了正则、测试里还是旧的」这种漂移。改动务必同步跑那个测试。
+$RE_GRANTED  = '已\s*获\s*得\s*(\d+)\s*积分'
+$RE_GRANTED2 = '获\s*得\s*(\d+)\s*积分'
+$RE_OFFER    = '每日领\s*(\d+)\s*积分'
+$RE_ALREADY  = '升级会员立即获得|立即升级'
+$RE_SIGNBTN  = '^签到$'
+
+# 刚领取那一帧卡片上的实发额度：「已获得100积分」。返回 0 表示没读到。
+function Find-Granted($lines) {
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        # 主：卡片文案「已获得100积分」。字符间允许空白——实测 OCR 会把
+        # 「头像」拆成「头亻象」，相邻字有抖动，别把间隔写死。
+        $m = [regex]::Match($l.text, $RE_GRANTED)
+        if (-not $m.Success) {
+            # 备：「获得100积分」（OCR 偶尔漏掉「已」）
+            $m = [regex]::Match($l.text, $RE_GRANTED2)
+        }
+        if ($m.Success) {
+            $v = 0
+            if ([int]::TryParse($m.Groups[1].Value, [ref]$v)) { return $v }
+        }
+    }
+    return 0
+}
+
+# 未签卡片上的可领额度：「每日领100积分」。只作交叉校验，不用于入账
+# （点了才知道实发多少）。
+function Find-OfferAmount($lines) {
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        $m = [regex]::Match($l.text, $RE_OFFER)
+        if ($m.Success) {
+            $v = 0
+            if ([int]::TryParse($m.Groups[1].Value, [ref]$v)) { return $v }
+        }
+    }
+    return 0
+}
+
+# 已签态：签到卡片被会员推广替换，页面上不再有任何签到字样。
+function Test-AlreadyCard($lines) {
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        if ($l.text -match $RE_ALREADY) { return $true }
+    }
+    return $false
+}
+
+# 2026-10-13：按钮不在入口文字的同一行，而在卡片下方（实测入口「每日领100积分」
+# @94,1514、按钮「签到」@145,1622，相差 108px）。旧逻辑在入口行右侧做像素扫描
+# 找「药丸」，新布局里扫到的是背景深色块（实测 x=664 len=235），于是退化成
+# 按 offset 连猜 4 次才碰中。改为按 OCR 短文本在入口行下方定位。
+function Find-SignButton($lines, [int]$entryY) {
+    $xMax = [int]($winW * 0.35)
+    $best = $null
+    foreach ($l in $lines) {
+        if (-not $l.words) { continue }
+        # 按钮是 2 字短文本；左侧栏历史任务名（「配置Trae每日自动签到」）也含
+        # 「签到」但是长文本，用它排除。
+        if ($l.text.Length -gt 4) { continue }
+        if ($l.text -notmatch $RE_SIGNBTN) { continue }
+        if ($l.x -ge $xMax) { continue }
+        if ($l.y -le $entryY) { continue }
+        if (($l.y - $entryY) -gt 260) { continue }
+        if (-not $best -or $l.y -lt $best.y) { $best = $l }
+    }
+    return $best
+}
+
 function Click-At([int]$ax, [int]$ay) {
     $sx = $winX + $ax
     $sy = $winY + $ay
@@ -764,10 +852,12 @@ $winW = $rect.Right - $rect.Left
 $winH = $rect.Bottom - $rect.Top
 try { Ensure-Foreground | Out-Null } catch { }
 
+Log "step: 窗口已定位，等 8s 让广告浮层冒头后清理"
 # 启动后的广告/弹窗会盖住主界面：等它出现再关，别一上来就清
 Start-Sleep -Seconds 8
 Close-AdOverlays
 Start-Sleep -Seconds 2
+Log "step: OCR 首页"
 
 $lines = Get-OcrLines
 Dump-Ocr $lines "trae-home"
@@ -777,28 +867,41 @@ Save-Shot "01-home"
 $entry = Find-EntryWord $lines $clickWords
 $claimed = Find-AnyLine $lines $claimWords
 
+# 1.5) 2026-10-13：已签态下卡片整块换成会员推广，入口词和「今日已签」都不存在
+#      -> $entry/$claimed 双双为空，旧逻辑会误判「没有入口」去点账户条开菜单
+#      （新版账户条已被 OCR 并成一行，锚点同样失效），一路失败后报 pending。
+if (-not $entry -and -not $claimed) {
+    if (Test-AlreadyCard $lines) {
+        Log "step: 卡片已是会员推广态，判定今日已签"
+        if ($Explore) { Out-Json "explore" "已签态（卡片已切换为会员推广）" }
+        Out-Json "already" "今日已签到（卡片已切换为会员推广）"
+    }
+}
+
 # 2) 看不见就点左下角头像开菜单
 if (-not $entry -and -not $claimed) {
     # 左下角用户名是稳定锚点（实测「用户71294228173」@109,1732，右边跟「免费」标签）。
     # 直接点用户名文字本身——猜头像图标坐标会时灵时不灵（实测点偏就打不开菜单），
     # 而用户名是一条明确的文本，账户菜单的触发区也覆盖它。
     $userHit = $null
+    # 2026-10-13：新版账户条整行被 OCR 并成一条「0用户71294228173免费」，
+    # words 是**单字数组**（{0,用,户,71294228173,免,费}），旧的
+    # $w.text.StartsWith("用户") 永远匹配不到 -> 候选点一个都生成不出来，
+    # 菜单根本打不开。改成按整行文本定位。
     foreach ($l in $lines) {
-        if (-not $l.words) { continue }
-        foreach ($w in $l.words) {
-            if ($w.text.StartsWith("用户") -and (-not $userHit -or $w.y -gt $userHit.y)) {
-                $userHit = $w
-            }
+        if (-not $l.text) { continue }
+        if ($l.text -notmatch '用户\s*\d+') { continue }
+        if (-not $userHit -or $l.y -gt $userHit.y) {
+            $userHit = @{ x = $l.x; y = $l.y; w = $l.w; h = $l.h; text = $l.text }
         }
     }
     if (-not $userHit) {
         # 退而求其次：会员标签「免费」也在同一账户条上
         foreach ($l in $lines) {
-            if (-not $l.words) { continue }
-            foreach ($w in $l.words) {
-                if ($w.text -eq "免费" -and (-not $userHit -or $w.y -gt $userHit.y)) {
-                    $userHit = $w
-                }
+            if (-not $l.text) { continue }
+            if ($l.text -notmatch '免费') { continue }
+            if (-not $userHit -or $l.y -gt $userHit.y) {
+                $userHit = @{ x = $l.x; y = $l.y; w = $l.w; h = $l.h; text = $l.text }
             }
         }
     }
@@ -834,7 +937,9 @@ if (-not $entry -and -not $claimed) {
     $ci = 0
     # 菜单是 toggle：重复点击同一个区域会把刚打开的菜单关掉。
     # 所以每个候选点只点一次，点完连续检测几轮；没检测到就 ESC 收掉再换下一个点。
+    Log ("step: 首页无入口，试账户条候选点 " + $candidates.Count + " 个")
     foreach ($cand in $candidates) {
+        Log ("step: 点候选 #" + $ci + " @" + $cand.x + "," + $cand.y)
         Click-At $cand.x $cand.y
         foreach ($sub in 1..2) {
             Start-Sleep -Seconds 2
@@ -924,47 +1029,85 @@ if ($x1 -gt ($winW - 1)) { $x1 = $winW - 1 }
 Start-Sleep -Milliseconds 800
 $null = Get-OcrLines
 # 点击前的余额：菜单重开后「今日已签」文案会消失，余额差才是唯一可靠的到账证据。
+# 2026-10-13 起新 UI 账户条不再显示余额，这里恒为 -1，降为备用判据。
 $bal0 = Find-Balance $lines
-$btn = Find-ButtonPill $by ([int]([int]$bx + 40)) $x1
-if ($btn) {
-    $d0 = [int]($btn.x - [int]$bx)
-    $dm = $d0 - 40
-    $dp = $d0 + 40
-    $offsets = @($d0, $dm, $dp, 0)
-    $by = $btn.y
+$offer = Find-OfferAmount $lines
+
+# 2026-10-13：优先按 OCR 短文本定位卡片下方的「签到」按钮。命中就只点一次，
+# 不再靠像素扫描药丸 + 4 个 offset 轮换去碰运气（新布局里药丸扫描会扫到背景
+# 深色块，实测 x=664 len=235，于是每次都要试满 4 个位置）。
+$btnLine = Find-SignButton $lines $entry.y
+if ($btnLine) {
+    $bx = $btnLine.x + [int]($btnLine.w / 2)
+    $by = $btnLine.y + [int]($btnLine.h / 2)
+    $offsets = @(0)
+    Log ("step: 签到按钮按 OCR 定位 @" + $bx + "," + $by)
     try {
-        $ln = "$(Get-Date -Format HH:mm:ss) buttonPill x=$($btn.x) y=$($btn.y) len=$($btn.len) bg=$($btn.bg) entryX=$bx bal0=$bal0 offsets=" + ($offsets -join ',') + "`n"
-        [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
-    } catch { }
-} else {
-    try {
-        $ln = "$(Get-Date -Format HH:mm:ss) buttonPill none entryX=$bx by=$by bal0=$bal0`n"
+        $ln = "$(Get-Date -Format HH:mm:ss) btnOcr x=$bx y=$by text=$($btnLine.text) offer=$offer bal0=$bal0`n"
         [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
     } catch { }
 }
+else {
+    $btn = Find-ButtonPill $by ([int]([int]$bx + 40)) $x1
+    if ($btn) {
+        $d0 = [int]($btn.x - [int]$bx)
+        $dm = $d0 - 40
+        $dp = $d0 + 40
+        $offsets = @($d0, $dm, $dp, 0)
+        $by = $btn.y
+        try {
+            $ln = "$(Get-Date -Format HH:mm:ss) buttonPill x=$($btn.x) y=$($btn.y) len=$($btn.len) bg=$($btn.bg) entryX=$bx bal0=$bal0 offsets=" + ($offsets -join ',') + "`n"
+            [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
+        } catch { }
+    } else {
+        try {
+            $ln = "$(Get-Date -Format HH:mm:ss) btnNone entryX=$bx by=$by bal0=$bal0`n"
+            [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
+        } catch { }
+    }
+}
+Log ("step: 入口已找到 " + $entry.text + "（可领 " + $offer + "），准备点签到按钮")
 for ($i = 0; $i -lt $offsets.Count; $i++) {
+    Log ("step: 点击 offset=" + $offsets[$i] + " @" + ($bx + $offsets[$i]) + "," + $by)
     Click-At ($bx + $offsets[$i]) $by
     foreach ($sub in 1..2) {
         Start-Sleep -Seconds 3
         $lines = Get-OcrLines
         Dump-Ocr $lines ("trae-after-click-" + $i + "-" + $sub)
         if ($sub -eq 1) { Save-Shot ("03-after-" + $i) }
-        $c = Find-AnyLine $lines $claimWords
-        if ($c) {
-            Out-Json "ok" ("签到成功（点击后显示: " + $c.text + "）")
+
+        # ① 主判据（2026-10-13 起）：卡片上的「已获得N积分」直接给出实发额度。
+        #    它只在刚领到的那几帧出现，且带额度——比余额差更准，比文案更硬。
+        #    **以实测额度为准入账**（服务端随时调额：免费日额度 2026-09-30
+        #    就从 150 变成 100），catalog 的 daily_amount 只作预估。
+        $g = Find-Granted $lines
+        if ($g -gt 0) {
+            Out-Json "ok" ("签到成功（已获得 " + $g + " 积分）[granted] " + $g) $g
         }
-        # 余额增长了才算真到账，并且**以实测差额为准入账**（服务端随时可能调额：
-        # 免费日额度 2026-09-30 就从 150 变成 100）。catalog 的 daily_amount
-        # 只作为预估，实发多少由这里上报。
+
+        # ② 备用判据：余额差。新 UI 已无余额（bal0 恒 -1），保留以兼容再次改版。
         $bal1 = Find-Balance $lines
+        Log ("step: 复核 granted=" + $g + " 余额 " + $bal0 + " -> " + $bal1)
         if ($bal0 -ge 0 -and $bal1 -ge 0 -and $bal1 -gt $bal0) {
             $delta = $bal1 - $bal0
             Out-Json "ok" ("签到成功（余额 $bal0 -> $bal1）[granted] $delta") $delta
         }
+
+        # ③ 兜底判据：文案。弱——「今日已签」只在刚领的那次菜单会话里出现，
+        #    重开菜单就会变回「每日领100积分」，且拿不到额度（入账退回 catalog
+        #    的 daily_amount）。仅在上两条都失效时使用。
+        $c = Find-AnyLine $lines $claimWords
+        if ($c) {
+            Log ("step: 弱判据命中（未读到「已获得N积分」）: " + $c.text)
+            Out-Json "ok" ("签到成功（点击后显示: " + $c.text + "）")
+        }
     }
 }
 $peek2 = ($lines | Select-Object -First 10 | ForEach-Object { $_.text }) -join "/"
-if ($bal0 -ge 0) {
-    Out-Json "pending" ("点击各候选位置后余额未增长（$bal0，未变），判定未到账，不入账；页面: " + $peek2)
+# 2026-10-13：bal0 在新 UI 里恒为 -1，不能再拿它当「报不报 pending」的前提，
+# 否则判据全部落空时脚本会静默走到文件末尾、不写结果文件，调用方只能干等超时。
+if (Test-AlreadyCard $lines) {
+    Out-Json "already" ("卡片已是会员推广态，判定今日已签；页面: " + $peek2)
 }
+Out-Json "pending" ("点击各候选位置后未检测到到账（granted 未出现，余额 $bal0）；页面: " + $peek2)
 Out-Json "pending" ("点击各候选位置后均未出现已签状态，页面: " + $peek2)

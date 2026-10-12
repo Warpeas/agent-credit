@@ -7,7 +7,7 @@
 
 ## 0. 为什么立这份约束
 
-这些客户端的账号承载着真实付费订阅（MiniMax、WorkBuddy、TraeWork 等），
+这些客户端的账号承载着真实付费订阅（MiniMax、WorkBuddy、Trae 等），
 一旦被服务端判定为自动化攻击或凭据窃取，轻则风控限流、重则**封号**，
 而封号意味着已囤的积分与订阅直接归零。代价远高于「多领 100 积分」的收益。
 
@@ -18,8 +18,8 @@
 
 | 禁止 | 原因 |
 |---|---|
-| **解密加密存储的登录态** | 如 TraeWork `storage.json` 的 `iCubeAuthInfo`、AutoClaw `auth.json` 的 safeStorage（`enc:` 前缀）。解密本身就是攻击行为，且密钥派生可能触发本地检测。 |
-| **内存读取/注入/hook 取token** | TraeWork 的 token 只存在于 Electron 主进程内存，取它必须注入或 hook，等同于窃取凭据。 |
+| **解密加密存储的登录态** | 如 Trae `storage.json` 的 `iCubeAuthInfo`、AutoClaw `auth.json` 的 safeStorage（`enc:` 前缀）。解密本身就是攻击行为，且密钥派生可能触发本地检测。 |
+| **内存读取/注入/hook 取token** | Trae 的 token 只存在于 Electron 主进程内存，取它必须注入或 hook，等同于窃取凭据。 |
 | **开remote-debugging / CDP 端口** | 如 `AUTOCLAW_CDP_PORT`。这是**本机任意进程可连**的调试口，一旦开启等于把整个客户端的控制权暴露给任何程序。 |
 | **绕过完整性级别 / 反调试 / 代码签名校验** | UIPI 提权只为「让点击能被接收」，不是用来绕过签名或篡改客户端的。 |
 | **篡改客户端本地数据以伪造额度** | 改 localStorage / LevelDB / sqlite 伪造签到成功。 |
@@ -87,7 +87,7 @@
 
 | 客户端 | 路线 | 为什么排除 |
 |---|---|---|
-| TraeWork / TraeCode | external 直签 | token 只存在于 Electron 主进程内存，源自 `storage.json` 的加密登录态。取它必须注入或 hook → 规则 1 禁止 |
+| Trae / TraeCode | external 直签 | token 只存在于 Electron 主进程内存，源自 `storage.json` 的加密登录态。取它必须注入或 hook → 规则 1 禁止 |
 | AutoClaw | external 直签 | `auth.json` 凭据为 safeStorage 加密（`enc:` 前缀）；且签名需自算 `md5(APP_ID&ts&APP_KEY)` |
 | AutoClaw | CDP 自动化 | 需开 `AUTOCLAW_CDP_PORT`，本机任意进程可连，等于交出客户端控制权 → 规则 1 禁止 |
 | MonkeyCode | external 直签 | `POST /users/wallet/checkin` 需 captcha（code 10701）。challenge 的 `{c:50,s:32,d:3}` 恒定 = 固定规格图形验证码，破解它 → 规则 1 禁止 |

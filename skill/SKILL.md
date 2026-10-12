@@ -1,6 +1,6 @@
 ---
 name: agent-credit
-description: 查询或登记 AI Agent 软件积分、每日签到待办、以及按任务推荐先用哪家。用户提到签到、额度、积分余额、今天用哪个 agent、AutoClaw/WorkBuddy/MiniMax/TraeWork/LobsterAI 时使用。
+description: 查询或登记 AI Agent 软件积分、每日签到待办、以及按任务推荐先用哪家。用户提到签到、额度、积分余额、今天用哪个 agent、AutoClaw/WorkBuddy/MiniMax/Trae/LobsterAI 时使用。
 ---
 
 # Agent Credit
@@ -31,7 +31,7 @@ python <REPO>\credit.py <命令>
 | 客户端里看到的余额 | `set-balance <id> <数量>` |
 | 用掉一笔 | `record <id> used <数量>` |
 
-账户 id：`workbuddy` `minimax` `traework` `autoclaw` `lobsterai` `dumate` `todesk` `monkeycode_credit` 等，见 `catalog.yaml`。
+账户 id：`workbuddy` `minimax` `trae` `autoclaw` `lobsterai` `dumate` `todesk` `monkeycode_credit` 等，见 `catalog.yaml`。
 
 ## 硬规则
 
@@ -45,7 +45,7 @@ python <REPO>\credit.py <命令>
 4. 推荐以 CLI 输出为准，不要即兴改烧法。顺序：已打开的当日清零 > 7 天内到期 > 长期 FIFO > 有上限 > 无过期（AutoClaw）。轻活不要动 MiniMax/WorkBuddy 囤积分。
 5. DuMate / ToDesk 默认不领。`due` / `recommend` 只有余额低于上限阈值才提示。
 6. **账号安全优先于积分收益**（完整版见 `research/SAFETY.md`）：
-   - **禁止**：解密加密存储的登录态（TraeWork `storage.json`、AutoClaw `auth.json` 的 safeStorage）、
+   - **禁止**：解密加密存储的登录态（Trae `storage.json`、AutoClaw `auth.json` 的 safeStorage）、
      内存注入/hook 取 token、开 remote-debugging / CDP 调试口、篡改客户端本地数据伪造额度、
      高频并发压测式请求、绕过验证码、绕过完整性级别/反调试/代码签名、把凭据外传第三方。
    - **禁止写循环重试**。同一端点最多试 2 次，候选端点枚举上限 10 个，
@@ -67,7 +67,7 @@ python <REPO>\credit.py <命令>
    AutoClaw 跑在更高完整性级别，未提权时 `mouse_event` 注入会被 UIPI 丢弃——
    表现是「坐标对、窗口也在前台、但点了没反应」，页面纹丝不动。脚本已内置同页检测，
    遇到这种情况返回 `pending` 并提示提权，不要误判成「找不到入口」。
-8b. TraeWork / TraeCode 走 `scripts/ui_claim_traework.ps1`（提权入口 `run_traework_claim.py`，
+8b. Trae / TraeCode 走 `scripts/ui_claim_trae.ps1`（提权入口 `run_trae_claim.py`，
    支持 `--explore` 只抓布局 / `--dry-run` 只定位）。**前提：客户端必须已经打开**——
    本环境冷启动这两个客户端必失败（进程起不来，与 MiniMax 的 updater 现象同源），
    脚本找不到窗口就返回 `notfound` 并提示手动打开。菜单文案由服务端下发，
@@ -84,7 +84,7 @@ python <REPO>\credit.py <命令>
 
 1. **全自动优先**（2026-09-25 主人要求）：新增/修复签到管线时，目标是「一条命令跑完、不需要主人开客户端」。
    凡要求客户端在前台的 UI 路线，都要先验证能否冷启动该客户端——
-   本环境**冷启动不了 MiniMax Code（只起来 updater.exe）和 TraeWork（NO global context）**，
+   本环境**冷启动不了 MiniMax Code（只起来 updater.exe）和 Trae（NO global context）**，
    这两家只能走 external 或另想办法；AutoClaw 可以冷启动。
 2. 读 `research/prompts/UNIVERSAL.md`（通用一份，内附本机安装目录速查表），把围栏里的整段粘进该软件的对话框
 2. 把它按 `research/ANSWER-SCHEMA.md` 的回答存进 `research/answers/<id>.md`

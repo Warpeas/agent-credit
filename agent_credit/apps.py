@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-_KNOWN_CLIENT_DIRS = ("WorkBuddy", "MiniMax Code", "TRAE SOLO CN", "Trae CN", "LobsterAI")
+_KNOWN_CLIENT_DIRS = ("WorkBuddy", "MiniMax Code", "TRAE SOLO CN", "Trae CN", "LobsterAI", "Qoder CN")
 
 
 def _looks_real(programs_dir: Path) -> bool:
@@ -49,13 +49,15 @@ LOCAL_PROGRAMS = _detect_local_programs()
 LAUNCH_CANDIDATES: dict[str, list[Path]] = {
     "workbuddy": [LOCAL_PROGRAMS / "WorkBuddy" / "WorkBuddy.exe"],
     "minimax": [LOCAL_PROGRAMS / "MiniMax Code" / "MiniMax Code.exe"],
-    "traework": [
+    "trae": [
         # 2026-10-11: TRAE SOLO CN 已并入 Trae CN，旧目录只剩 debug.log。
         # 活的那个排前面，「first existing wins」才不会白 stat 一条死路径。
         LOCAL_PROGRAMS / "Trae CN" / "Trae CN.exe",
         LOCAL_PROGRAMS / "TRAE SOLO CN" / "TRAE SOLO CN.exe",
     ],
     "lobsterai": [LOCAL_PROGRAMS / "LobsterAI" / "LobsterAI.exe"],
+    # Qoder CN：exe 名带空格，进程名与目录名同为 "Qoder CN"。
+    "qodercn": [LOCAL_PROGRAMS / "Qoder CN" / "Qoder CN.exe"],
     "dumate": [LOCAL_PROGRAMS / "DuMate" / "DuMate.exe"],
     "joycode": [LOCAL_PROGRAMS / "JoyCode" / "JoyCode.exe"],
     "kimi": [LOCAL_PROGRAMS / "Kimi" / "Kimi.exe"],

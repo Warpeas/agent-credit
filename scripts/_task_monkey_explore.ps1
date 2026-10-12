@@ -1,5 +1,5 @@
-# One-shot: run MonkeyCode explore NON-elevated via scheduled task.
-# Same trick as _task_traework.ps1 - the sandboxed session cannot start GUI apps.
+﻿# One-shot: run MonkeyCode explore NON-elevated via scheduled task.
+# Same trick as _task_trae.ps1 - the sandboxed session cannot start GUI apps.
 param([int]$Steps = 2)
 $root = Split-Path -Parent $PSScriptRoot
 $name = "agent-credit-monkey-explore"

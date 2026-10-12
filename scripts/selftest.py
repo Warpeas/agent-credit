@@ -46,7 +46,7 @@ def main() -> None:
     assert checkin._grant_amounts({"daily_amount": 100,
                                    "streak": {"bonus_on": [3], "bonus_amount": 50}}, 1) == (100, 0)
 
-    # 实发额上报：UI 脚本也会在 detail 里带 `[granted] N`（TraeWork 用菜单余额差
+    # 实发额上报：UI 脚本也会在 detail 里带 `[granted] N`（Trae 用菜单余额差
     # 算实际到账），checkin 必须认，否则又退回按 catalog 常额入账。
     assert checkin._parse_granted("签到成功（余额 3427 -> 3527）[granted] 100") == 100
     assert checkin._parse_granted("签到成功（余额 3427 -> 3527）") is None
@@ -56,7 +56,7 @@ def main() -> None:
     # 声明了 claim_mode=ui 但走 command: 的）必须如实上报外部失败，
     # 否则报出来的是「无 UI 配方」，把真实原因盖掉（10-11 踩过）。
     from agent_credit import ui_claim as _uic
-    assert _uic.has_ui_route("traework") is True
+    assert _uic.has_ui_route("trae") is True
     assert _uic.has_ui_route("autoclaw") is True
     assert _uic.has_ui_route("lobsterai") is True
     assert _uic.has_ui_route("monkeycode_credit") is False

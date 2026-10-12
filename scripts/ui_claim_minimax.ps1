@@ -9,6 +9,9 @@ param(
     [switch]$NoClose
 )
 $root = Split-Path -Parent $PSScriptRoot
+$logPath = "$root\logs\ps1_minimax.log"
+function Log($m){ $s=(Get-Date -Format "HH:mm:ss")+" "+$m; try{[System.IO.File]::AppendAllText($logPath,$s+"`n",(New-Object System.Text.UTF8Encoding($false)))}catch{}; Write-Output $s }
+
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -519,6 +522,7 @@ function Click-At([int]$ax, [int]$ay) {
 }
 
 $lines = Get-OcrLinesSafe
+Log "step: OCR 首页截图"
 if ($null -eq $lines) { Out-Json "pending" "MiniMax Code 未在前台（请点击其窗口后重试）" }
 
 # Sanity gate: confirm we actually photographed MiniMax. A top-most window parked
@@ -552,6 +556,7 @@ if (-not $confirmed) {
     Out-Json "pending" ("截图未确认是 MiniMax 窗口（顶部无标题，可能被遮挡），已放弃点击。顶部: " + $top)
 }
 
+Log "step: 窗口已确认是 MiniMax，开始找签到卡"
 # --- Ad interstitial handling (2026-09-30) ---
 # The client pops a full-window promo ("模型上新/双重福利，限时开启", active
 # 2026-09-28..10-07). Its copy contains BOTH "每日签到" and "领取", which hijacked
@@ -787,6 +792,7 @@ try {
     [System.IO.File]::AppendAllText($dumpPath, "[$stamp]`n$lines_txt`n---`n", (New-Object System.Text.UTF8Encoding($false)))
 } catch { }
 
+Log ("step: 点击签到按钮 " + $btn.text + " @ " + $btnX + "," + $btnY)
 Click-At $btnX $btnY
 
 # Multi-frame verification: button text change / success toast / already marker.
@@ -804,6 +810,7 @@ foreach ($wait in @(1500, 2500, 3500)) {
             "$root\logs\minimax_after_dump.txt",
             "[wait=$wait btnY=$btnY]`n$atxt`n---`n", (New-Object System.Text.UTF8Encoding($false)))
     } catch { }
+    Log ("step: 点击后复核 wait=" + $wait + "ms")
     $a2 = Find-Line $after "每日签到"
     if (-not $a2) { continue }
     foreach ($l in $after) {

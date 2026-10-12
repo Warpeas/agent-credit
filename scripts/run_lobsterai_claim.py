@@ -1,5 +1,5 @@
 """提权运行 scripts/ui_claim_lobsterai.ps1（会弹一次 UAC）。
-为什么必须 runas：本自动化会话非提权拉不起 GUI 客户端，与 MiniMax/AutoClaw/TraeWork 同套路。
+为什么必须 runas：本自动化会话非提权拉不起 GUI 客户端，与 MiniMax/AutoClaw/Trae 同套路。
 用法：
     python scripts/run_lobsterai_claim.py --explore   # 只抓布局，不点击
     python scripts/run_lobsterai_claim.py             # 真签到

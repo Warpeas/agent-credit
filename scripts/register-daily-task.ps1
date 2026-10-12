@@ -20,6 +20,10 @@
 #     ShellExecuteW "runas" calls inside the claim scripts do NOT raise UAC.
 param([switch]$RunNow)
 
+# -u：关掉 stdout 缓冲。计划任务是个黑框，Python 在管道/非 tty 下是块缓冲的，
+# 不加它所有进度都要等进程结束才一次性吐出来（agent_credit/trace.py 也会
+# reconfigure 成行缓冲，这里是双保险）。
+
 $root = Split-Path -Parent $PSScriptRoot
 
 # Prefer the managed python we actually verified; fall back to PATH python.
@@ -98,7 +102,7 @@ $randomXml    </CalendarTrigger>
   <Actions Context="Author">
     <Exec>
       <Command>$py</Command>
-      <Arguments>"$root\credit.py" checkin</Arguments>
+      <Arguments>-u "$root\credit.py" checkin</Arguments>
       <WorkingDirectory>$root</WorkingDirectory>
     </Exec>
   </Actions>

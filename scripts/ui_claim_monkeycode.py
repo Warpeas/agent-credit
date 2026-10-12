@@ -217,7 +217,7 @@ def ensure_foreground(hwnd: int) -> bool:
     实际是「抓错窗口」（那张 _monkey_account.png 里出现的是 WorkBuddy 字样）。
 
     逐级加码：显示 → 还原 → Alt 技巧 → 绑输入队列强切。
-    与 ui_claim_traework.ps1 的 Ensure-Foreground 同一套做法，跨客户端统一。
+    与 ui_claim_trae.ps1 的 Ensure-Foreground 同一套做法，跨客户端统一。
     """
     if not user32.IsWindowVisible(hwnd):
         user32.ShowWindow(hwnd, SW_SHOW)
@@ -273,7 +273,7 @@ def _cleanup(launched_by_us: bool, prev_foreground: int) -> None:
 
     失败时也要清：无人值守跑完桌面不该堆着客户端。
     这个逻辑对齐 ui_claim_autoclaw.ps1 的 $script:LaunchedByUs
-    与 ui_claim_traework.ps1 的 taskkill 收尾。
+    与 ui_claim_trae.ps1 的 taskkill 收尾。
     """
     if launched_by_us:
         n = close_client()

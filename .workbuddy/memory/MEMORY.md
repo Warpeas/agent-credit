@@ -125,6 +125,32 @@
   ⚠️ 缺 `Reset-WindowRect` 会让冷启动窗口比桌面还大、签到锚点挂到屏幕外。
 - ⏳ 待办：09-30 疑似漏记「月赠 500」（仅单日差额证据），下次月赠到账时用同分钟余额差复核。
 
+### WorkBuddy（积分明细，2026-10-19 打通）
+
+- external 签到照旧（vendor/workbuddy-auto-signin）。**积分明细也能查**（只读）：
+  `credit credits workbuddy [--all|--json|--line]`，模块 `agent_credit/wb_credits.py`。
+- 端点（app.asar 只读提取 + 实测）：`/billing/meter/get-user-resource-summary`、
+  `-free-packages`、`-paid-packages`——**都不带 /v2**（签到端点 `/v2/billing/meter/...` 才带，
+  带错 404 Route Not Found）。`--line` 用 `/v2/billing/meter/checkin-activity-status` 的
+  `today_checked_in`，已填进 catalog 预留的 `status_command`。
+- free/paid 的 `PackageCodes` **不能为空数组**（400 PackageCodes required），按客户端分组：
+  Ys=付费组 11 个 code；免费组=枚举其余 9 个 + `008`（带上 008 才返回套餐配额记录）。
+- **余量优先级**（对齐客户端 resolveResourceCapacity，踩过坑）：CapacityType=4 套餐配额的
+  真余量在 `CycleCapacityRemainPrecise`；包级 `CapacityRemainPrecise` 是**未扣减包总量**
+  （曾把 500 当余量 → 对账破等式 → 已修，等式「有效 grant 剩余合计 == summary TotalCredits」
+  固化为回归）。过期优先级 `DeductionEndTime→ExpiredTime→CycleEndTime`（epoch ms）。
+- 有效期 30 天 measured→**confirmed**：逐条 DeductionEndTime - CreateTime = 30 天（44 条样本）。
+- 凭据复用签到机制（明文 token 或客户端进程自行解密 sym-v1 信封），本模块不解密不落盘。
+- **签到后对账**（2026-10-19 当晚追加）：`checkin` 末尾自动跑 `credits_command`
+  （`--ledger` 载荷 → `ledger.sync_grants` 逐条重建账本条目，source=sync，保留每条真实过期，
+  `credit due` 临期视图受益）；`credit sync` 手动跑；`AGENT_CREDIT_SKIP_SYNC=1` 可关，
+  `SKIP_EXTERNAL` 连带关。对账失败不改 checkin 退出码。实测本地 3900 → 服务端真相 2717
+  （本地按「每日+100 纯累积」记账不反映消耗，虚高 1183）。套餐类 code 的账本过期取
+  CycleEndTime（月度刷新）而非 DeductionEndTime。踩坑：独立 `credit sync` 自己 load 的账本
+  必须自己 save（第一版忘了，改动全丢在内存里，端到端用例逮住的）。
+- 详情与失效条件：`research/answers/workbuddy_credit_detail.md`；
+  回归 `scripts/test_wb_credits.py` + `scripts/test_credit_sync.py`。
+
 ## 进度可观测性（10-11 立）
 
 - 计划任务 = 一个黑框 → `agent_credit/trace.py` 统一负责：

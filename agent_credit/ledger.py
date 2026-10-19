@@ -180,3 +180,52 @@ def expiring_within(data: dict[str, Any], days: int, on: date | None = None) -> 
                 out.append({"account_id": acc["id"], "name": acc["name"], **entry, "days_left": (exp - on).days})
     out.sort(key=lambda x: x.get("expires_at") or "")
     return out
+
+
+def sync_grants(
+    data: dict[str, Any],
+    account_id: str,
+    grants: list[dict[str, Any]],
+    on: date | None = None,
+) -> dict[str, Any]:
+    """用服务端逐条明细替换账本条目（对账语义：不记签到、不动连签状态）。
+
+    grants: [{"remain": number, "expires": "YYYY-MM-DD"|None,
+              "granted_at": "YYYY-MM-DD"|None}, ...]——只写 remain > 0 的条目。
+    旧条目 remaining 全部置零，按服务端剩余重建（source="sync"）。
+    账本是整数粒度，小数四舍五入；逐条舍入与总值的少量偏差已知会存在，
+    精确值以 `credit credits workbuddy` 为准。
+
+    返回 {"before", "after", "entries"} 供调用方展示。
+    """
+    on = on or today()
+    st = state(data, account_id)
+    before = remaining(data, account_id, on)
+    for entry in st["entries"]:
+        entry["remaining"] = 0
+    written = 0
+    for g in grants:
+        if not isinstance(g, dict):
+            continue
+        remain = g.get("remain")
+        if not isinstance(remain, (int, float)) or isinstance(remain, bool) or remain <= 0:
+            continue
+        value = int(remain + 0.5)
+        granted_on = parse_date(g.get("granted_at")) or on
+        expires = g.get("expires")
+        expires = expires[:10] if isinstance(expires, str) and expires else None
+        if expires is not None:
+            try:
+                parse_date(expires)
+            except ValueError:
+                expires = None  # 服务端给了怪日期：不写过期，好过写错
+        st["entries"].append({
+            "id": f"{account_id}-{granted_on.isoformat()}-sync-{uuid.uuid4().hex[:6]}",
+            "amount": value,
+            "remaining": value,
+            "granted_at": granted_on.isoformat(),
+            "expires_at": expires,
+            "source": "sync",
+        })
+        written += 1
+    return {"before": before, "after": remaining(data, account_id, on), "entries": written}

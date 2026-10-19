@@ -309,6 +309,33 @@ check("对账不变量：有效剩余合计 == summary 总量",
       round(sum(g["remain"] or 0 for g in inv_grants), 6),
       round(inv_summary["total_credits"], 6))
 
+# ---------- ledger_payload（对账载荷） ----------
+check("008 属于套餐类 code（过期走 CycleEndTime）",
+      "TCACA_code_008_cfWoLwvjU4" in wb.PLAN_PACKAGE_CODES, True)
+lp = wb.ledger_payload({
+    "summary": {"total_credits": 2716.99},
+    "grants": [
+        wb.normalize_grant(dict(BASE_RAW, ResourceId="r1"), "free"),            # 007 非套餐
+        wb.normalize_grant(RAW_008, "free"),                                     # 008 套餐
+        wb.normalize_grant(dict(BASE_RAW, ResourceId="r2", Status=3,
+                                CapacityRemainPrecise="0"), "free"),            # 已用完
+        wb.normalize_grant(dict(BASE_RAW, ResourceId="r3",
+                                CapacityRemainPrecise="0"), "free"),            # 剩 0
+        wb.normalize_grant(dict(BASE_RAW, ResourceId="r4", Status=2), "free"),   # 已过期
+    ],
+})
+check("对账载荷只收有效且剩>0", len(lp["grants"]), 2)
+check("对账载荷总量", lp["total"], 2716.99)
+check("对账载荷账户", lp["account"], "workbuddy")
+by_pkg = {g["package"]: g for g in lp["grants"]}
+check("007 过期取 DeductionEndTime（裁到天）",
+      by_pkg["CodeBuddy个人版国内运营裂变包"]["expires"], "2026-10-27")
+check("008 过期取 CycleEndTime（月度刷新）",
+      by_pkg["CodeBuddy个人体验版"]["expires"], "2026-10-31")
+check("008 余量保留小数", by_pkg["CodeBuddy个人体验版"]["remain"], 212.9900019)
+check("发放日期裁到天", by_pkg["CodeBuddy个人版国内运营裂变包"]["granted_at"],
+      "2026-09-20")
+
 # ---------- CLI 接线 ----------
 from agent_credit.cli import build_parser  # noqa: E402
 
@@ -321,6 +348,10 @@ check("credits 标志位齐全",
       ["all", "json", "line"])
 check("credits 指定账户",
       build_parser().parse_args(["credits", "minimax"]).account, "minimax")
+sync_args = build_parser().parse_args(["sync"])
+check("sync 子命令存在", sync_args.func.__name__, "cmd_sync")
+check("sync --only", build_parser().parse_args(["sync", "--only", "workbuddy"]).only,
+      "workbuddy")
 
 print("")
 print("FAIL count =", bad)

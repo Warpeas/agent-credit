@@ -52,7 +52,7 @@
 - 额度：100/天，30 天，连签/额外：7 天周期，第 7 天 +1000
 - 模型：混元、DeepSeek、GLM、Kimi、MiniMax
 - 简评：额度不算最高但最省心：external 直签零交互，30 天有效期够攒，7 天连签再加 1000。混元/DeepSeek/GLM/Kimi/MiniMax 多模型可选，办公文档链路完整。
-- 积分明细：`credit credits workbuddy` 可查每条积分的剩余与过期时间（2026-10-19 打通，只读；有效期口径随之从 measured 升为 confirmed）
+- 积分明细：`credit credits workbuddy` 可查每条积分的剩余与过期时间（2026-10-19 打通，只读；有效期口径随之从 measured 升为 confirmed）；签到后自动对账，账本以服务端真实余额为准（`credit sync`）
 - 适合：日常编码主力 + 腾讯文档/办公场景
 - 主人体验：_待补充_
 
@@ -212,6 +212,7 @@
 - 幂等：所有签到脚本都先用只读接口确认「今天是否已签」，已签直接返回，**不启客户端、不做点击**
   （MonkeyCode 用 `GET /api/v1/users/wallet/checkin`；LobsterAI 用 chip 上的「今日已领」文案）
 - 可选：在 `catalog.yaml` 填 `command` 覆盖为外部脚本
+- 对账：签到后自动拉服务端真实余额校正台账（catalog 填 `credits_command` 逐条明细 / `status_command` 总量快照；`credit sync` 可手动跑，`AGENT_CREDIT_SKIP_SYNC=1` 可关）。WorkBuddy 已打通：账本余额 = 服务端真相，每条积分带真实过期时间
 - AutoClaw：每日 200，无明确过期；UI 失败后 `record autoclaw claimed 200`
 - DuMate / ToDesk：上限未测出前不自动领
 - 不做：定时启动 Mavis / MonkeyCode Token / Loomy 等当日清零客户端

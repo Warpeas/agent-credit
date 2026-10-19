@@ -30,6 +30,7 @@ python <REPO>\credit.py <命令>
 | 手签完成 | `record <id> claimed` 或 `record <id> claimed 200` |
 | 客户端里看到的余额 | `set-balance <id> <数量>` |
 | 用掉一笔 | `record <id> used <数量>` |
+| 签到后对账（真实余额+逐条过期） | `sync`，或 `checkin` 末尾自动跑（配了 credits_command 的账户） |
 
 账户 id：`workbuddy` `minimax` `trae` `autoclaw` `lobsterai` `dumate` `todesk` `monkeycode_credit` 等，见 `catalog.yaml`。
 
@@ -100,6 +101,14 @@ python <REPO>\credit.py <命令>
 3. pending 的说明 UI 没点到签到；可用 `checkin --open` 打开已安装客户端，请用户点签到
 4. 用户确认后 `record <id> claimed`（数量可省略，用 catalog 每日额度）
 5. 用户报了客户端总余额 → `set-balance <id> <数量>`，不要当成签到
+
+对账（WorkBuddy，2026-10-19 打通）：
+
+1. `checkin` 末尾对配了 `credits_command` / `status_command` 的账户自动跑对账——
+   拉服务端真实余额重建账本条目（source=sync），不记签到、不动连签；`credit sync` 可手动跑。
+2. WorkBuddy 走 `credits_command`（逐条明细，每条带真实过期时间，`credit due` 临期视图直接受益）；
+   `status_command`（一行 JSON 总量）是兜底契约。实测本地账本 3900 → 服务端真相 2717。
+3. 对账失败只记日志，**不改 checkin 退出码**；`AGENT_CREDIT_SKIP_SYNC=1` 可关。
 
 选软件：
 

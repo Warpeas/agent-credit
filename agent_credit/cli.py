@@ -148,6 +148,23 @@ def cmd_due(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sync(args: argparse.Namespace) -> int:
+    trace.init()
+    results = checkin_mod.sync(only=args.only)
+    if not results:
+        print("没有可对账的账户（在 catalog.yaml 配置 credits_command 或 status_command）")
+        return 0
+    bad = 0
+    for r in results:
+        if r["ok"]:
+            print(f"{r['name']}: {r['before']} → {r['after']}"
+                  f"（{r['mode']}，{r['entries']} 条）")
+        else:
+            bad += 1
+            print(f"{r['name']}: 对账失败 — {r['detail']}", file=sys.stderr)
+    return 1 if bad else 0
+
+
 def cmd_credits(args: argparse.Namespace) -> int:
     if args.account != "workbuddy":
         print("积分明细查询目前只支持 workbuddy（其余家见 research/answers/ 的登记进度）",
@@ -239,6 +256,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("due", help="今天必签 / 快过期 / 月度事项")
     s.set_defaults(func=cmd_due)
+
+    s = sub.add_parser("sync", help="对账：拉服务端真实余额校正台账（不记签到；checkin 末尾也会自动跑）")
+    s.add_argument("--only", help="只处理一个账户 id/别名")
+    s.set_defaults(func=cmd_sync)
 
     s = sub.add_parser("credits", help="查询积分明细（每条剩余+过期时间）；目前支持 workbuddy")
     s.add_argument("account", nargs="?", default="workbuddy", help="账户 id，默认 workbuddy")

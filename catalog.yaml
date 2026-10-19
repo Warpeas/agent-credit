@@ -63,6 +63,7 @@ accounts:
     claim_mode: external
     command: set WORKBUDDY_AUTH_FILE=%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info&& set WORKBUDDY_BUDGET_SECONDS=50&& python "{REPO}\vendor\workbuddy-auto-signin\signin.py" auto
     status_command: set PYTHONPATH={REPO}&& python -m agent_credit.wb_credits --line
+    credits_command: set PYTHONPATH={REPO}&& python -m agent_credit.wb_credits --ledger
     streak:
       cycle_days: 7
       bonus_on: [7]
@@ -70,7 +71,7 @@ accounts:
       mode: extra
     capabilities: [coding, office, docs]
     open_when_needed: false
-    notes: "API 直签（vendor/workbuddy-auto-signin，MIT），稳定可靠。早期记录称「客户端模拟点击被 isTrusted 过滤」，该结论只适用于 UIA InvokePattern 路线，未经 OS 级注入复测；既然 external 可用，不做 UI 路线。auto 附带成长中心（派 Buddy/盲盒/任务）。【2026-10-19 增加积分明细查询，只读】credit credits workbuddy [--all|--json|--line]，或 python -m agent_credit.wb_credits。端点 /billing/meter/get-user-resource-{summary,free-packages,paid-packages}，⚠️ 资源类端点不带 /v2（签到端点才带，带错 404 Route Not Found）；free/paid 的 PackageCodes 不能为空数组（400 PackageCodes required），按客户端分组下发。每条 grant 带 CapacityRemainPrecise + DeductionEndTime(epoch ms)，过期优先级 DeductionEndTime→ExpiredTime→CycleEndTime（与客户端 toExpiredCreditPackage 一致）；余量优先级对齐客户端 resolveResourceCapacity：CapacityType=4 套餐配额的真余量在 CycleCapacityRemainPrecise（包级 CapacityRemainPrecise 是未扣减的包总量，曾据此把 500 当成余量，实测对账破等式后已修）。失效条件：端点改名 / sym-v1 信封升级（vendor 签到脚本会先炸）。详情 research/answers/workbuddy_credit_detail.md"
+    notes: "API 直签（vendor/workbuddy-auto-signin，MIT），稳定可靠。早期记录称「客户端模拟点击被 isTrusted 过滤」，该结论只适用于 UIA InvokePattern 路线，未经 OS 级注入复测；既然 external 可用，不做 UI 路线。auto 附带成长中心（派 Buddy/盲盒/任务）。【2026-10-19 增加积分明细查询，只读】credit credits workbuddy [--all|--json|--line]，或 python -m agent_credit.wb_credits。端点 /billing/meter/get-user-resource-{summary,free-packages,paid-packages}，⚠️ 资源类端点不带 /v2（签到端点才带，带错 404 Route Not Found）；free/paid 的 PackageCodes 不能为空数组（400 PackageCodes required），按客户端分组下发。每条 grant 带 CapacityRemainPrecise + DeductionEndTime(epoch ms)，过期优先级 DeductionEndTime→ExpiredTime→CycleEndTime（与客户端 toExpiredCreditPackage 一致）；余量优先级对齐客户端 resolveResourceCapacity：CapacityType=4 套餐配额的真余量在 CycleCapacityRemainPrecise（包级 CapacityRemainPrecise 是未扣减的包总量，曾据此把 500 当成余量，实测对账破等式后已修）。失效条件：端点改名 / sym-v1 信封升级（vendor 签到脚本会先炸）。【2026-10-19 签到后自动对账】checkin 末尾自动跑 credits_command（逐条明细，source=sync 重建账本条目、保留每条过期时间；`credit due` 的临期视图直接受益）；status_command 是总量快照兜底契约。开关 AGENT_CREDIT_SKIP_SYNC=1。详情 research/answers/workbuddy_credit_detail.md"
     models_note: "混元、DeepSeek、GLM、Kimi、MiniMax"
     rating:
       value: 4

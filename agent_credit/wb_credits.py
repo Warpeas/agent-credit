@@ -25,6 +25,7 @@
     python -m agent_credit.wb_credits --all        # 含已用完/已过期条目
     python -m agent_credit.wb_credits --json       # 全量 JSON
     python -m agent_credit.wb_credits --line       # 一行 JSON（status_command 约定）
+    python -m agent_credit.wb_credits --ledger     # 账本对账载荷（credits_command 约定）
 """
 from __future__ import annotations
 
@@ -61,6 +62,15 @@ FREE_PACKAGE_CODES = [
     "TCACA_code_036_lupO5WgNdG", "TCACA_code_037_WxOD3MpI2o", "TCACA_code_038_OhvqZtiPKr",
     "TCACA_code_008_cfWoLwvjU4",
 ]
+# 客户端 Web 端 mapping 的「套餐类」code 列表（asar 74772460 段的 c 列表）：
+# 这类包的过期看 CycleEndTime（月度刷新），其余（签到/活动/赠送）看 DeductionEndTime。
+# 对账写入账本时沿用同一口径，避免把套餐配额的有效期写成长达数年的 DeductionEndTime。
+PLAN_PACKAGE_CODES = {
+    "TCACA_code_002_AkiJS3ZHF5", "TCACA_code_005_maRGyrHhw1", "TCACA_code_003_FAnt7lcmRT",
+    "TCACA_code_008_cfWoLwvjU4", "TCACA_code_023_4xbGhMrE6q", "TCACA_code_026_BaESVICNoi",
+    "TCACA_code_027_0FCGVA6vSa", "TCACA_code_028_NtpWi0jzXs", "TCACA_code_035_ArVxJcGDsm",
+    "TCACA_code_039_KRcQj7wUat", "TCACA_code_040_mi9rCYg46x", "TCACA_code_037_WxOD3MpI2o",
+}
 
 # asar 枚举 ds：valid=0 refund=1 expired=2 usedUp=3
 STATUS_LABELS = {0: "有效", 1: "已退款", 2: "已过期", 3: "已用完"}
@@ -353,6 +363,35 @@ def claimed_today() -> bool | None:
     return bool(data.get("today_checked_in"))
 
 
+def ledger_payload(result: dict[str, Any]) -> dict[str, Any]:
+    """转成账本对账载荷（`--ledger`，供 checkin 的 sync 消费）。
+
+    只收有效（Status=0）且剩余 > 0 的 grant。过期日期口径对齐客户端展示逻辑：
+    套餐类 code 取 CycleEndTime（月度刷新），其余取 DeductionEndTime
+    （expire_at 已按该优先级解析）。日期裁到天，账本只记日期粒度。
+    """
+    grants = []
+    for g in result["grants"]:
+        if g.get("status") != 0:
+            continue
+        remain = g.get("remain")
+        if not isinstance(remain, (int, float)) or isinstance(remain, bool) or remain <= 0:
+            continue
+        if g.get("package_code") in PLAN_PACKAGE_CODES:
+            expires = (g.get("cycle_end") or "")[:10] or None
+        else:
+            expires = (g.get("expire_at") or "")[:10] or None
+        grants.append({
+            "remain": remain,
+            "expires": expires,
+            "granted_at": (g.get("created_at") or "")[:10] or None,
+            "package": g.get("package_name") or "",
+        })
+    return {"account": "workbuddy",
+            "total": result["summary"]["total_credits"],
+            "grants": grants}
+
+
 def format_text(result: dict[str, Any], show_all: bool = False) -> str:
     """人类可读输出。默认只列有效条目；--all 带出已用完/已过期。"""
     summary = result["summary"]
@@ -407,6 +446,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="输出全量 JSON")
     parser.add_argument("--line", action="store_true",
                         help='输出一行 JSON：{"balance": N, "claimed_today": bool}')
+    parser.add_argument("--ledger", action="store_true",
+                        help='输出账本对账载荷：{"grants":[...],"total":N}（sync 消费）')
     args = parser.parse_args(argv)
     try:
         if args.line:
@@ -416,7 +457,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, ensure_ascii=False))
             return 0
         result = fetch_credits()
-        if args.json:
+        if args.ledger:
+            print(json.dumps(ledger_payload(result), ensure_ascii=False))
+        elif args.json:
             print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
         else:
             print(format_text(result, show_all=args.all))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -15,6 +16,10 @@ from .ui_claim import claim as ui_claim, has_ui_route, skip_ui
 
 # Repo root, so catalog.yaml never has to hardcode a checkout path.
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# 对账开关：SKIP_SYNC 只关对账；SKIP_EXTERNAL（测试用）连带关——
+# 对账命令同样是 external 命令，测试里不该真联网。
+SYNC_SKIP_ENV = "AGENT_CREDIT_SKIP_SYNC"
 
 
 @dataclass
@@ -44,6 +49,10 @@ def _should_claim(acc: dict[str, Any], data: dict[str, Any], on: date) -> tuple[
     if policy in ("always", "below_threshold"):
         return True, "应签"
     return False, f"未知策略 {policy}"
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
 def _run_external(acc: dict[str, Any]) -> tuple[bool, str, str]:
@@ -176,6 +185,10 @@ def checkin(
 
         results.append(CheckinResult(acc["id"], acc["name"], "skipped", f"claim_mode={mode}"))
 
+    # 签到结束后对账：配了 credits_command / status_command 的账户，
+    # 用服务端真实余额校正台账（含今天这笔是否到账）。失败不影响签到退出码。
+    sync(only=only, data=data, on=on)
+
     ledger.save(data)
     trace.note("台账已写回 " + str(ledger.LEDGER_PATH))
     return results, data
@@ -271,6 +284,12 @@ def record_claimed(
     }
 
 
+def _zero_entries(data: dict[str, Any], account_id: str) -> None:
+    """把账本旧条目的剩余全部置零（快照/对账重建前的标准动作）。"""
+    for entry in ledger.state(data, account_id)["entries"]:
+        entry["remaining"] = 0
+
+
 def set_balance(
     key: str,
     amount: int,
@@ -284,8 +303,7 @@ def set_balance(
     acc = find_account(key)
     if amount < 0:
         raise ValueError("amount must be >= 0")
-    for entry in ledger.state(data, acc["id"])["entries"]:
-        entry["remaining"] = 0
+    _zero_entries(data, acc["id"])
     entry = None
     if amount > 0:
         expires_on = ledger.parse_date(expires) if expires else None
@@ -296,6 +314,104 @@ def set_balance(
         "entry": entry,
         "remaining": ledger.remaining(data, acc["id"], on),
     }
+
+
+def _parse_sync_output(out: str) -> dict[str, Any]:
+    """对账命令输出的 JSON：整体解析，失败则取最后一个非空行（容忍前置告警）。"""
+    text = (out or "").strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue
+    raise ValueError("对账输出不是 JSON")
+
+
+def _apply_sync_payload(
+    acc: dict[str, Any],
+    payload: dict[str, Any],
+    data: dict[str, Any],
+    on: date,
+) -> dict[str, Any]:
+    """把对账输出落进账本。两种 catalog 契约：
+
+    credits_command: {"grants": [{"remain": N, "expires": "YYYY-MM-DD"}],
+                     "total": N} → 逐条写入（ledger.sync_grants），保留每条过期时间
+    status_command:  {"balance": N, "claimed_today": bool} → 总量快照（单条 snapshot 条目）
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("对账输出不是 JSON 对象")
+    if isinstance(payload.get("grants"), list):
+        result = ledger.sync_grants(data, acc["id"], payload["grants"], on)
+        return {**result, "mode": "grants"}
+    balance = payload.get("balance")
+    if isinstance(balance, (int, float)) and not isinstance(balance, bool):
+        before = ledger.remaining(data, acc["id"], on)
+        _zero_entries(data, acc["id"])
+        if balance > 0:
+            ledger.grant(data, acc["id"], int(balance + 0.5), "snapshot", on)
+        return {"before": before, "after": ledger.remaining(data, acc["id"], on),
+                "entries": 1 if balance > 0 else 0, "mode": "snapshot"}
+    raise ValueError("对账输出缺少 grants 或 balance 字段")
+
+
+def sync(
+    only: str | None = None,
+    data: dict[str, Any] | None = None,
+    on: date | None = None,
+) -> list[dict[str, Any]]:
+    """对账：拉服务端真实余额校正台账（不记签到、不动连签状态）。
+
+    能力来自 catalog：credits_command（逐条明细，优先）或 status_command（总量快照）。
+    两个开关：AGENT_CREDIT_SKIP_SYNC=1 只关对账；AGENT_CREDIT_SKIP_EXTERNAL=1
+    （测试用）连带关——对账命令同属 external，测试里不该真联网。
+    单账户失败只记一条，不影响其他账户，更不改变 checkin 的退出码。
+    """
+    on = on or ledger.today()
+    owns_data = data is None
+    data = data if data is not None else ledger.load()
+    results: list[dict[str, Any]] = []
+    if _env_flag(SYNC_SKIP_ENV) or _env_flag("AGENT_CREDIT_SKIP_EXTERNAL"):
+        trace.note("对账已跳过（AGENT_CREDIT_SKIP_SYNC / AGENT_CREDIT_SKIP_EXTERNAL）")
+        return results
+    targets = [find_account(only)] if only else accounts()
+    for acc in targets:
+        command = (acc.get("credits_command") or "").strip() \
+            or (acc.get("status_command") or "").strip()
+        if not command:
+            continue
+        command = command.replace("{REPO}", str(REPO_ROOT))
+        rc, out = trace.stream(command, shell=True, label=acc["id"], timeout=60)
+        item = {"account_id": acc["id"], "name": acc["name"]}
+        if rc is None:
+            results.append({**item, "ok": False, "detail": "对账命令超时"})
+            continue
+        if rc != 0:
+            tail = out.strip().splitlines()
+            last = tail[-1][:200] if tail else ""
+            results.append({**item, "ok": False,
+                            "detail": f"对账命令失败 exit={rc}" + (f" | {last}" if last else "")})
+            continue
+        try:
+            payload = _parse_sync_output(out)
+            applied = _apply_sync_payload(acc, payload, data, on)
+        except ValueError as exc:
+            results.append({**item, "ok": False, "detail": str(exc)})
+            continue
+        results.append({**item, "ok": True, **applied})
+        trace.note(f"{acc['name']} 对账：{applied['before']} → {applied['after']} "
+                   f"（{applied['mode']}，{applied['entries']} 条）", label=acc["id"])
+    # 自己 load 的账本自己存；checkin 路径传入共用 data，由调用方统一保存
+    if owns_data and results:
+        ledger.save(data)
+    return results
 
 
 def record_used(key: str, amount: int, data: dict[str, Any] | None = None) -> dict[str, Any]:

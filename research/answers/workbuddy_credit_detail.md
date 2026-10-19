@@ -89,6 +89,25 @@ PackageCode 清单（asar 枚举 `$`，24 字符短码，非凭据）：
 | 自己实现 sym-v1 信封解密 | 不做。vendor 脚本已让客户端进程自行解密（SAFETY 允许路线「让客户端自己说话」），本模块直接复用，不引入新的凭据处理面 |
 | `get-enterprise-user-usage` | 企业账户专用，个人账号不适用 |
 
+## 签到后对账（credits_command，2026-10-19 当晚追加）
+
+签到（或跳过签到）结束后，`credit checkin` 末尾自动对账：拉服务端真实余额重建账本
+WorkBuddy 条目，不记签到、不动连签。也可手动 `credit sync`。
+
+- **catalog 契约**：`credits_command` 输出
+  `{"grants": [{"remain": N, "expires": "YYYY-MM-DD", "granted_at": "YYYY-MM-DD"}], "total": N}`
+  → 逐条写入（`ledger.sync_grants`，source=sync），**每条保留真实过期时间**，
+  `credit due` 的 7 天临期视图直接受益。`status_command`（`{"balance": N}`）是总量快照兜底。
+- **过期口径**：套餐类 code（PLAN_PACKAGE_CODES，含 008）取 CycleEndTime（月度刷新），
+  其余取 DeductionEndTime——与客户端展示逻辑一致，避免把套餐配额写成长达数年的有效期。
+- **已知取舍**：账本是整数粒度，小数四舍五入（44 条舍入后与总值偏差 ≤1）；
+  精确值以 `credit credits workbuddy` 为准。服务端说有效但日期已过（理论上不会出现）
+  的条目照写不弃，下次对账自愈。
+- **开关**：`AGENT_CREDIT_SKIP_SYNC=1` 只关对账；`AGENT_CREDIT_SKIP_EXTERNAL=1`（测试用）连带关。
+  对账失败只记一条日志，**不改变 checkin 退出码**（签到成功不能被对账失败拖成失败）。
+- **实测**（2026-10-19 23:31）：本地账本 3900 → 服务端真相 2717（45 条）。
+  本地此前按「每日 +100 纯累积」记账，不反映真实消耗，虚高 1183——对账的价值就在这。
+
 ## 失效条件
 
 - 端点路径改名 / 前缀规则变化 → `credit credits workbuddy` 报 HTTP 404，先来这份文档核对路径
@@ -103,7 +122,8 @@ credit credits workbuddy
 credit credits workbuddy --all
 credit credits workbuddy --json
 python -m agent_credit.wb_credits --line
+credit sync                :: 手动对账（checkin 末尾也会自动跑）
 ```
 
-回归测试：`python scripts/test_wb_credits.py`（解析器 + body 形状 + 时间格式，
-字段漂移会直接报错，不会静默失真）。
+回归测试：`python scripts/test_wb_credits.py` + `python scripts/test_credit_sync.py`
+（解析器 + body 形状 + 时间格式 + 对账写入 + 开关；字段漂移会直接报错，不会静默失真）。

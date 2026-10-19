@@ -9,6 +9,7 @@ from typing import Any
 from . import checkin as checkin_mod
 from . import ledger
 from . import trace
+from . import wb_credits
 from .apps import launch
 from .catalog import accounts, find_account
 from .doctor import format_report, report
@@ -147,6 +148,26 @@ def cmd_due(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_credits(args: argparse.Namespace) -> int:
+    if args.account != "workbuddy":
+        print("积分明细查询目前只支持 workbuddy（其余家见 research/answers/ 的登记进度）",
+              file=sys.stderr)
+        return 1
+    if args.line:
+        # status_command 约定：一行 JSON。claimed_today 失败不炸主流程（返回 null）。
+        result = wb_credits.fetch_credits()
+        print(json.dumps({"balance": result["summary"]["total_credits"],
+                          "claimed_today": wb_credits.claimed_today()},
+                         ensure_ascii=False))
+        return 0
+    result = wb_credits.fetch_credits()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
+    else:
+        print(wb_credits.format_text(result, show_all=args.all))
+    return 0
+
+
 def cmd_doctor(_args: argparse.Namespace) -> int:
     print(format_report(report()))
     return 0
@@ -218,6 +239,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("due", help="今天必签 / 快过期 / 月度事项")
     s.set_defaults(func=cmd_due)
+
+    s = sub.add_parser("credits", help="查询积分明细（每条剩余+过期时间）；目前支持 workbuddy")
+    s.add_argument("account", nargs="?", default="workbuddy", help="账户 id，默认 workbuddy")
+    s.add_argument("--all", action="store_true", help="包含已用完/已过期的条目")
+    s.add_argument("--json", action="store_true", help="输出全量 JSON")
+    s.add_argument("--line", action="store_true",
+                   help='输出一行 JSON：{"balance": N, "claimed_today": bool}')
+    s.set_defaults(func=cmd_credits)
 
     s = sub.add_parser("doctor", help="探测本机安装与适配器")
     s.set_defaults(func=cmd_doctor)

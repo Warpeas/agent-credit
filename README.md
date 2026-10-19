@@ -52,6 +52,7 @@
 - 额度：100/天，30 天，连签/额外：7 天周期，第 7 天 +1000
 - 模型：混元、DeepSeek、GLM、Kimi、MiniMax
 - 简评：额度不算最高但最省心：external 直签零交互，30 天有效期够攒，7 天连签再加 1000。混元/DeepSeek/GLM/Kimi/MiniMax 多模型可选，办公文档链路完整。
+- 积分明细：`credit credits workbuddy` 可查每条积分的剩余与过期时间（2026-10-19 打通，只读；有效期口径随之从 measured 升为 confirmed）
 - 适合：日常编码主力 + 腾讯文档/办公场景
 - 主人体验：_待补充_
 

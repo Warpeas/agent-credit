@@ -6,7 +6,11 @@ param(
     [string]$OutFile = "",
     # 默认会在签到成功后关闭「本次由脚本拉起」的客户端；签到前已运行的不动。
     # -NoClose 用于探索期：保留窗口以便反复调试，不必每次重拉（重拉会弹 UAC）。
-    [switch]$NoClose
+    [switch]$NoClose,
+    # 方案甲（2026-10-21 拍板）：签到全程把窗口停到屏外——识别走 PrintWindow
+    # （对屏外窗口有效），点击分三级：合成消息 → UIA Invoke → 移回屏内真实点击
+    # （光标保存/恢复，暴露面 ~100ms）。传 -Offscreen:$false 退回旧行为。
+    [bool]$Offscreen = $true
 )
 $root = Split-Path -Parent $PSScriptRoot
 $logPath = "$root\logs\ps1_minimax.log"
@@ -17,6 +21,8 @@ $ErrorActionPreference = "Stop"
 
 # Surface terminating errors instead of dying silently.
 trap {
+    # 方案甲：FATAL 也不能把窗口留在屏外（A5），尽力恢复后再退出
+    try { if ($script:OriginalRect) { Restore-OriginalRect } } catch { }
     try {
         $m = "FATAL: " + $_.Exception.Message + " @ " + $_.InvocationInfo.PositionMessage
         $p = "$PSScriptRoot\..\logs\minimax_claim.json"
@@ -37,6 +43,10 @@ public static class Cap32 {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  // 方案甲 BringBack-Click：点击前保存、点击后恢复物理光标（A3 日志断言用）
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
+  // 方案甲 M1/M3/M4：屏外停放 / 移回点击位 / 恢复启动 rect
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
@@ -83,6 +93,48 @@ function Await($WinRtOp, $ResultType) {
     $netTask = $asTask.Invoke($null, @($WinRtOp))
     $netTask.Wait(-1) | Out-Null
     return $netTask.Result
+}
+
+# 方案甲 M1/M4 必须定义在任何调用点之前（本脚本函数是顺序生效的：
+# trap/Out-Json/屏外停放都可能在文件中后部函数定义执行前触发）。
+function Move-OffscreenNow {
+    # M1：整窗停到主屏左界外。SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE(0x0015)——
+    # 绝不激活。坐标用实测宽度动态计算（R7：多显示器/DPI 不写死）。
+    if (-not $Offscreen) { return }
+    if ($hwnd -eq [IntPtr]::Zero) { return }
+    $cr = New-Object Cap32+RECT
+    [Cap32]::GetWindowRect($hwnd, [ref]$cr) | Out-Null
+    $w = $cr.Right - $cr.Left
+    if ($w -le 0) { return }
+    [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, (-($w + 64)), 0, 0, 0, 0x0015) | Out-Null
+}
+
+function Restore-OriginalRect {
+    # M4：关闭前把窗口移回启动 rect，防 Electron 持久化屏外位置（R1）。
+    if (-not $script:OriginalRect) { return }
+    if ($hwnd -eq [IntPtr]::Zero) { return }
+    try {
+        $r = $script:OriginalRect
+        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top, 0, 0, 0x0015) | Out-Null
+        $chk = New-Object Cap32+RECT
+        [Cap32]::GetWindowRect($hwnd, [ref]$chk) | Out-Null
+        # A3 断言：关闭前 rect == 启动 rect
+        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " (expect " + $r.Left + "," + $r.Top + ")")
+    } catch { try { Log ("restore-rect failed: " + $_.Exception.Message) } catch { } }
+}
+
+function Test-RectOnAnyScreen($r) {
+    # R1 双保险用的屏内判定：rect 与任一显示器的 bounds 相交即视为屏内
+    # （多显示器左屏是负坐标，不能用 Right<0 这种朴素判断——R7）。
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+            $b = $s.Bounds
+            if ($r.Right -gt $b.Left -and $r.Left -lt $b.Right -and
+                $r.Bottom -gt $b.Top -and $r.Top -lt $b.Bottom) { return $true }
+        }
+    } catch { return $true }  # 查询失败就当在屏内，别乱动窗口
+    return $false
 }
 
 $script:SavedHwnd = [IntPtr]::Zero
@@ -146,6 +198,9 @@ function Stop-LaunchedApp {
 }
 
 function Out-Json([string]$status, [string]$detail) {
+    # 方案甲 M4：任何收尾之前先把窗口移回启动 rect——Electron 会把窗口位置
+    # 持久化进自己的 config，留着屏外位置关闭，下次冷启动窗口还在屏外。
+    if ($script:OriginalRect) { Restore-OriginalRect }
     # 运行结束一律恢复现场：关掉本次由脚本拉起的实例（签到前就开着的保留），
     # 再把前台还给运行前的窗口。失败时也不留窗口——无人值守跑完桌面不该堆着
     # 客户端，诊断信息已落日志（minimax_shot.png / ocr dump）与台账。
@@ -341,7 +396,8 @@ function Get-OcrLinesSafe {
     # Foreground is best-effort now: PrintWindow captures the window even when it
     # is occluded or not in front, so a refused foreground switch must not abort
     # the run (it used to return $null -> "未在前台" -> pending).
-    try { Wait-Foreground | Out-Null } catch { }
+    # 屏外模式下抢前台无收益且打扰用户焦点（方案甲），直接截屏即可。
+    if (-not $Offscreen) { try { Wait-Foreground | Out-Null } catch { } }
     return Get-OcrLines
 }
 
@@ -377,6 +433,29 @@ $winH = $rect.Bottom - $rect.Top
 $winX = $rect.Left
 $winY = $rect.Top
 
+# --- 方案甲 M1：窗口整窗停到主屏左界外，识别全后台化 -------------------------
+# 窗口仍在默认桌面（DWM 正常合成，PrintWindow 可用），只是不可见、绝不激活。
+# 原 rect 存入 $script:OriginalRect，Out-Json 收尾前恢复（M4）；
+# $winX/$winY 保持原位语义，供移回点击用。
+$script:OriginalRect = $null
+if ($Offscreen) {
+    # R1 双保险：上次异常退出可能把屏外位置持久化——启动时先拨回屏内再存原 rect
+    if (-not (Test-RectOnAnyScreen $rect)) {
+        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, 100, 100, 0, 0, 0x0015) | Out-Null
+        Start-Sleep -Milliseconds 300
+        $rect = New-Object Cap32+RECT
+        [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+        $winW = $rect.Right - $rect.Left
+        $winH = $rect.Bottom - $rect.Top
+        $winX = $rect.Left
+        $winY = $rect.Top
+        Log ("step: 检测到残留屏外位置，已拨回屏内 " + $winX + "," + $winY)
+    }
+    $script:OriginalRect = $rect
+    Move-OffscreenNow
+    Log ("step: 窗口已停到屏外（原 rect " + $winX + "," + $winY + " " + $winW + "x" + $winH + "）")
+}
+
 # 诊断用：保存一次主窗口截图，便于肉眼定位签到按钮（不影响点击逻辑）
 try {
     $shot = New-Object System.Drawing.Bitmap($winW, $winH)
@@ -384,7 +463,8 @@ try {
     $hdc2 = $sg.GetHdc()
     $pw2 = [Cap32]::PrintWindow($hwnd, $hdc2, 2)
     $sg.ReleaseHdc($hdc2)
-    if (-not $pw2 -or (Test-Blank $shot)) { $sg.CopyFromScreen($winX, $winY, 0,0, $shot.Size) }
+    # 屏外坐标的 CopyFromScreen 拍到的是用户屏幕内容，屏外模式只认 PrintWindow
+    if (-not $Offscreen -and (-not $pw2 -or (Test-Blank $shot))) { $sg.CopyFromScreen($winX, $winY, 0,0, $shot.Size) }
     $sg.Dispose()
     $shot.Save("$root\logs\minimax_shot.png", [System.Drawing.Imaging.ImageFormat]::Png)
     $shot.Dispose()
@@ -423,22 +503,55 @@ function Ocr-Bitmap($bmp) {
 }
 
 function Get-OcrLines {
-    $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    # PrintWindow captures the window itself (works while occluded / not in
-    # front). Fall back to screen capture on a blank frame, and - critically -
-    # on a frame that OCR finds almost nothing in: Electron windows sometimes
-    # hand PrintWindow a stale/unrendered surface, which used to make the brand
-    # check fail and abort the whole claim.
-    $hdc = $g.GetHdc()
-    $pw = [Cap32]::PrintWindow($hwnd, $hdc, 2)
-    $g.ReleaseHdc($hdc)
-    if (-not $pw -or (Test-Blank $bmp)) {
-        $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size)
+    # 方案甲 R2：屏外窗口受 backgroundThrottling 影响，首帧可能 2-8s 才画出
+    # 内容（PoC 实测）——PrintWindow 抓到空白帧时重试（2s 间隔，上限 30s），
+    # 且绝不走 CopyFromScreen 兜底：屏外坐标的屏幕捕获拍到的是用户屏幕内容。
+    $maxTry = 1
+    if ($Offscreen) { $maxTry = 15 }
+    $bmp = $null
+    for ($tryN = 1; $tryN -le $maxTry; $tryN++) {
+        $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        # PrintWindow captures the window itself (works while occluded / not in
+        # front, and also when parked off-screen — 同一桌面，DWM 照常合成).
+        $hdc = $g.GetHdc()
+        $pw = [Cap32]::PrintWindow($hwnd, $hdc, 2)
+        $g.ReleaseHdc($hdc)
+        if ($pw -and -not (Test-Blank $bmp)) { $g.Dispose(); break }
+        if (-not $Offscreen) {
+            # Fall back to screen capture on a blank frame（非屏外旧行为）.
+            $g.CopyFromScreen($winX, $winY, 0, 0, $bmp.Size)
+            $g.Dispose()
+            break
+        }
+        $g.Dispose()
+        if ($tryN -lt $maxTry) {
+            if ($tryN -eq 1) { Log "step: 屏外捕获空白帧，2s 间隔重试（backgroundThrottling 容忍）" }
+            $bmp.Dispose()
+            Start-Sleep -Seconds 2
+        }
     }
-    $g.Dispose()
     $lines1 = Ocr-Bitmap $bmp
     if ($lines1.Count -ge 3) {
+        try { $script:ShotBmp = $bmp.Clone() } catch { }
+        $bmp.Dispose()
+        return ,$lines1
+    }
+    if ($Offscreen) {
+        # 屏外没有 CopyFromScreen 兜底可用（拍到的是用户屏幕）；Electron 偶发
+        # 交出陈旧未渲染表面（OCR 行数极少）——同一 PrintWindow 短重试替代。
+        for ($k = 0; $k -lt 2; $k++) {
+            Start-Sleep -Seconds 2
+            $bmp.Dispose()
+            $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $hdc = $g.GetHdc()
+            [Cap32]::PrintWindow($hwnd, $hdc, 2) | Out-Null
+            $g.ReleaseHdc($hdc)
+            $g.Dispose()
+            $lines1 = Ocr-Bitmap $bmp
+            if ($lines1.Count -ge 3) { break }
+        }
         try { $script:ShotBmp = $bmp.Clone() } catch { }
         $bmp.Dispose()
         return ,$lines1
@@ -468,22 +581,20 @@ function Find-Line($lines, [string]$needle) {
     return $null
 }
 
-function Click-At([int]$ax, [int]$ay) {
-    $sx = $winX + $ax
-    $sy = $winY + $ay
+# --- 方案甲：屏外点击的三级机制（M1/M4 的定义在文件头部，调用点更早） --------
 
-    # 1) Already in front -> real input injection (most reliable).
-    if ([Cap32]::GetForegroundWindow() -eq $hwnd) {
-        [Cap32]::SetCursorPos($sx, $sy) | Out-Null
-        Start-Sleep -Milliseconds 120
-        [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-        [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-        return
-    }
+function Send-SynthMouse([int]$ax, [int]$ay, [switch]$HoverOnly) {
+    # 合成鼠标消息（WM_MOUSEMOVE/WM_LBUTTONDOWN/UP）送到窗口消息队列。
+    # 与窗口屏幕位置无关：客户区相对坐标在屏外同样有效（方案甲第一级，
+    # 零屏幕暴露）。坐标一律按窗口**当前**位置换算：非屏外模式等同于原逻辑。
+    $cr = New-Object Cap32+RECT
+    [Cap32]::GetWindowRect($hwnd, [ref]$cr) | Out-Null
+    $sx = $cr.Left + $ax
+    $sy = $cr.Top + $ay
 
-    # 2) Otherwise deliver the click into the window's own message queue, which
-    #    needs no foreground at all. Prefer the real top-most window at the point
-    #    (Electron/CEF popups may be separate windows), verifying the process.
+    # Prefer the real top-most window at the point (Electron/CEF popups may be
+    # separate windows), verifying the process.（屏外时 WindowFromPoint 命中
+    # 不到任何窗口，target 自然落回主窗口。）
     $sp = [Cap32+POINT]::new()
     $sp.X = $sx
     $sp.Y = $sy
@@ -512,13 +623,172 @@ function Click-At([int]$ax, [int]$ay) {
     $res = [IntPtr]::Zero
     # hover first: some buttons only render on hover
     [Cap32]::SendMessageTimeout($target, 0x0200, [UIntPtr]::Zero, $lp, 0, 1000, [ref]$res) | Out-Null
+    $script:LastSynthTarget = $target
+    if ($HoverOnly) { return $true }
     Start-Sleep -Milliseconds 150
     $r1 = [Cap32]::SendMessageTimeout($target, 0x0201, [UIntPtr]::new([uint64]1), $lp, 0, 1500, [ref]$res)
     Start-Sleep -Milliseconds 90
     $r2 = [Cap32]::SendMessageTimeout($target, 0x0202, [UIntPtr]::Zero, $lp, 0, 1500, [ref]$res)
-    if ($r1 -ne [IntPtr]::Zero -and $r2 -ne [IntPtr]::Zero) { return }
+    return ($r1 -ne [IntPtr]::Zero -and $r2 -ne [IntPtr]::Zero)
+}
 
-    # 3) Last resort: real cursor input anyway.
+function Send-SynthEsc {
+    # ESC 的屏外等价物：keybd_event 会落到用户的前台窗口，绝不能发；
+    # WM_KEYDOWN/UP 直投客户端消息队列，与位置无关。
+    $res = [IntPtr]::Zero
+    [Cap32]::SendMessageTimeout($hwnd, 0x0100, [UIntPtr]::new([uint64]0x1B), [IntPtr]::Zero, 0, 1000, [ref]$res) | Out-Null
+    Start-Sleep -Milliseconds 60
+    [Cap32]::SendMessageTimeout($hwnd, 0x0101, [UIntPtr]::new([uint64]0x1B), [IntPtr]::Zero, 0, 1000, [ref]$res) | Out-Null
+}
+
+function Invoke-AtPoint([int]$ax, [int]$ay) {
+    # 方案甲 M2（第二级）：UIA InvokePattern。COM 与窗口位置无关，屏外也能
+    # Invoke。找 BoundingRectangle 包含目标点且支持 Invoke 的最小元素。
+    # 任何异常都视为「找不到」——调用方继续走 BringBack-Click（R5：Invoke
+    # 后是否真点中，由原有点击后判据 OCR 复核裁定，这里不做任何重试）。
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction SilentlyContinue
+        $cr = New-Object Cap32+RECT
+        [Cap32]::GetWindowRect($hwnd, [ref]$cr) | Out-Null
+        $px = $cr.Left + $ax
+        $py = $cr.Top + $ay
+        $rootEl = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+        if (-not $rootEl) { return $false }
+        $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+        $best = $null
+        $bestArea = [double]::MaxValue
+        $budget = 2000
+        $stack = New-Object System.Collections.Stack
+        $stack.Push($rootEl)
+        while ($stack.Count -gt 0 -and $budget -gt 0) {
+            $el = $stack.Pop()
+            $budget--
+            if (-not $el) { continue }
+            try {
+                $rc = $el.Current.BoundingRectangle
+                if ($rc.Width -le 0 -or $rc.Height -le 0) { continue }
+                if ($px -lt $rc.Left -or $px -ge $rc.Right -or $py -lt $rc.Top -or $py -ge $rc.Bottom) { continue }
+                $area = $rc.Width * $rc.Height
+                $pat = $null
+                if ($area -lt $bestArea -and $el.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pat)) {
+                    $best = $el
+                    $bestArea = $area
+                }
+                $kid = $walker.GetFirstChild($el)
+                while ($kid -and $budget -gt 0) {
+                    $stack.Push($kid)
+                    $kid = $walker.GetNextSibling($kid)
+                }
+            } catch { }
+        }
+        if (-not $best) { Log ("uia: no invokable element @ " + $ax + "," + $ay); return $false }
+        $pat2 = $null
+        if (-not $best.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pat2)) { return $false }
+        ([System.Windows.Automation.InvokePattern]$pat2).Invoke()
+        Log ("uia: invoked '" + $best.Current.Name + "' @ " + $ax + "," + $ay)
+        return $true
+    } catch {
+        Log ("uia: " + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Test-ClickVisible([int]$cx, [int]$cy) {
+    # 项目铁律 4 反遮挡（R3）：点击点上最顶层的窗口必须属于客户端进程，
+    # 否则真实点击会落到别人的窗口上。
+    $sp = [Cap32+POINT]::new()
+    $sp.X = $cx
+    $sp.Y = $cy
+    $top = [Cap32]::WindowFromPoint($sp)
+    if ($top -eq [IntPtr]::Zero) { return $false }
+    $pidTop = [uint32]0
+    [Cap32]::GetWindowThreadProcessId($top, [ref]$pidTop) | Out-Null
+    $pidMain = [uint32]0
+    [Cap32]::GetWindowThreadProcessId($hwnd, [ref]$pidMain) | Out-Null
+    return ($pidTop -eq $pidMain)
+}
+
+function BringBack-Click([int]$ax, [int]$ay) {
+    # 方案甲 M3（第三级）：窗口移回点击位 → 保存光标 → 真实点击 → 恢复光标
+    # → 移回屏外。点击位默认原位，被遮挡则试 (0,0)，再不行放弃（pending 由
+    # 后继判据裁定，不重试——SAFETY 第 3 条）。
+    $spots = @(@($winX, $winY), @(0, 0))
+    $placed = $false
+    $cx = 0
+    $cy = 0
+    foreach ($s in $spots) {
+        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $s[0], $s[1], 0, 0, 0x0015) | Out-Null
+        Start-Sleep -Milliseconds 300
+        $cx = $s[0] + $ax
+        $cy = $s[1] + $ay
+        if (Test-ClickVisible $cx $cy) { $placed = $true; break }
+        Log ("bringback: spot " + $s[0] + "," + $s[1] + " 被遮挡")
+    }
+    if (-not $placed) {
+        Log "bringback: 两个点击位都被遮挡，跳过真实点击"
+        Move-OffscreenNow
+        return
+    }
+    $saved = [Cap32+POINT]::new()
+    [Cap32]::GetCursorPos([ref]$saved) | Out-Null
+    try {
+        [Cap32]::SetCursorPos($cx, $cy) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+        [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        Log ("bringback: real click @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+    } finally {
+        # R4：任何异常路径都要恢复光标并重新停到屏外
+        [Cap32]::SetCursorPos($saved.X, $saved.Y) | Out-Null
+        $now = [Cap32+POINT]::new()
+        [Cap32]::GetCursorPos([ref]$now) | Out-Null
+        # A3 断言：点击前后 GetCursorPos 一致
+        Log ("bringback: cursor restored " + $now.X + "," + $now.Y + " (expect " + $saved.X + "," + $saved.Y + ")")
+        Move-OffscreenNow
+    }
+}
+
+function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth, [switch]$SkipUia) {
+    $cr = New-Object Cap32+RECT
+    [Cap32]::GetWindowRect($hwnd, [ref]$cr) | Out-Null
+    $sx = $cr.Left + $ax
+    $sy = $cr.Top + $ay
+
+    # 1) Already in front -> real input injection (most reliable).
+    #    （屏外模式不走这条：窗口永不抢前台，且屏外坐标不能直接真实点击。）
+    if (-not $Offscreen -and [Cap32]::GetForegroundWindow() -eq $hwnd) {
+        [Cap32]::SetCursorPos($sx, $sy) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+        [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        return
+    }
+
+    # 2) Otherwise deliver the click into the window's own message queue.
+    #    屏外模式下这是第一级（与位置无关，零暴露）；对真正的动作按钮无效是
+    #    已知事实，调用方对那类点击传 -SkipSynth 直接走 UIA → 移回真实点击。
+    if (-not $SkipSynth) {
+        $msgOk = Send-SynthMouse $ax $ay
+        $mode = 'msg-fail'
+        if ($msgOk) { $mode = 'msg-ok' }
+        try {
+            $line = "$(Get-Date -Format HH:mm:ss) mode=$mode target=$($script:LastSynthTarget) ax=$ax ay=$ay win=" + $winW + "x" + $winH + "`n"
+            [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $line)
+        } catch { }
+        if ($msgOk) { return }
+    }
+
+    if ($Offscreen) {
+        # 3) UIA InvokePattern（与位置无关）；4) 移回屏内一次真实点击。
+        #    -SkipUia：MiniMax 前端过滤 isTrusted=false 的 InvokePattern
+        #    （见 agent_credit/ui_claim.py 注释），调用方可跳过这一级。
+        if (-not $SkipUia) { if (Invoke-AtPoint $ax $ay) { return } }
+        BringBack-Click $ax $ay
+        return
+    }
+
+    # 3) Last resort: real cursor input anyway（非屏外旧行为）.
     [Cap32]::SetCursorPos($sx, $sy) | Out-Null
     Start-Sleep -Milliseconds 120
     [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
@@ -703,9 +973,14 @@ if (-not $anchor -and (Test-AdPresent $lines)) {
     # safe dismissal we have; if the sidebar comes back we carry on, otherwise
     # we stop instead of clicking blind.
     for ($k = 0; $k -lt 2 -and -not $anchor; $k++) {
-        [Cap32]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 80
-        [Cap32]::keybd_event(0x1B, 0, 2, [UIntPtr]::Zero)   # KEYEVENTF_KEYUP
+        # ESC 收全屏插页（屏外：keybd_event 会落到用户前台窗口，改投客户端队列）
+        if ($Offscreen) {
+            Send-SynthEsc
+        } else {
+            [Cap32]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 80
+            [Cap32]::keybd_event(0x1B, 0, 2, [UIntPtr]::Zero)   # KEYEVENTF_KEYUP
+        }
         Start-Sleep -Milliseconds 1500
         $after = Get-OcrLinesSafe
         if ($null -eq $after) { break }
@@ -797,7 +1072,9 @@ try {
 } catch { }
 
 Log ("step: 点击签到按钮 " + $btn.text + " @ " + $btnX + "," + $btnY)
-Click-At $btnX $btnY
+# -SkipSynth：合成消息对真正动作按钮无效是实证事实；-SkipUia：MiniMax 前端
+# 过滤 isTrusted=false 的 InvokePattern（见 ui_claim.py 注释）——直接移回真实点击。
+Click-At $btnX $btnY -SkipSynth -SkipUia
 
 # Multi-frame verification: button text change / success toast / already marker.
 $okHit = $null

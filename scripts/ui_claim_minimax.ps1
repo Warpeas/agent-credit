@@ -280,7 +280,11 @@ function Find-AppWindow {
         elseif ($named) { $score = 1 }
         $rank += @{ h = $c.h; score = $score; area = ($c.w * $c.hh) }
     }
-    $best = $rank | Sort-Object @{ e = 'score'; desc = $true }, @{ e = 'area'; desc = $true } |
+    # ⚠️ 2026-10-20：Sort-Object 的字符串属性名（'score'/'area'）对**哈希表数组**在
+    # PS 5.1 下不生效——键全等退化成不稳定排序，实测输入序 [好,坏] 会选出坏窗口
+    # （decoy score=0 -> Find-AppWindow 直接拒绝 -> UI 路线熄火）。必须用脚本块
+    # 表达式。同款根因详见 scripts/test_username_anchor.py 背景与回归样本。
+    $best = $rank | Sort-Object @{Expression={$_.score};Descending=$true}, @{Expression={$_.area};Descending=$true} |
             Select-Object -First 1
     if (-not $best) { return [IntPtr]::Zero }
     # Only the decoy around (unnamed + flat black) -> refuse, keep waiting.

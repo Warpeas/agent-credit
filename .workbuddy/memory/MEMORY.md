@@ -44,6 +44,19 @@
 6. **`Get-Content` 读无 BOM 的 UTF-8 会按 GBK 解析** → 读出来像乱码，但文件本身是好的。
    排查编码问题一律用 Python 读原始字节确认，别信 PowerShell 管道里的“乱码”。
    （`Write-Host` 也不进 pipeline，`2>&1 | Out-File` 抓不到它。）
+7. ⚠️ **PS 5.1 对哈希表数组，字符串属性名排序/度量一律不可靠（2026-10-20 实测，血案）**：
+   `Sort-Object -Property cx` / `Sort-Object @{Expression='cx'}` 对 `@{...}` 数组的属性查找
+   **全失败**（键全等 → 退化成不稳定排序，实测输出 = 输入序任意置换：2 元素反序、3 元素乱序）；
+   `Measure-Object -Property cy` 直接报「找不到属性」，配 `$ErrorActionPreference='Stop'`
+   会把非终止错误升级成致命错误炸掉整个脚本（trap 里只看到一句 GenericMeasurePropertyNotFound）。
+   **对策：排序必须脚本块表达式 `@{Expression={$_.cx};Ascending=$true}`，求极值用显式 foreach。**
+   10-20 qodercn 情况二整天 pending 的根因就是旧 `Find-Username` 的 cy 降序排序从来没生效过
+   （多数天偶然选中 warpeas，当天选中 agent-c.. 工作区名 → 不开菜单）；minimax
+   `Find-AppWindow` 同款（输入序 [好,坏] 会选出 score=0 诱饵窗）一并已修。
+   回归测试 `scripts/test_username_anchor.py` 从 ps1 抠判据跑真实 OCR 词框样本守着它。
+   另：**函数返回 1 元素数组在调用侧退化成标量**（数组被管道展开），标量哈希表没有 `[0]` 索引
+   → 调用侧一律 `@(Func ...)` 包裹；`,$out | ConvertTo-Json` 在 5.1 下会多包一层
+   `{"value":...,"Count":n}`，直接 `$out | ConvertTo-Json` 即可。
 
 ## UI 自动化铁律（跨客户端）
 

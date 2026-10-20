@@ -8,7 +8,11 @@ param(
     # operates on an already-running window (fails fast with notfound otherwise).
     # Lets recognize/claim/verify run repeatedly without re-launching.
     [switch]$NoLaunch,
-    [string]$OutFile = ""
+    [string]$OutFile = "",
+    # 方案甲（2026-10-21 拍板）：签到全程把窗口停到屏外——识别走 PrintWindow
+    # （对屏外窗口有效），点击分三级：合成消息 → UIA Invoke → 移回屏内真实点击
+    # （光标保存/恢复，暴露面 ~100ms）。传 -Offscreen:$false 退回旧行为。
+    [bool]$Offscreen = $true
 )
 $root = Split-Path -Parent $PSScriptRoot
 $ErrorActionPreference = "Stop"
@@ -34,6 +38,8 @@ public static class L32 {
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  // 方案甲 BringBack-Click：点击前保存、点击后恢复物理光标（A3 日志断言用）
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdcBlt, uint nFlags);
   [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, UIntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
@@ -85,7 +91,42 @@ function Save-Foreground {
 function Restore-Foreground {
     try{ if($script:SavedForeground -ne [IntPtr]::Zero){ [void][L32]::SetForegroundWindow($script:SavedForeground) } }catch{}
 }
+
+# 方案甲 M1/M4 必须定义在任何调用点之前（本脚本函数是顺序生效的：
+# 启动流程的早退分支在文件中后部函数定义执行前就可能触发 Close-LaunchedApp）。
+function Move-OffscreenNow {
+    # M1：整窗停到主屏左界外。SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE(0x0015)——
+    # 绝不激活。坐标用实测宽度动态计算（R7：多显示器/DPI 不写死）。
+    if (-not $Offscreen) { return }
+    if ($hwnd -eq [IntPtr]::Zero) { return }
+    $cr = New-Object L32+RECT
+    [L32]::GetWindowRect($hwnd, [ref]$cr) | Out-Null
+    $w = $cr.Right - $cr.Left
+    if ($w -le 0) { return }
+    [void][L32]::SetWindowPos($hwnd, [IntPtr]::Zero, (-($w + 64)), 0, 0, 0, 0x0015)
+}
+
+function Restore-OriginalRect {
+    # M4：关闭前把窗口移回启动 rect，防 Electron 持久化屏外位置（R1）。
+    # 幂等：恢复过后清空 OriginalRect，重复调用安全。
+    if (-not $script:OriginalRect) { return }
+    if ($hwnd -eq [IntPtr]::Zero) { return }
+    try {
+        $r = $script:OriginalRect
+        [void][L32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top, 0, 0, 0x0015)
+        $chk = New-Object L32+RECT
+        [L32]::GetWindowRect($hwnd, [ref]$chk) | Out-Null
+        # A3 断言：关闭前 rect == 启动 rect
+        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " (expect " + $r.Left + "," + $r.Top + ")")
+        $script:OriginalRect = $null
+    } catch { try { Log ("restore-rect failed: " + $_.Exception.Message) } catch { } }
+}
+
 function Close-LaunchedApp {
+    # 方案甲 M4：任何收尾之前先把窗口移回启动 rect——Electron 会把窗口位置
+    # 持久化进自己的 config，留着屏外位置关闭，下次冷启动窗口还在屏外。
+    # 与是否关闭无关：不关闭也得还回用户可见位置。
+    Restore-OriginalRect
     if (-not $script:LaunchedByUs) { Log "cleanup: skipped (was already running)"; return }
     Log "closing the client we launched"
     Start-Sleep -Seconds 2
@@ -201,10 +242,23 @@ function Reset-WindowRect {
 
 [void][L32]::ShowWindow($hwnd,9); Start-Sleep -Milliseconds 400
 [void](Reset-WindowRect $hwnd)
-[void][L32]::SetForegroundWindow($hwnd); Start-Sleep -Milliseconds 700
+# 屏外模式下抢前台无收益且打扰用户焦点（方案甲），直接跳过
+if (-not $Offscreen) { [void][L32]::SetForegroundWindow($hwnd); Start-Sleep -Milliseconds 700 }
 $r=New-Object L32+RECT; [L32]::GetWindowRect($hwnd,[ref]$r)|Out-Null
 $winX=$r.Left; $winY=$r.Top; $winW=$r.Right-$r.Left; $winH=$r.Bottom-$r.Top
 Log ("RECT="+$winX+","+$winY+" "+$winW+"x"+$winH)
+
+# --- 方案甲 M1：窗口整窗停到主屏左界外，识别全后台化 -------------------------
+# 窗口仍在默认桌面（DWM 正常合成，PrintWindow 可用），只是不可见、绝不激活。
+# 原 rect（已被 Reset-WindowRect 钳回屏内，残留屏外位置也会被它拨回——R1 双保险）
+# 存入 $script:OriginalRect，Close-LaunchedApp/Restore-Scene 收尾前恢复（M4）；
+# $winX/$winY 保持原位语义，供移回点击用。
+$script:OriginalRect = $null
+if ($Offscreen) {
+    $script:OriginalRect = $r
+    Move-OffscreenNow
+    Log ("step: 窗口已停到屏外（原 rect " + $winX + "," + $winY + " " + $winW + "x" + $winH + "）")
+}
 
 # --- OCR engine (built once) ---
 $eng=[Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new("zh-Hans-CN"))
@@ -225,14 +279,33 @@ function Test-Blank($bmp){
 }
 
 function Get-OcrLines($pngPath) {
-    $bmp=New-Object System.Drawing.Bitmap($winW,$winH)
-    $g=[System.Drawing.Graphics]::FromImage($bmp)
-    # PrintWindow captures the window itself: works while occluded / not in front.
-    $hdc=$g.GetHdc()
-    $pw=[L32]::PrintWindow($hwnd,$hdc,2)
-    $g.ReleaseHdc($hdc)
-    if(-not $pw -or (Test-Blank $bmp)){ $g.CopyFromScreen($winX,$winY,0,0,$bmp.Size) }
-    $g.Dispose()
+    # 方案甲 R2：屏外窗口受 backgroundThrottling 影响，首帧可能 2-8s 才画出
+    # 内容（PoC 实测）——PrintWindow 抓到空白帧时重试（2s 间隔，上限 30s），
+    # 且绝不走 CopyFromScreen 兜底：屏外坐标的屏幕捕获拍到的是用户屏幕内容。
+    $maxTry = 1
+    if ($Offscreen) { $maxTry = 15 }
+    $bmp = $null
+    for ($tryN = 1; $tryN -le $maxTry; $tryN++) {
+        $bmp=New-Object System.Drawing.Bitmap($winW,$winH)
+        $g=[System.Drawing.Graphics]::FromImage($bmp)
+        # PrintWindow captures the window itself: works while occluded / not in
+        # front, and also when parked off-screen（同一桌面，DWM 照常合成）.
+        $hdc=$g.GetHdc()
+        $pw=[L32]::PrintWindow($hwnd,$hdc,2)
+        $g.ReleaseHdc($hdc)
+        if ($pw -and -not (Test-Blank $bmp)) { $g.Dispose(); break }
+        if (-not $Offscreen) {
+            $g.CopyFromScreen($winX,$winY,0,0,$bmp.Size)
+            $g.Dispose()
+            break
+        }
+        $g.Dispose()
+        if ($tryN -lt $maxTry) {
+            if ($tryN -eq 1) { Log "step: 屏外捕获空白帧，2s 间隔重试（backgroundThrottling 容忍）" }
+            $bmp.Dispose()
+            Start-Sleep -Seconds 2
+        }
+    }
     if($pngPath){ $bmp.Save($pngPath,[System.Drawing.Imaging.ImageFormat]::Png) }
     $ms=New-Object System.IO.MemoryStream
     $bmp.Save($ms,[System.Drawing.Imaging.ImageFormat]::Png)
@@ -256,20 +329,20 @@ function Get-OcrLines($pngPath) {
     return $lines
 }
 
-function Click-At($ax,$ay) {
-    $sx=$winX+$ax; $sy=$winY+$ay
+# --- 方案甲：屏外点击的三级机制（M1/M4 的定义在文件头部，调用点更早） --------
 
-    # 1) Already in front -> real input injection (most reliable).
-    if([L32]::GetForegroundWindow() -eq $hwnd){
-        [void][L32]::SetCursorPos($sx,$sy)
-        Start-Sleep -Milliseconds 150
-        [L32]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 80
-        [L32]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero)
-        return
-    }
+function Send-SynthMouse([int]$ax, [int]$ay, [switch]$HoverOnly) {
+    # 合成鼠标消息（WM_MOUSEMOVE/WM_LBUTTONDOWN/UP）送到窗口消息队列。
+    # 与窗口屏幕位置无关：客户区相对坐标在屏外同样有效（方案甲第一级，
+    # 零屏幕暴露）。坐标一律按窗口**当前**位置换算：非屏外模式等同于原逻辑。
+    $cr = New-Object L32+RECT
+    [L32]::GetWindowRect($hwnd, [ref]$cr) | Out-Null
+    $sx = $cr.Left + $ax
+    $sy = $cr.Top + $ay
 
-    # 2) No foreground needed: deliver the click into the window's message queue.
+    # Prefer the real top-most window at the point (Electron/CEF popups may be
+    # separate windows), verifying the process.（屏外时 WindowFromPoint 命中
+    # 不到任何窗口，target 自然落回主窗口。）
     $sp=[L32+POINT]::new(); $sp.X=$sx; $sp.Y=$sy
     $top=[L32]::WindowFromPoint($sp)
     $target=$hwnd
@@ -290,13 +363,171 @@ function Click-At($ax,$ay) {
     $lp=[IntPtr]((($cp.Y -band 0xFFFF)*65536) -bor ($cp.X -band 0xFFFF))
     $res=[IntPtr]::Zero
     [L32]::SendMessageTimeout($target,0x0200,[UIntPtr]::Zero,$lp,0,1000,[ref]$res)|Out-Null
+    $script:LastSynthTarget = $target
+    if ($HoverOnly) { return $true }
     Start-Sleep -Milliseconds 150
     $r1=[L32]::SendMessageTimeout($target,0x0201,[UIntPtr]::new([uint64]1),$lp,0,1500,[ref]$res)
     Start-Sleep -Milliseconds 90
     $r2=[L32]::SendMessageTimeout($target,0x0202,[UIntPtr]::Zero,$lp,0,1500,[ref]$res)
-    if($r1 -ne [IntPtr]::Zero -and $r2 -ne [IntPtr]::Zero){ return }
+    return ($r1 -ne [IntPtr]::Zero -and $r2 -ne [IntPtr]::Zero)
+}
 
-    # 3) Last resort: real cursor input anyway.
+function Send-SynthEsc {
+    # ESC 的屏外等价物：SendKeys/keybd_event 会落到用户的前台窗口，绝不能发；
+    # WM_KEYDOWN/UP 直投客户端消息队列，与位置无关。
+    $res = [IntPtr]::Zero
+    [L32]::SendMessageTimeout($hwnd, 0x0100, [UIntPtr]::new([uint64]0x1B), [IntPtr]::Zero, 0, 1000, [ref]$res) | Out-Null
+    Start-Sleep -Milliseconds 60
+    [L32]::SendMessageTimeout($hwnd, 0x0101, [UIntPtr]::new([uint64]0x1B), [IntPtr]::Zero, 0, 1000, [ref]$res) | Out-Null
+}
+
+function Invoke-AtPoint([int]$ax, [int]$ay) {
+    # 方案甲 M2（第二级）：UIA InvokePattern。COM 与窗口位置无关，屏外也能
+    # Invoke。找 BoundingRectangle 包含目标点且支持 Invoke 的最小元素。
+    # 任何异常都视为「找不到」——调用方继续走 BringBack-Click（R5：Invoke
+    # 后是否真点中，由原有点击后判据 OCR 复核裁定，这里不做任何重试）。
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction SilentlyContinue
+        $cr = New-Object L32+RECT
+        [L32]::GetWindowRect($hwnd, [ref]$cr) | Out-Null
+        $px = $cr.Left + $ax
+        $py = $cr.Top + $ay
+        $rootEl = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+        if (-not $rootEl) { return $false }
+        $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+        $best = $null
+        $bestArea = [double]::MaxValue
+        $budget = 2000
+        $stack = New-Object System.Collections.Stack
+        $stack.Push($rootEl)
+        while ($stack.Count -gt 0 -and $budget -gt 0) {
+            $el = $stack.Pop()
+            $budget--
+            if (-not $el) { continue }
+            try {
+                $rc = $el.Current.BoundingRectangle
+                if ($rc.Width -le 0 -or $rc.Height -le 0) { continue }
+                if ($px -lt $rc.Left -or $px -ge $rc.Right -or $py -lt $rc.Top -or $py -ge $rc.Bottom) { continue }
+                $area = $rc.Width * $rc.Height
+                $pat = $null
+                if ($area -lt $bestArea -and $el.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pat)) {
+                    $best = $el
+                    $bestArea = $area
+                }
+                $kid = $walker.GetFirstChild($el)
+                while ($kid -and $budget -gt 0) {
+                    $stack.Push($kid)
+                    $kid = $walker.GetNextSibling($kid)
+                }
+            } catch { }
+        }
+        if (-not $best) { Log ("uia: no invokable element @ " + $ax + "," + $ay); return $false }
+        $pat2 = $null
+        if (-not $best.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pat2)) { return $false }
+        ([System.Windows.Automation.InvokePattern]$pat2).Invoke()
+        Log ("uia: invoked '" + $best.Current.Name + "' @ " + $ax + "," + $ay)
+        return $true
+    } catch {
+        Log ("uia: " + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Test-ClickVisible([int]$cx, [int]$cy) {
+    # 项目铁律 4 反遮挡（R3）：点击点上最顶层的窗口必须属于客户端进程，
+    # 否则真实点击会落到别人的窗口上。
+    $sp = [L32+POINT]::new()
+    $sp.X = $cx
+    $sp.Y = $cy
+    $top = [L32]::WindowFromPoint($sp)
+    if ($top -eq [IntPtr]::Zero) { return $false }
+    $pidTop = [uint32]0
+    [L32]::GetWindowThreadProcessId($top, [ref]$pidTop) | Out-Null
+    $pidMain = [uint32]0
+    [L32]::GetWindowThreadProcessId($hwnd, [ref]$pidMain) | Out-Null
+    return ($pidTop -eq $pidMain)
+}
+
+function BringBack-Click([int]$ax, [int]$ay) {
+    # 方案甲 M3（第三级）：窗口移回点击位 → 保存光标 → 真实点击 → 恢复光标
+    # → 移回屏外。点击位默认原位，被遮挡则试 (0,0)，再不行放弃（pending 由
+    # 后继判据裁定，不重试——SAFETY 第 3 条）。
+    $spots = @(@($winX, $winY), @(0, 0))
+    $placed = $false
+    $cx = 0
+    $cy = 0
+    foreach ($s in $spots) {
+        [void][L32]::SetWindowPos($hwnd, [IntPtr]::Zero, $s[0], $s[1], 0, 0, 0x0015)
+        Start-Sleep -Milliseconds 300
+        $cx = $s[0] + $ax
+        $cy = $s[1] + $ay
+        if (Test-ClickVisible $cx $cy) { $placed = $true; break }
+        Log ("bringback: spot " + $s[0] + "," + $s[1] + " 被遮挡")
+    }
+    if (-not $placed) {
+        Log "bringback: 两个点击位都被遮挡，跳过真实点击"
+        Move-OffscreenNow
+        return
+    }
+    $saved = [L32+POINT]::new()
+    [L32]::GetCursorPos([ref]$saved) | Out-Null
+    try {
+        [void][L32]::SetCursorPos($cx, $cy)
+        Start-Sleep -Milliseconds 120
+        [L32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+        [L32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        Log ("bringback: real click @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+    } finally {
+        # R4：任何异常路径都要恢复光标并重新停到屏外
+        [void][L32]::SetCursorPos($saved.X, $saved.Y)
+        $now = [L32+POINT]::new()
+        [L32]::GetCursorPos([ref]$now) | Out-Null
+        # A3 断言：点击前后 GetCursorPos 一致
+        Log ("bringback: cursor restored " + $now.X + "," + $now.Y + " (expect " + $saved.X + "," + $saved.Y + ")")
+        Move-OffscreenNow
+    }
+}
+
+function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth) {
+    $cr = New-Object L32+RECT
+    [L32]::GetWindowRect($hwnd, [ref]$cr) | Out-Null
+    $sx = $cr.Left + $ax
+    $sy = $cr.Top + $ay
+
+    # 1) Already in front -> real input injection (most reliable).
+    #    （屏外模式不走这条：窗口永不抢前台，且屏外坐标不能直接真实点击。）
+    if (-not $Offscreen -and [L32]::GetForegroundWindow() -eq $hwnd) {
+        [void][L32]::SetCursorPos($sx,$sy)
+        Start-Sleep -Milliseconds 150
+        [L32]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 80
+        [L32]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero)
+        return
+    }
+
+    # 2) No foreground needed: deliver the click into the window's message queue.
+    #    屏外模式下这是第一级（与位置无关，零暴露）；对真正的动作按钮无效是
+    #    已知事实，调用方对那类点击传 -SkipSynth 直接走 UIA → 移回真实点击。
+    if (-not $SkipSynth) {
+        $msgOk = Send-SynthMouse $ax $ay
+        $mode = 'msg-fail'
+        if ($msgOk) { $mode = 'msg-ok' }
+        try {
+            $line = "$(Get-Date -Format HH:mm:ss) mode=$mode target=$($script:LastSynthTarget) ax=$ax ay=$ay win=" + $winW + "x" + $winH + "`n"
+            [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $line)
+        } catch { }
+        if ($msgOk) { return }
+    }
+
+    if ($Offscreen) {
+        # 3) UIA InvokePattern（与位置无关）；4) 移回屏内一次真实点击。
+        if (Invoke-AtPoint $ax $ay) { return }
+        BringBack-Click $ax $ay
+        return
+    }
+
+    # 3) Last resort: real cursor input anyway（非屏外旧行为）.
     [void][L32]::SetCursorPos($sx,$sy)
     Start-Sleep -Milliseconds 150
     [L32]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero)
@@ -325,7 +556,13 @@ function Dismiss-Ads {
     foreach($l in $cap){ if($l.text -match '新用户专享|立即解锁|自动续订|专享'){ if($null -eq $adLine -or $l.y -lt $adLine.y){ $adLine=$l } } }
     if(-not $adLine){ return $false }
     Log ("ad modal detected: "+$adLine.text)
-    try { $ws=New-Object -ComObject WScript.Shell; $ws.SendKeys("{ESC}") } catch { }
+    # 屏外模式下 SendKeys 的 ESC 会落到用户的前台窗口（方案甲：绝不打扰），
+    # 改用合成 ESC 直投客户端消息队列。
+    if ($Offscreen) {
+        try { Send-SynthEsc } catch { }
+    } else {
+        try { $ws=New-Object -ComObject WScript.Shell; $ws.SendKeys("{ESC}") } catch { }
+    }
     Start-Sleep -Milliseconds 1500
     $cap2 = Get-OcrLines ""
     $still=$false
@@ -374,7 +611,7 @@ foreach($l in $lines){ [void]$out.Add("LINE | "+$l.text+" | "+$l.x+","+$l.y+" "+
 [System.IO.File]::WriteAllText($ocrPath,($out -join "`n"),(New-Object System.Text.UTF8Encoding($false)))
 Log ("OCR lines="+$out.Count)
 
-if($Explore){ Log "EXPLORE done (no click)"; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"explored","detail":"layout only"}',(New-Object System.Text.UTF8Encoding($false))) } exit 0 }
+if($Explore){ Log "EXPLORE done (no click)"; Restore-OriginalRect; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"explored","detail":"layout only"}',(New-Object System.Text.UTF8Encoding($false))) } exit 0 }
 
 # --- user-bar locator ----------------------------------------------------
 # 2026-10-08 事故：原选择器是 `x<15%W 且 y>80%H 取第一条`。面板展开时该区域
@@ -413,7 +650,8 @@ function Test-PanelOpen($lines) {
 # Phase-2 only: never launches/closes anything else, safe to run repeatedly
 # against an already-open client (no extra UAC beyond this run's elevation).
 if($Verify){
-    Ensure-Foreground
+    # 屏外模式下抢前台无收益且打扰用户焦点（方案甲），直接跳过
+    if (-not $Offscreen) { Ensure-Foreground }
     [void](Dismiss-Ads)
     $lines = Get-OcrLines $shotPath
     $panelOpen = Test-PanelOpen $lines
@@ -444,11 +682,13 @@ if($Verify){
     }
     if($verdict -eq "claimed"){
         Log ("VERIFY claimed: "+$hit)
+        Restore-OriginalRect
         if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"ok","detail":"verify: '+$hit+'"}',(New-Object System.Text.UTF8Encoding($false))) }
         exit 0
     }
     if($unclaimed){
         Log ("VERIFY unclaimed: panel still shows the claim button")
+        Restore-OriginalRect
         if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"unclaimed","detail":"claim button still shown"}',(New-Object System.Text.UTF8Encoding($false))) }
         exit 2
     }
@@ -457,6 +697,7 @@ if($Verify){
     # -> 00:27 on 2026-09-28: 1000 -> 1100 with the button gone.
     if($giftRow){
         Log ("VERIFY claimed: gift row present but claim button gone")
+        Restore-OriginalRect
         if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"ok","detail":"claim button gone from gift row"}',(New-Object System.Text.UTF8Encoding($false))) }
         exit 0
     }
@@ -469,7 +710,8 @@ if($Verify){
 # Path A (preferred, found 2026-09-28): expand the bottom-left user panel; it
 # always lists "每日积分礼" with either "立即领取" (unclaimed) or "今日已领"
 # (claimed). More reliable than the top-right card, which comes and goes.
-Ensure-Foreground
+# 屏外模式下抢前台无收益且打扰用户焦点（方案甲），直接跳过
+if (-not $Offscreen) { Ensure-Foreground }
 [void](Dismiss-Ads)
 $lines = Get-OcrLines $shotPath
 
@@ -519,7 +761,8 @@ if($chip){
         if($chipBtn){
             $bx3=$chipBtn.x+[int]($chipBtn.w/2); $by3=$chipBtn.y+[int]($chipBtn.h/2)
             Log ("click chip claim btn '"+$chipBtn.text+"' at "+$bx3+","+$by3)
-            Click-At $bx3 $by3
+            # -SkipSynth：合成消息对真正动作按钮无效是实证事实，直接 UIA → 移回真实点击
+            Click-At $bx3 $by3 -SkipSynth
             foreach($d2 in @(2000,2500)){
                 Start-Sleep -Milliseconds $d2
                 $f = Get-OcrLines ""
@@ -577,7 +820,8 @@ if($alreadyHit){ Log ("already: "+$alreadyHit.text); Close-LaunchedApp; if($OutF
 if($claimBtn){
     $cx2=$claimBtn.x+[int]($claimBtn.w/2); $cy2=$claimBtn.y+[int]($claimBtn.h/2)
     Log ("click panel claim btn '"+$claimBtn.text+"' at "+$cx2+","+$cy2)
-    Click-At $cx2 $cy2
+    # -SkipSynth：合成消息对真正动作按钮无效是实证事实，直接 UIA → 移回真实点击
+    Click-At $cx2 $cy2 -SkipSynth
     $okHit=$null
     foreach($delay in @(2000,2500,3000)){
         Start-Sleep -Milliseconds $delay
@@ -624,7 +868,8 @@ if($anchor){
     if($foundBtn){
         $bx2=$foundBtn.x+[int]($foundBtn.w/2); $by2=$foundBtn.y+[int]($foundBtn.h/2)
         Log ("click card claim btn '"+$foundBtn.text+"' at "+$bx2+","+$by2)
-        Click-At $bx2 $by2
+        # -SkipSynth：合成消息对真正动作按钮无效是实证事实，直接 UIA → 移回真实点击
+        Click-At $bx2 $by2 -SkipSynth
         $okHit2=$null
         foreach($delay in @(2000,2500,3000)){
             Start-Sleep -Milliseconds $delay
@@ -639,4 +884,8 @@ if($anchor){
 Log "no claim path worked"
 Restore-Scene; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"pending","detail":"no claim path worked"}',(New-Object System.Text.UTF8Encoding($false))) }
 exit 2
-} catch { Log ("ERROR: "+$_.Exception.Message) }
+} catch {
+    # 方案甲：异常路径也不能把窗口留在屏外（A5），尽力恢复后再退出
+    try { Restore-OriginalRect } catch { }
+    Log ("ERROR: "+$_.Exception.Message)
+}

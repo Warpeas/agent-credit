@@ -959,7 +959,11 @@ function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth) {
 
     if ($Offscreen) {
         # 3) UIA InvokePattern（与位置无关）；4) 移回屏内一次真实点击。
-        if (Invoke-AtPoint $ax $ay) { return }
+        # 不能直接 if (Invoke-AtPoint ...)：函数里的 Log 走输出流，失败时会返回
+        # 「日志字符串 + $false」的非空数组，被当成真 -> 兜底真实点击永远不执行
+        # （2026-10-22 实锤：菜单被点关但余额不变，且日志无 bringback 记录）。
+        $uiaOut = @(Invoke-AtPoint $ax $ay)
+        if ($uiaOut -contains $true) { return }
         BringBack-Click $ax $ay
         return
     }

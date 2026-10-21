@@ -522,7 +522,9 @@ function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth) {
 
     if ($Offscreen) {
         # 3) UIA InvokePattern（与位置无关）；4) 移回屏内一次真实点击。
-        if (Invoke-AtPoint $ax $ay) { return }
+        # Log 走输出流：失败时返回「日志+$false」非空数组会被判真（2026-10-22 实锤）
+        $uiaOut = @(Invoke-AtPoint $ax $ay)
+        if ($uiaOut -contains $true) { return }
         BringBack-Click $ax $ay
         return
     }

@@ -663,7 +663,11 @@ function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth, [switch]$SkipUia) {
         # 3) UIA InvokePattern（与位置无关）；4) 移回屏内一次真实点击。
         #    -SkipUia：AutoClaw 的 CEF a11y 树被禁用（见 ui_claim.py 注释），
         #    调用方可跳过这一级直接走 BringBack-Click。
-        if (-not $SkipUia) { if (Invoke-AtPoint $ax $ay) { return } }
+        if (-not $SkipUia) {
+            # Log 走输出流：失败时返回「日志+$false」非空数组会被判真（2026-10-22 实锤）
+            $uiaOut = @(Invoke-AtPoint $ax $ay)
+            if ($uiaOut -contains $true) { return }
+        }
         BringBack-Click $ax $ay
         return
     }
@@ -743,6 +747,7 @@ if (-not $anchor) {
     # 只等一轮 6 秒会在「页面已切换、卡片还没到」时误判成找不到入口。
     $anchor = $null
     $samePageChecked = $false
+    $entryRetried = $false
     foreach ($round in 1..6) {
         Start-Sleep -Seconds 5
         Close-AdOverlays
@@ -751,6 +756,15 @@ if (-not $anchor) {
         if (-not $samePageChecked) {
             $samePageChecked = $true
             if (Test-SamePage $beforeSig $lines) {
+                if (-not $entryRetried) {
+                    # 合成消息对导航不生效（2026-10-22 v2.1.0 实测），移回窗口真实点一次。
+                    # 不走 UIA：CEF a11y 被禁用，Invoke 必失败。
+                    $entryRetried = $true
+                    Log "step: 入口点击未生效，改真实点击重试一次"
+                    Click-At ($entry.x + [int]($entry.w / 2)) ($entry.y + [int]($entry.h / 2)) -SkipSynth -SkipUia
+                    $samePageChecked = $false
+                    continue
+                }
                 Dump-Ocr $lines "pending-点入口后页面无变化"
                 Out-Json "pending" ("点击「" + $entry.text + "」后页面无变化：点击未生效。未提权时输入会被 UIPI 丢弃，请用 scripts\run_claim_only.py（ShellExecuteW runas）提权跑")
             }

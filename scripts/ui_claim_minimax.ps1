@@ -783,7 +783,11 @@ function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth, [switch]$SkipUia) {
         # 3) UIA InvokePattern（与位置无关）；4) 移回屏内一次真实点击。
         #    -SkipUia：MiniMax 前端过滤 isTrusted=false 的 InvokePattern
         #    （见 agent_credit/ui_claim.py 注释），调用方可跳过这一级。
-        if (-not $SkipUia) { if (Invoke-AtPoint $ax $ay) { return } }
+        if (-not $SkipUia) {
+            # Log 走输出流：失败时返回「日志+$false」非空数组会被判真（2026-10-22 实锤）
+            $uiaOut = @(Invoke-AtPoint $ax $ay)
+            if ($uiaOut -contains $true) { return }
+        }
         BringBack-Click $ax $ay
         return
     }

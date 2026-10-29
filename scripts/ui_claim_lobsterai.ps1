@@ -198,11 +198,49 @@ function Find-ByTitle {
     return $script:TBest
 }
 
+function Restore-HiddenAppWindow($pids) {
+    # 2026-10-29：关到托盘时主窗口 WS_VISIBLE=off，Find-AppWindow 只认可见窗口，
+    # 旧流程会误判「没开」并再拉起一个实例。先把最大的隐藏主窗口还原。
+    if($pids.Count -eq 0){ return [IntPtr]::Zero }
+    $script:RHwnd=[IntPtr]::Zero; $script:RArea=0
+    $cb=[L32+EnumProc]{
+        param($h,$lp)
+        $o=[uint32]0; [L32]::GetWindowThreadProcessId($h,[ref]$o)|Out-Null
+        if($pids.ContainsKey($o)){
+            if([L32]::IsWindowVisible($h)){ return $true }
+            $r=New-Object L32+RECT; [L32]::GetWindowRect($h,[ref]$r)|Out-Null
+            $w=$r.Right-$r.Left; $hh=$r.Bottom-$r.Top
+            if($w -le 500 -or $hh -le 400){ return $true }
+            $sb=New-Object System.Text.StringBuilder 256
+            [L32]::GetWindowText($h,$sb,256)|Out-Null
+            if([string]::IsNullOrWhiteSpace($sb.ToString())){ return $true }
+            $cn=New-Object System.Text.StringBuilder 256
+            [L32]::GetClassName($h,$cn,256)|Out-Null
+            if($cn.ToString() -eq 'Chrome_WidgetWin_0'){ return $true }
+            if(($w*$hh) -gt $script:RArea){ $script:RArea=$w*$hh; $script:RHwnd=$h }
+        }
+        return $true
+    }
+    [L32]::EnumWindows($cb,[IntPtr]::Zero)|Out-Null
+    if($script:RHwnd -eq [IntPtr]::Zero){ return [IntPtr]::Zero }
+    Log ("main window hidden (tray?); restoring hwnd="+$script:RHwnd)
+    [void][L32]::ShowWindow($script:RHwnd,9)
+    Start-Sleep -Milliseconds 900
+    return $script:RHwnd
+}
+
 $pidSet = Get-PidSet
 $script:LaunchedByUs = $false
 Log ("preexisting procs="+$pidSet.Count)
 $hwnd=[IntPtr]::Zero
 if($pidSet.Count -gt 0){ $hwnd = Find-AppWindow $pidSet; Log ("existing window="+$hwnd) }
+if($hwnd -eq [IntPtr]::Zero -and $pidSet.Count -gt 0){
+    $restored = Restore-HiddenAppWindow $pidSet
+    if($restored -ne [IntPtr]::Zero){
+        $hwnd = Find-AppWindow $pidSet
+        Log ("after hidden-window restore, window="+$hwnd)
+    }
+}
 
 if($hwnd -eq [IntPtr]::Zero -and $NoLaunch){
     Log "NoLaunch set and app not running"
@@ -457,8 +495,12 @@ function BringBack-Click([int]$ax, [int]$ay) {
     $placed = $false
     $cx = 0
     $cy = 0
+    # 2026-10-25：移回屏内时临时提为 TOPMOST（0x0011=NOSIZE|NOACTIVATE，不抢焦点），
+    # 否则主人前台有窗口时点击位顶层永远是别人的窗口，两个落点都被 R3 拦下，
+    # 真实点击根本发不出去（10-25 00:09 本机实测：chip 只发了合成消息，msg-ok 但
+    # 界面毫无反应，后续 panel 路径也读不到「立即领取」）。点完立刻降回。
     foreach ($s in $spots) {
-        [void][L32]::SetWindowPos($hwnd, [IntPtr]::Zero, $s[0], $s[1], 0, 0, 0x0015)
+        [void][L32]::SetWindowPos($hwnd, [IntPtr](-1), $s[0], $s[1], 0, 0, 0x0011)
         Start-Sleep -Milliseconds 300
         $cx = $s[0] + $ax
         $cy = $s[1] + $ay
@@ -467,11 +509,18 @@ function BringBack-Click([int]$ax, [int]$ay) {
     }
     if (-not $placed) {
         Log "bringback: 两个点击位都被遮挡，跳过真实点击"
+        [void][L32]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x0013)
         Move-OffscreenNow
         return
     }
     $saved = [L32+POINT]::new()
     [L32]::GetCursorPos([ref]$saved) | Out-Null
+    # 2026-10-25：与 Trae 同一坑——窗口未激活时 Chromium/React 可能吞掉第一次真实
+    # 点击（只完成激活）。chip / 用户栏都是动作入口，点击前显式抢一次前台，
+    # 点完 Restore-Foreground 还给主人。
+    Save-Foreground
+    try { [void](Ensure-Foreground) } catch { }
+    Start-Sleep -Milliseconds 150
     try {
         [void][L32]::SetCursorPos($cx, $cy)
         Start-Sleep -Milliseconds 120
@@ -485,6 +534,10 @@ function BringBack-Click([int]$ax, [int]$ay) {
         [L32]::GetCursorPos([ref]$now) | Out-Null
         # A3 断言：点击前后 GetCursorPos 一致
         Log ("bringback: cursor restored " + $now.X + "," + $now.Y + " (expect " + $saved.X + "," + $saved.Y + ")")
+        # 摘掉 TOPMOST（0x0013=NOSIZE|NOMOVE|NOACTIVATE），否则窗口回屏内后会一直钉在最上层
+        [void][L32]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x0013)
+        # 把前台还给主人原来的窗口，再回屏外
+        Restore-Foreground
         Move-OffscreenNow
     }
 }
@@ -742,7 +795,12 @@ Log ("gift chip wait: " + $(if($chip){ "found '"+$chip.text+"'" } else { "NOT FO
 if($chip){
     $gx=$chip.x+[int]($chip.w/2); $gy=$chip.y+[int]($chip.h/2)
     Log ("top-right gift chip '"+$chip.text+"' at "+$gx+","+$gy)
-    Click-At $gx $gy
+    # 2026-10-25：这里原来用默认 Click-At，合成消息只要投递成功就 return（msg-ok），
+    # 但界面毫无反应——10-24/10-25 连续两天 chip1..3 都是同一帧、没有「立即领取」。
+    # chip 是真正的动作入口，必须走真实点击（-SkipSynth → UIA → BringBack）；
+    # UIA 若只是「找到并 Invoke 成功」也可能不触发 React onClick，屏外模式直接
+    # 用 BringBack 真点，和 AutoClaw 的签到按钮同一口径。
+    if ($Offscreen) { BringBack-Click $gx $gy } else { Click-At $gx $gy -SkipSynth }
     $ci=0
     foreach($delay in @(1500,2000,2500)){
         Start-Sleep -Milliseconds $delay
@@ -801,7 +859,9 @@ if(Test-PanelOpen $lines){
 } elseif($bar){
     $bx=$bar.x+[int]($bar.w/2); $by=$bar.y+[int]($bar.h/2)
     Log ("open user panel '"+$bar.text+"' at "+$bx+","+$by)
-    Click-At $bx $by
+    # 2026-10-25：同 chip，合成消息 msg-ok 但面板并未展开（OCR 只多了首页静态卡片），
+    # 走真实点击。
+    if ($Offscreen) { BringBack-Click $bx $by } else { Click-At $bx $by -SkipSynth }
     $pi=0
     foreach($delay in @(1500,2000)){
         Start-Sleep -Milliseconds $delay
@@ -856,7 +916,7 @@ if(-not $anchor){ foreach($l in $lines){ if($l.text -match '积分礼'){ $anchor
 if($anchor){
     $ax=$anchor.x+[int]($anchor.w/2); $ay=$anchor.y+[int]($anchor.h/2)
     Log ("fallback: click top-right card '"+$anchor.text+"' at "+$ax+","+$ay)
-    Click-At $ax $ay
+    if ($Offscreen) { BringBack-Click $ax $ay } else { Click-At $ax $ay -SkipSynth }
     $foundBtn=$null; $foundAlready=$null; $fi=0
     foreach($delay in @(1500,2000,2500)){
         Start-Sleep -Milliseconds $delay

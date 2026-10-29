@@ -3,7 +3,7 @@
 
 端点与鉴权全部由本机 app.asar 逆向得到（见 research/answers/lobsterai.md）：
   host   https://lobsterai-server.youdao.com
-  槽位   GET  /api/client-activities/slot?placement=...&clientVersion=...&containerApiVersion=1&platform=win32
+  槽位   GET  /api/client-activities/slot?placement=...&clientVersion=<app version>&containerApiVersion=2|3&platform=win32
   上下文 GET  /api/client-activities/{activityCode}/context?configRevision=N
   领取   POST /api/client-activities/{activityCode}/actions/check_in
   鉴权   Authorization: Bearer <accessToken>
@@ -14,29 +14,53 @@
 用法：
     python vendor/lobsterai-auto-signin/signin.py status   # 只读查询
     python vendor/lobsterai-auto-signin/signin.py auto     # 有活动就领
-退出码：0 成功或已领；2 无可领活动（服务端未下发）；1 失败
+退出码：0 成功或已领；2 无可领活动（槽位为空）；1 失败
 """
 from __future__ import annotations
 
 import os
 import json
 import sqlite3
+import struct
 import sys
+import uuid
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 DB = Path(os.environ["APPDATA"]) / "LobsterAI" / "lobsterai.sqlite"
+APP_ASAR = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "LobsterAI" / "resources" / "app.asar"
 HOST = "https://lobsterai-server.youdao.com"
 PLACEMENTS = ["desktop_sidebar", "desktop_startup_modal"]
-CLIENT_VERSION = "1.0.0"   # 实测服务端不校验（0.0.0 也返回 code 0）
-CONTAINER_API_VERSION = 1
+CONTAINER_API_VERSION = {
+    "desktop_sidebar": 2,       # ActivityContainerApiVersion.NativeDailyCheckInV1
+    "desktop_startup_modal": 3, # ActivityContainerApiVersion.NativeStartupCreditV1
+}
 PLATFORM = "win32"
-DAILY_CHECK_IN_CODE = "daily_check_in"
+DAILY_CHECK_IN_TYPE = "daily_check_in"
 CHECK_IN_ACTION = "check_in"
 TIMEOUT = 30
 
 _token_cache: str | None = None
+_version_cache: str | None = None
+
+
+def client_version() -> str:
+    """Read the installed LobsterAI version from app.asar/package.json."""
+    global _version_cache
+    if _version_cache:
+        return _version_cache
+    try:
+        with APP_ASAR.open("rb") as fh:
+            header = fh.read(16)
+            header_size = struct.unpack("<I", header[12:16])[0]
+            tree = json.loads(fh.read(header_size).decode("utf-8", "replace"))
+            entry = tree["files"]["package.json"]
+            fh.seek(16 + header_size + int(entry["offset"]))
+            _version_cache = str(json.loads(fh.read(int(entry["size"])).decode("utf-8", "replace"))["version"])
+            return _version_cache
+    except Exception:  # noqa: BLE001
+        return "0.0.0"
 
 
 def token() -> str:
@@ -95,8 +119,8 @@ def mask(text: str) -> str:
 def slot_query(placement: str) -> str:
     return (
         f"/api/client-activities/slot?placement={placement}"
-        f"&clientVersion={CLIENT_VERSION}"
-        f"&containerApiVersion={CONTAINER_API_VERSION}&platform={PLATFORM}"
+        f"&clientVersion={client_version()}"
+        f"&containerApiVersion={CONTAINER_API_VERSION.get(placement, 2)}&platform={PLATFORM}"
     )
 
 
@@ -125,10 +149,23 @@ def cmd_status() -> int:
         code, body = call(slot_query(PLACEMENTS[0]))
         print(f"[status] HTTP {code}")
         print(mask(body))
-        print("[no-activity] 服务端当前未下发签到活动（slotState=empty），无需领取")
+        print("[no-activity] 当前槽位为空（slotState=empty），无需领取")
         return 2
     print(f"[status] 活动: {act.get('activityCode')} rev={act.get('configRevision')} "
-          f"state={act.get('lifecycleState')} placement={act.get('_placement')}")
+          f"placement={act.get('_placement')}")
+    rev = act.get("configRevision")
+    if rev:
+        code, body = call(f"/api/client-activities/{act.get('activityCode')}/context?configRevision={rev}")
+        try:
+            data = json.loads(body).get("data") or {}
+            state = data.get("state") or {}
+            print(f"[status] lifecycleState={data.get('lifecycleState')} "
+                  f"claimedToday={state.get('claimedToday')} "
+                  f"rewardCredits={state.get('rewardCredits')} "
+                  f"claimedDays={state.get('claimedDays')} "
+                  f"claimedCredits={state.get('claimedCredits')}")
+        except Exception:  # noqa: BLE001
+            pass
     return 0
 
 
@@ -138,15 +175,15 @@ def cmd_auto() -> int:
         code, body = call(slot_query(PLACEMENTS[0]))
         print(f"[status] HTTP {code}")
         print(mask(body))
-        print("[no-activity] 服务端当前未下发签到活动，未领取")
+        print("[no-activity] 当前槽位为空（slotState=empty），未领取")
         return 2
 
     act_code = act.get("activityCode")
     rev = act.get("configRevision")
     print(f"[activity] {act_code} rev={rev}")
 
-    if act_code != DAILY_CHECK_IN_CODE:
-        print(f"[skip] 当前活动不是每日签到（{act_code}），未领取")
+    if act.get("activityType") != DAILY_CHECK_IN_TYPE:
+        print(f"[skip] 当前活动不是每日签到（type={act.get('activityType')}），未领取")
         return 2
 
     # 上下文：拿 actions 与已领状态
@@ -165,7 +202,11 @@ def cmd_auto() -> int:
     c2, b2 = call(
         f"/api/client-activities/{act_code}/actions/{CHECK_IN_ACTION}",
         method="POST",
-        body={},
+        body={
+            "configRevision": rev,
+            "idempotencyKey": str(uuid.uuid4()),
+            "payload": {},
+        },
     )
     print(f"[claim] HTTP {c2}")
     print(mask(b2))

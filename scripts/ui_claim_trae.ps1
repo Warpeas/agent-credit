@@ -23,8 +23,15 @@ param(
     # 方案甲（2026-10-21 拍板）：签到全程把窗口停到屏外——识别走 PrintWindow
     # （对屏外窗口有效），点击分三级：合成消息 → UIA Invoke → 移回屏内真实点击
     # （光标保存/恢复，暴露面 ~100ms）。传 -Offscreen:$false 退回旧行为。
-    [bool]$Offscreen = $true
+    [bool]$Offscreen = $true,
+    # 前台模式：计划任务参数里传 -Offscreen 0 易踩解析坑，改用无值开关。
+    [switch]$Foreground,
+    # 前台补签的空闲闸门：用户仍在用电脑就等待，超时仍活跃则放弃本次补签，
+    # 绝不为了补 100 积分抢前台/移窗口。仅 -Foreground 时生效。
+    [int]$IdleWaitSec = 300,
+    [int]$IdleThresholdSec = 60
 )
+if ($Foreground) { $Offscreen = $false }
 $root = Split-Path -Parent $PSScriptRoot
 $logPath = "$root\logs\ps1_trae.log"
 function Log($m){ $s=(Get-Date -Format "HH:mm:ss")+" "+$m; try{[System.IO.File]::AppendAllText($logPath,$s+"`n",(New-Object System.Text.UTF8Encoding($false)))}catch{}; Write-Output $s }
@@ -76,13 +83,18 @@ public static class Cap32 {
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  // 2026-10-29：最大化窗口 SetWindowPos 移不动；屏外停放前要先 SW_RESTORE。
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
   [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
   [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
   [DllImport("user32.dll")] public static extern IntPtr ChildWindowFromPointEx(IntPtr hWnd, POINT p, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+  [DllImport("kernel32.dll")] public static extern uint GetTickCount();
   public struct RECT { public int Left, Top, Right, Bottom; }
   public struct POINT { public int X, Y; }
+  public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
   public delegate bool EnumProc(IntPtr hWnd, IntPtr lp);
 }
 "@
@@ -105,6 +117,9 @@ function Await($WinRtOp, $ResultType) {
 }
 
 $script:SavedForeground = [IntPtr]::Zero
+# BringBack-Click 专用：移回屏内时临时提到最前 / 点完降回（2026-10-24）。
+$script:HWND_TOPMOST = New-Object System.IntPtr(-1)
+$script:HWND_NOTOPMOST = New-Object System.IntPtr(-2)
 # 方案甲 M1/M4 必须定义在任何调用点之前（本脚本函数是顺序生效的：
 # trap/Out-Json/屏外停放都可能在文件中后部函数定义执行前触发）。
 function Move-OffscreenNow {
@@ -124,6 +139,11 @@ function Restore-OriginalRect {
     if (-not $script:OriginalRect) { return }
     if ($hwnd -eq [IntPtr]::Zero) { return }
     try {
+        if ($script:WasZoomed) {
+            [Cap32]::ShowWindow($hwnd, 3) | Out-Null   # SW_MAXIMIZE
+            Log "restore-rect: maximized (was zoomed)"
+            return
+        }
         $r = $script:OriginalRect
         [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top, 0, 0, 0x0015) | Out-Null
         $chk = New-Object Cap32+RECT
@@ -144,6 +164,35 @@ function Restore-Foreground {
             [Cap32]::SetForegroundWindow($script:SavedForeground) | Out-Null
         }
     } catch { }
+}
+
+function Get-IdleSeconds {
+    $li = New-Object Cap32+LASTINPUTINFO
+    $li.cbSize = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf($li)
+    if (-not [Cap32]::GetLastInputInfo([ref]$li)) { return 999999 }
+    $tick = [uint32][Cap32]::GetTickCount()
+    return [int]((($tick - $li.dwTime) -band 0xFFFFFFFF) / 1000)
+}
+
+function Wait-ForegroundIdle {
+    # 仅前台补签需要闸门；屏外模式不动前台，不在此等待。
+    # Log 会 Write-Output，必须 [void] 掉，否则返回值被日志污染成数组，
+    # 调用方的 -not 判断失效（2026-10-23 实测：打印了 aborting 却继续跑）。
+    if (-not $Foreground) { return $true }
+    if ($IdleWaitSec -le 0) { return $true }
+    $idle = Get-IdleSeconds
+    if ($idle -ge $IdleThresholdSec) { [void](Log ("idle gate: idle=" + $idle + "s, proceed")); return $true }
+    [void](Log ("idle gate: user active (idle=" + $idle + "s), wait up to " + $IdleWaitSec + "s"))
+    $deadline = (Get-Date).AddSeconds($IdleWaitSec)
+    $lastLog = $idle
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        $idle = Get-IdleSeconds
+        if ($idle -ge $IdleThresholdSec) { [void](Log ("idle gate: idle=" + $idle + "s, proceed")); return $true }
+        if (($idle - $lastLog) -ge 120) { [void](Log ("idle gate: still active (idle=" + $idle + "s)")); $lastLog = $idle }
+    }
+    [void](Log ("idle gate: still active after " + $IdleWaitSec + "s; aborting foreground claim"))
+    return $false
 }
 
 function Out-Json([string]$status, [string]$detail, [int]$Amount = 0) {
@@ -245,6 +294,7 @@ function Find-TargetWindow {
     # MainWindowHandle 会指向 tiny helper popup，所以仍需枚举。
     $script:BestHwnd = [IntPtr]::Zero
     $script:BestArea = 0
+    $script:HiddenCands = New-Object System.Collections.ArrayList
     $script:WinProbe = New-Object System.Collections.ArrayList
     $pidSet = @{}
     Get-Process -Name $ProcessName -ErrorAction SilentlyContinue | ForEach-Object { $pidSet[[uint32]$_.Id] = $true }
@@ -273,11 +323,35 @@ function Find-TargetWindow {
                     $script:BestArea = $w * $hh
                 }
             }
+            # 2026-10-29：关到托盘时主窗口是隐藏的（WS_VISIBLE=off），但 rect/标题
+            # 都在。单独记下来，找不到可见窗口时由 Restore-HiddenTraeWindow 还原。
+            if ((-not $vis) -and $big -and $cls -eq 'Chrome_WidgetWin_1' -and $title -and $title.Trim()) {
+                [void]$script:HiddenCands.Add([pscustomobject]@{
+                    H = $h; Title = $title; Area = ($w * $hh); W = $w; HH = $hh })
+            }
         }
         return $true
     }
     [Cap32]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
     return $script:BestHwnd
+}
+
+function Restore-HiddenTraeWindow {
+    # 关到托盘后主窗口 WS_VISIBLE=off，旧逻辑只认可见窗口，于是白等 60 秒。
+    # 这里把刚枚举到的最大隐藏主窗口 SW_RESTORE 回来，再让调用方重新枚举。
+    if (-not $script:HiddenCands -or $script:HiddenCands.Count -eq 0) { return [IntPtr]::Zero }
+    $best = $script:HiddenCands | Sort-Object Area -Descending | Select-Object -First 1
+    # ShowWindow(9) 会把最大化窗口变成还原态；记下来，收尾时最大化回去。
+    if ([Cap32]::IsZoomed($best.H)) { $script:WasZoomed = $true }
+    Log ("main window hidden (tray?); restoring hwnd=" + $best.H + " title='" + $best.Title + "'")
+    [Cap32]::ShowWindow($best.H, 9) | Out-Null   # SW_RESTORE
+    Start-Sleep -Milliseconds 900
+    return $best.H
+}
+
+# 前台补签的空闲闸门：在枚举/移动窗口之前，用户活跃就留 pending。
+if (-not (Wait-ForegroundIdle)) {
+    Out-Json "pending" ("用户正在使用电脑（空闲 < " + $IdleThresholdSec + "s），已取消前台补签；未枚举/移动/点击窗口，等空闲后再试")
 }
 
 $script:LaunchedByUs = $false
@@ -292,6 +366,15 @@ try {
         (($script:WinProbe | ForEach-Object { "  $_" }) -join "`n") + "`n")
 } catch { }
 
+if ($hwnd -eq [IntPtr]::Zero) {
+    # 2026-10-29：先尝试把托盘里的主窗口还原，成功就重新枚举；还原失败再走
+    # 原来的「隐藏/托盘 → pending」提示，不误杀主人开着的实例。
+    $restored = Restore-HiddenTraeWindow
+    if ($restored -ne [IntPtr]::Zero) {
+        $hwnd = Find-TargetWindow
+        Log ("after hidden-window restore, target hwnd=" + $hwnd)
+    }
+}
 if ($hwnd -eq [IntPtr]::Zero) {
     # 主窗口被隐藏（Trae 关窗 = 最小化到托盘）时不能当「没开」处理：报 notfound
     # 会误导成「客户端有问题」，实际只要主人把窗口打开就能签。
@@ -415,7 +498,25 @@ $winY = $rect.Top
 # 原 rect（已被 Reset-WindowRect 钳回屏内）存入 $script:OriginalRect，
 # Out-Json 收尾前恢复（M4）；$winX/$winY 保持原位语义，供移回点击用。
 $script:OriginalRect = $null
+# $script:WasZoomed 可能已在 Restore-HiddenTraeWindow 里置位（托盘还原前是最大化）；
+# 这里不能再无条件清零，否则收尾不会最大化回去。
+if ($null -eq $script:WasZoomed) { $script:WasZoomed = $false }
 if ($Offscreen) {
+    # 2026-10-29：最大化窗口 SetWindowPos 移不动。当天 01:36 的失败就是它——
+    # rect 是 -13,-13 3866x2090（最大化），「停到屏外」后整窗仍在屏幕内，
+    # bringback 在 -13,-13 / 0,0 都判成被遮挡，账户条点不开、报「未找到签到入口」。
+    # 先 SW_RESTORE 再停，收尾时按原状态最大化回去（与 Qoder 同一套处理）。
+    if ([Cap32]::IsZoomed($hwnd)) {
+        $script:WasZoomed = $true
+        [Cap32]::ShowWindow($hwnd, 9) | Out-Null
+        Start-Sleep -Milliseconds 2000
+        [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+        $winW = $rect.Right - $rect.Left
+        $winH = $rect.Bottom - $rect.Top
+        $winX = $rect.Left
+        $winY = $rect.Top
+        Log ("window was maximized; restored for offscreen flow rect=$winX,$winY ${winW}x${winH}")
+    }
     $script:OriginalRect = $rect
     Move-OffscreenNow
     Log ("step: 窗口已停到屏外（原 rect " + $winX + "," + $winY + " " + $winW + "x" + $winH + "）")
@@ -651,8 +752,13 @@ function Find-Balance($lines) {
     # 不能锚行首：OCR 经常把账户条整行并成一个文本
     # （实测「．用户712942281“．免费3，527」），余额会跟在用户名后面。
     # 取「第一个含千分位数字的行」里的**最后一个**匹配——账户条上余额在最右。
+    # 2026-10-25：余额只在左侧账户菜单里（实测 @455,1038）。不限制 x 时，聊天区
+    # 的任意数字（「3655,3644」「877,125」之类）会被读成余额，把到账复核带偏；
+    # 10-25 那轮 bal0=877125 就是从对话正文里抓的。
+    $xMax = [int]($winW * 0.35)
     foreach ($l in $lines) {
         if (-not $l.text) { continue }
+        if ($l.x -ge $xMax) { continue }
         $val = -1
         foreach ($m in [regex]::Matches($l.text, '([0-9]{1,3}(?:[，,][0-9]{3})+)')) {
             $val = [int]($m.Groups[1].Value -replace '[，,]', '')
@@ -889,8 +995,14 @@ function BringBack-Click([int]$ax, [int]$ay) {
     $placed = $false
     $cx = 0
     $cy = 0
+    # 2026-10-24 修复：原来移回屏内用 0x0015（含 NOZORDER），窗口维持原 z 序——
+    # 只要停放时它不是最顶层（用户前台有别的窗口，或像 10-24 实测那样窗口本身就
+    # 贴满全屏 3866x2090），点击位顶层永远是别人的窗口，两个落点全被 R3 拦下，
+    # 真实点击根本发不出去。改为移回时临时提为 TOPMOST（0x0011=NOSIZE|NOACTIVATE：
+    # 不抢焦点，曝光仍 ~100ms），点完立刻降回。反遮挡检查保留——raise 后顶层
+    # 必是本进程，过得了 Test-ClickVisible。
     foreach ($s in $spots) {
-        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $s[0], $s[1], 0, 0, 0x0015) | Out-Null
+        [Cap32]::SetWindowPos($hwnd, $script:HWND_TOPMOST, $s[0], $s[1], 0, 0, 0x0011) | Out-Null
         Start-Sleep -Milliseconds 300
         $cx = $s[0] + $ax
         $cy = $s[1] + $ay
@@ -899,9 +1011,17 @@ function BringBack-Click([int]$ax, [int]$ay) {
     }
     if (-not $placed) {
         Log "bringback: 两个点击位都被遮挡，跳过真实点击"
+        [Cap32]::SetWindowPos($hwnd, $script:HWND_NOTOPMOST, 0, 0, 0, 0, 0x0013) | Out-Null
         Move-OffscreenNow
         return
     }
+    # 2026-10-25：窗口不激活时，Chromium/React 会吞掉「第一次」真实点击（只完成
+    # 激活），账户条因此点不开——00:57 前台/屏外两种模式都实测过：点击坐标正确、
+    # 但菜单没出现。TOPMOST 只解决遮挡，不解决激活；这里在点击前显式抢一次前台，
+    # 点完立刻把前台还给主人（Save/Restore-Foreground）。
+    Save-Foreground
+    try { [void](Ensure-Foreground) } catch { }
+    Start-Sleep -Milliseconds 150
     $saved = [Cap32+POINT]::new()
     [Cap32]::GetCursorPos([ref]$saved) | Out-Null
     try {
@@ -917,6 +1037,11 @@ function BringBack-Click([int]$ax, [int]$ay) {
         [Cap32]::GetCursorPos([ref]$now) | Out-Null
         # A3 断言：点击前后 GetCursorPos 一致
         Log ("bringback: cursor restored " + $now.X + "," + $now.Y + " (expect " + $saved.X + "," + $saved.Y + ")")
+        # 摘掉 TOPMOST（0x0013=NOSIZE|NOMOVE|NOACTIVATE），避免窗口日后回屏内
+        # 时一直钉在最上层打扰用户
+        [Cap32]::SetWindowPos($hwnd, $script:HWND_NOTOPMOST, 0, 0, 0, 0, 0x0013) | Out-Null
+        # 把前台还给主人原来的窗口，再回屏外（顺序同 Qoder：先还焦点，再置顶条带）
+        Restore-Foreground
         Move-OffscreenNow
     }
 }
@@ -1064,8 +1189,13 @@ function Test-MenuOpen($lines) {
 function Find-EntryWord($lines, [string[]]$needles) {
     $xMax = [int]($winW * 0.3)
     $menuOpen = Test-MenuOpen $lines
+    # 2026-10-25：Find-WordHit 每个 needle 只返回**第一条**命中行。聊天区顶部的
+    # 对话（「入口已找到每日领…」）在 OCR 顺序里先于左下菜单，x 检查把它 skip 后
+    # 就再没机会看到菜单里的「每日领100积分」→ 菜单明明开了仍报「未找到入口」。
+    # 先把候选限定在左 30%（菜单/侧栏都在这里），再让 Find-WordHit 找。
+    $left = @($lines | Where-Object { $_.x -lt $xMax })
     foreach ($n in $needles) {
-        $h = Find-WordHit $lines $n
+        $h = Find-WordHit $left $n
         if (-not $h) { continue }
         if ($h.x -ge $xMax) { continue }
         if ($h.text -match "多领|升级|会员|已") { continue }
@@ -1075,6 +1205,12 @@ function Find-EntryWord($lines, [string[]]$needles) {
         # 「每日领」是菜单独有的强特征，永远优先采信；其余 needle 只有在账户
         # 菜单确实展开时才认。
         if ($n -ne "每日领" -and -not $menuOpen) { continue }
+        # 2026-10-25：菜单展开也不够——聊天侧栏的任务标题「检查今日签到情况」
+        # 在 x<30% 且含「签到」，被当成入口点了 4 次（@850,167 等），全部落在
+        # 对话标题上，余额一分没动。入口只可能是「每日领」行，或**独立短词**
+        # 签到 / Check in；长句一律不认。
+        if ($n -ne "每日领" -and
+            $h.text -notmatch '^\s*(签到|立即签到|Check\s*-?\s*in|Checkin)\s*$') { continue }
         return $h
     }
     return $null
@@ -1113,8 +1249,12 @@ $claimed = Find-AnyLine $lines $claimWords ([int]($winW * 0.3))
 #      「下次可在头像菜单中签到」）。用会员推广判已签会漏签——这里**不判 already，
 #      一律走下方头像菜单确认**：菜单里见「每日领N积分」就签，见「今日已签」才算已签。
 
-# 2) 看不见就点左下角头像开菜单
-if (-not $entry -and -not $claimed) {
+# 2) 看不见入口就点左下角头像开菜单
+# 2026-10-24：原来这里是 `-and -not $claimed`，只要首页上有「今日已签」就跳过开菜单。
+# 实测那张卡片的状态来自客户端内存，客户端跨天没重启时会停在昨天的「已签到」上
+# （10-24 00:00 实锤：卡片说已签，服务端余额一分没涨，全天漏签）。
+# 所以现在「没看见入口」就一定要开菜单：菜单里的「每日领」才是可点的真入口。
+if (-not $entry) {
     # 左下角用户名是稳定锚点（实测「用户71294228173」@109,1732，右边跟「免费」标签）。
     # 直接点用户名文字本身——猜头像图标坐标会时灵时不灵（实测点偏就打不开菜单），
     # 而用户名是一条明确的文本，账户菜单的触发区也覆盖它。
@@ -1161,6 +1301,12 @@ if (-not $entry -and -not $claimed) {
         }
     }
     $candidates = @()
+    # 2026-10-25：$userHit 算出的锚点（账户条行 y 中心、左侧头像区）原来**从未
+    # 进入候选列表**——下面 $accWords 依赖 StartsWith("用户")，而新版 OCR 的 words
+    # 是单字数组 {0,用,户,71294228173,免,费}，永远匹配不到 → 只剩兜底点
+    # (2.8%W, 97.2%H)=108,2031，正好落在头像右侧的空白缝里，连点 3 天都开不了菜单。
+    # 把锚点作为首选候选，兜底点保留。
+    if ($userHit) { $candidates += @{ x = $ax; y = $ay } }
     foreach ($w in $accWords) {
         $cy = $w.y + [int]($w.h / 2)
         # 截图实测：绿色头像图标中心在用户名左侧约 30px，这就是菜单触发区
@@ -1175,7 +1321,10 @@ if (-not $entry -and -not $claimed) {
     Log ("step: 首页无入口，试账户条候选点 " + $candidates.Count + " 个")
     foreach ($cand in $candidates) {
         Log ("step: 点候选 #" + $ci + " @" + $cand.x + "," + $cand.y)
-        Click-At $cand.x $cand.y
+        # 2026-10-25：账户条这里原来走合成消息，10-25 00:55 实测 msg-ok 但菜单没开，
+        # 4s 后就放弃 → 「未找到签到入口」。账户菜单是动作入口，和签到按钮同口径：
+        # 直接 UIA → BringBack 真实点击（屏外窗口已 TOPMOST，不会被前台窗口盖住）。
+        Click-At $cand.x $cand.y -SkipSynth
         foreach ($sub in 1..2) {
             Start-Sleep -Seconds 2
             $lines = Get-OcrLines
@@ -1183,9 +1332,11 @@ if (-not $entry -and -not $claimed) {
             if ($sub -eq 1) { Save-Shot ("02-menu-" + $ci) }
             $entry = Find-EntryWord $lines $clickWords
             $claimed = Find-AnyLine $lines $claimWords ([int]($winW * 0.3))
-            if ($entry -or $claimed) { break }
+            # 只有「入口」或「菜单确实展开了」才算拿到目标。光有状态文案不算——
+            # 否则一张跨天残留的「已签到」会让循环立刻收手，连菜单里的入口都没看。
+            if ($entry -or (Test-MenuOpen $lines)) { break }
         }
-        if ($entry -or $claimed) { break }
+        if ($entry -or (Test-MenuOpen $lines)) { break }
         # ESC 收掉可能的菜单/浮层，再试下一个候选点（屏外：keybd_event 会落到
         # 用户前台窗口，改用合成 ESC 直投客户端队列）
         if ($Offscreen) {
@@ -1221,9 +1372,21 @@ if ($Explore) {
     Out-Json "explore" ("菜单已抓取，入口候选: " + $entry.text + " @ " + ($entry.x + [int]($entry.w / 2)) + "," + ($entry.y + [int]($entry.h / 2)))
 }
 
-if ($claimed) {
-    Out-Json "already" ("今日已签到（" + $claimed.text + "），无需重复点击")
+if ($claimed -and -not $entry) {
+    # 2026-10-24：这里原来是无条件 `if ($claimed) { Out-Json "already" }`，而且优先于
+    # 入口点击——只要左侧有「已签到」就直接收工，一个像素都没点。
+    # 10-24 00:00 实锤：菜单里同时有「每日领100积分+额外抽奖」和跨天残留的「已签到」，
+    # 脚本据此报已签，服务端余额 3,620 纹丝未动（真漏签，且台账被记了假签到）。
+    # 新口径：有入口就必须点（点完用 granted/余额复核到账）；没有入口只有文案时
+    # 无法复核，一律降级 pending，让台账老实报「待手签」，绝不静默记一笔假的。
+    $peek0 = ($lines | Select-Object -First 10 | ForEach-Object { $_.text }) -join "/"
+    Out-Json "pending" ("页面显示「" + $claimed.text + "」但找不到可点的签到入口，无法复核是否到账，按待手签处理；页面: " + $peek0)
 }
+
+# 点击前页面上已经有的「已签到」文案（可能就是跨天残留）。点击后它还挂在原处，
+# 不能当成本次到账的证据——否则又会回到「点了个状态还报成功」的老路。
+$claimedBefore = $null
+if ($claimed) { $claimedBefore = [string]$claimed.text }
 
 $bx = $entry.x
 $by = $entry.y + [int]($entry.h / 2)
@@ -1237,8 +1400,13 @@ if ($DryRun) {
 # 用菜单项的右边界推算——黑色「签到」按钮右对齐在菜单内侧约 60px 处。
 $offsets = @(380, 300, 450, 0)
 $menuRight = 0
+$menuXMax = [int]($winW * 0.35)
 foreach ($l in $lines) {
     if (-not $l.text) { continue }
+    # 2026-10-25：菜单只可能在左侧栏。聊天/文档区里同样会出现「消息」「每日领」
+    # 等词，不限制 x 会把 menuRight 拉到窗口右侧，药丸扫描范围随之覆盖聊天区，
+    # 扫到的是对话内容而不是「签到」黑钮。
+    if ($l.x -ge $menuXMax) { continue }
     if ($l.text -match "退出登录|管理账户|报告问题|升级权益|每日领|消息") {
         $r = $l.x + $l.w
         if ($r -gt $menuRight) { $menuRight = $r }
@@ -1343,17 +1511,25 @@ for ($i = 0; $i -lt $offsets.Count; $i++) {
         #    重开菜单就会变回「每日领100积分」，且拿不到额度（入账退回 catalog
         #    的 daily_amount）。仅在上两条都失效时使用。
         $c = Find-AnyLine $lines $claimWords ([int]($winW * 0.3))
+        if ($c -and $claimedBefore -and [string]$c.text -eq $claimedBefore) {
+            Log ("step: 弱判据被排除（点击前后都是同一句「" + $c.text + "」，不是本次到账证据）")
+            $c = $null
+        }
         if ($c) {
             Log ("step: 弱判据命中（未读到「已获得N积分」）: " + $c.text)
-            Out-Json "ok" ("签到成功（点击后显示: " + $c.text + "）")
+            Out-Json "ok" ("签到成功（点击后新出现: " + $c.text + "）")
         }
     }
 }
 $peek2 = ($lines | Select-Object -First 10 | ForEach-Object { $_.text }) -join "/"
 # 2026-10-13：bal0 在新 UI 里恒为 -1，不能再拿它当「报不报 pending」的前提，
 # 否则判据全部落空时脚本会静默走到文件末尾、不写结果文件，调用方只能干等超时。
+# 2026-10-24：走到这里 = 入口点过了、granted 没出现、余额没涨。原来这里还会拿
+# 「会员推广态」报 already，但同一张卡片在**未签到**时也会显示（见 1.5 节，10-15
+# 已实锤漏签）。既然已经点过却复核不到到账，就不该替主人下「已签」的结论：
+# 一律报 pending，让他按一下或者手动 record，台账永远只记有证据的那一笔。
 if (Test-AlreadyCard $lines) {
-    Out-Json "already" ("卡片已是会员推广态，判定今日已签；页面: " + $peek2)
+    Log "step: 卡片为会员推广态，但本轮到账复核失败，不报 already"
 }
-Out-Json "pending" ("点击各候选位置后未检测到到账（granted 未出现，余额 $bal0）；页面: " + $peek2)
+Out-Json "pending" ("已点击签到入口但未检测到到账（granted 未出现，余额 $bal0）；页面: " + $peek2)
 Out-Json "pending" ("点击各候选位置后均未出现已签状态，页面: " + $peek2)

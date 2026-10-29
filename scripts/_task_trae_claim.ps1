@@ -13,7 +13,11 @@
 
 param(
     [string]$Mode = "claim",            # claim | dry-run | explore
-    [string]$ProcessName = "Trae CN"    # 2026-10-11: TRAE SOLO CN 已并入 Trae CN
+    [string]$ProcessName = "Trae CN",   # 2026-10-11: TRAE SOLO CN 已并入 Trae CN
+    [string]$Extra = "",                # 原样透传给 ui_claim_trae.ps1，如 "-Offscreen:$false"
+    [switch]$Foreground,                # 前台模式（-Offscreen:$false），屏外点击被遮挡时用
+    [int]$IdleWaitSec = -1,             # 前台模式下等待用户空闲的上限；-1 用脚本默认
+    [int]$IdleThresholdSec = -1         # 前台模式要求的空闲秒数；-1 用脚本默认
 )
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -29,8 +33,12 @@ $flag = switch ($Mode) {
     default   { "" }
 }
 
+$idleArgs = ""
+if ($IdleWaitSec -ge 0) { $idleArgs += " -IdleWaitSec $IdleWaitSec" }
+if ($IdleThresholdSec -ge 0) { $idleArgs += " -IdleThresholdSec $IdleThresholdSec" }
+$extraArg = if ($Foreground) { ' -Foreground' + $idleArgs } elseif ($Extra) { " " + $Extra } else { "" }
 $arg = '-NoProfile -ExecutionPolicy Bypass -File "' + $script + '" ' + $flag +
-       ' -ProcessName "' + $ProcessName + '"' +
+       ' -ProcessName "' + $ProcessName + '"' + $extraArg +
        ' -OutFile "' + $out + '"'
 
 $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name

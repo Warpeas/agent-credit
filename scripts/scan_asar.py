@@ -43,6 +43,9 @@ def mask(text: str) -> str:
 
 
 def main() -> int:
+    # 客户端二进制里的中文（各家 CN 包的 i18n）在 Windows GBK 控制台上会直接
+    # 抛 UnicodeEncodeError 把整轮扫描打断，看不出任何结果。
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = sys.argv[1:]
     if not args:
         print(__doc__)

@@ -6,11 +6,11 @@
 #                                      可见控制台先弹启动闸门：Y/Enter 立即开始，N/Esc 跳过今天的
 #                                      UI 组，15s 无输入自动开始（无人值守不弹、不等空闲）
 #   2. credit.py sync --only trae    —— checkin 领取成功时已顺带同步过明细；只有
-#      trae_credit_sync.ps1           dump 不是今天的才补开 IDE 窗重拉一次
-#   3. credit.py sync --only qodercn —— checkin 领取后已点开过「我的用量」；只有
-#      ui_claim_qodercn.ps1 -Usage    记录不新鲜时才补点一次（-IdleWaitSec 0）
-#   4. python credit.py board        —— 再刷一次看板（含 Trae/Qoder 刚登记的真实数据）
-# 顺序有讲究：Trae 与 Qoder 的登记发生在 checkin 之后，所以看板要再刷一次才准。
+#      trae_credit_sync.ps1           dump 不是今天的、且本轮不是 pending/failed 才补开 IDE 窗
+#   3. credit.py sync --only qodercn —— 同理；本轮 pending/failed 不补点（同轮二次尝试只会
+#      ui_claim_qodercn.ps1 -Usage    再白等一次窗口，2026-10-30 00:06 实况）
+#   4. python credit.py board        —— 只有 2/3 的补拉真的跑过才再刷一次；checkin 末尾已刷过
+# 补不补由 logs/checkin_last.json 决定（checkin 每轮都会写本轮各账户状态）。
 #
 # -Unattended：计划任务的 action 显式传入时直接按无人值守处理；
 # 老任务/手动触发没有这个开关时，再看父进程是不是 Task Scheduler（svchost）。
@@ -102,25 +102,54 @@ try {
         exit 0
     }
 
+    # 2026-10-30：读 checkin 本轮结果快照。pending/failed 说明领取没成，1 分钟后再开
+    # 一次 UI/IDE 拉明细没有任何收益——10-30 00:06 那轮 Qoder 刚报 notfound，这里又跑
+    # 一遍 -Usage 白等 90s。skipped（今日已签）与 ok 都允许补拉：已签日也可能只是
+    # 台账里的用量记录过期，补点一次能自愈。没有记录（--only 单账户跑）按允许处理。
+    $resFile = Join-Path $root "logs\checkin_last.json"
+    $statusOf = @{}
+    if (Test-Path $resFile) {
+        try {
+            $snap = Get-Content -Raw -Encoding UTF8 $resFile | ConvertFrom-Json
+            if ($snap.accounts) {
+                foreach ($p in $snap.accounts.PSObject.Properties) {
+                    $statusOf[$p.Name] = [string]$p.Value.status
+                }
+            }
+        } catch { }
+    }
+    $fallbackRan = $false
+
     # Trae：checkin 里「领取 + 明细同步」已经合并做过（领取成功后趁客户端还开着开
-    # IDE 窗、等扩展 dump、登记），这里先对账；只有 dump 不是今天的（领取被跳过/失败）
-    # 才补开一次 IDE 窗。2026-10-29 合并前是每次无条件再开一次窗。
+    # IDE 窗、等扩展 dump、登记），这里先对账；只有 dump 不是今天的才补开一次 IDE 窗。
     & $py -u "$root\credit.py" sync --only trae
     if ($LASTEXITCODE -ne 0) {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$root\scripts\trae_credit_sync.ps1"
-        & $py -u "$root\credit.py" sync --only trae
+        if ($statusOf.ContainsKey('trae') -and ($statusOf['trae'] -eq 'pending' -or $statusOf['trae'] -eq 'failed')) {
+            Write-Host ("Trae 本轮状态 " + $statusOf['trae'] + "，不补开 IDE 窗（拉明细不会改变领取结果）")
+        } else {
+            $fallbackRan = $true
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$root\scripts\trae_credit_sync.ps1"
+            & $py -u "$root\credit.py" sync --only trae
+        }
     }
 
     # Qoder CN：同理，领取成功后已经在同一个客户端里点开过「我的用量」，先对账；
     # 记录不新鲜才补点一次（这次不再等空闲，启动闸门早就拿到授权了）。
     & $py -u "$root\credit.py" sync --only qodercn
     if ($LASTEXITCODE -ne 0) {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$root\scripts\ui_claim_qodercn.ps1" `
-            -Usage -IdleWaitSec 0 -ExePath "$env:LOCALAPPDATA\Programs\Qoder CN\Qoder CN.exe"
-        & $py -u "$root\credit.py" sync --only qodercn
+        if ($statusOf.ContainsKey('qodercn') -and ($statusOf['qodercn'] -eq 'pending' -or $statusOf['qodercn'] -eq 'failed')) {
+            Write-Host ("Qoder CN 本轮状态 " + $statusOf['qodercn'] + "，不补点用量（避免同轮二次白等）")
+        } else {
+            $fallbackRan = $true
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$root\scripts\ui_claim_qodercn.ps1" `
+                -Usage -IdleWaitSec 0 -WindowWaitSec 20 -ExePath "$env:LOCALAPPDATA\Programs\Qoder CN\Qoder CN.exe"
+            & $py -u "$root\credit.py" sync --only qodercn
+        }
     }
 
-    & $py -u "$root\credit.py" board
+    # 看板：checkin 末尾已经刷过一次（含上面同样的对账数据）。只有补拉真的跑过、
+    # 数据可能变了，才再刷一次。
+    if ($fallbackRan) { & $py -u "$root\credit.py" board }
 } finally {
     if ($lockStream) {
         $lockStream.Close()

@@ -18,6 +18,34 @@ $root = Split-Path -Parent $PSScriptRoot
 $ErrorActionPreference = "Stop"
 $logPath = "$root\logs\_lobsterai_log.txt"
 function Log($m){ $s=(Get-Date -Format "HH:mm:ss")+" "+$m; try{[System.IO.File]::AppendAllText($logPath,$s+"`n",(New-Object System.Text.UTF8Encoding($false)))}catch{}; Write-Output $s }
+function Wait-InputQuiet([int]$QuietMs = 320, [int]$MaxWaitMs = 20000) {
+    # 点击前闸门：主人正在动鼠标/敲键盘时先等，停手后立刻点、点完立刻还原光标。
+    # 内部 Log 一律 [void]：Log 走输出流，混进来会把返回值变成数组。
+    $start = Get-Date
+    $deadline = $start.AddMilliseconds($MaxWaitMs)
+    $logged = $false
+    while ($true) {
+        $idle = [L32]::IdleMs()
+        if ($idle -ge $QuietMs) {
+            if ($logged) { [void](Log ("input-quiet: 已静默 " + $idle + "ms，开始点击（等了 " + [int]((Get-Date) - $start).TotalMilliseconds + "ms）")) }
+            return $true
+        }
+        if (-not $logged) {
+            [void](Log ("input-quiet: 用户正在操作（idle=" + $idle + "ms），等键鼠停下再点（上限 " + $MaxWaitMs + "ms）"))
+            $logged = $true
+        }
+        if ((Get-Date) -ge $deadline) {
+            [void](Log ("input-quiet: 等待 " + $MaxWaitMs + "ms 仍有键鼠输入，按最小暴露继续"))
+            return $false
+        }
+        Start-Sleep -Milliseconds 25
+    }
+}
+function Test-CursorAt([int]$x, [int]$y) {
+    $p = [L32+POINT]::new()
+    if (-not [L32]::GetCursorPos([ref]$p)) { return $false }
+    return ($p.X -eq $x -and $p.Y -eq $y)
+}
 try {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Drawing
@@ -46,6 +74,17 @@ public static class L32 {
   [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref POINT lpPoint);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
   [DllImport("user32.dll")] public static extern IntPtr ChildWindowFromPointEx(IntPtr h, POINT p, uint flags);
+  // 2026-10-30：点击前的「静默闸门」用 GetLastInputInfo 判断主人是否在操作。
+  [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+  [DllImport("kernel32.dll")] public static extern uint GetTickCount();
+  public static int IdleMs() {
+    LASTINPUTINFO li = new LASTINPUTINFO();
+    li.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+    if (!GetLastInputInfo(ref li)) { return 1000000; }
+    uint idle = unchecked(GetTickCount() - li.dwTime);
+    return idle > 1000000u ? 1000000 : (int)idle;
+  }
   public struct RECT { public int Left, Top, Right, Bottom; }
   public struct POINT { public int X, Y; }
   public delegate bool EnumProc(IntPtr h, IntPtr lp);
@@ -320,8 +359,10 @@ function Get-OcrLines($pngPath) {
     # 方案甲 R2：屏外窗口受 backgroundThrottling 影响，首帧可能 2-8s 才画出
     # 内容（PoC 实测）——PrintWindow 抓到空白帧时重试（2s 间隔，上限 30s），
     # 且绝不走 CopyFromScreen 兜底：屏外坐标的屏幕捕获拍到的是用户屏幕内容。
+    # 2026-10-30：上限 15→5（30s→8s）。10-27 出现过连续 8 次空白帧、每次 30s，
+    # 直接把 240s 外层预算吃光、签到判 failed；持续空白时多等也自愈不了。
     $maxTry = 1
-    if ($Offscreen) { $maxTry = 15 }
+    if ($Offscreen) { $maxTry = 5 }
     $bmp = $null
     for ($tryN = 1; $tryN -le $maxTry; $tryN++) {
         $bmp=New-Object System.Drawing.Bitmap($winW,$winH)
@@ -521,17 +562,34 @@ function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1) {
     Save-Foreground
     try { [void](Ensure-Foreground) } catch { }
     Start-Sleep -Milliseconds 150
+    # 2026-10-30：等主人停手再点。hover 的 120ms 里光标若被挪走就放弃这一下，
+    # 重新过闸门再试；绝不按着旧坐标盲点（会点进主人当前所在的窗口）。
+    [void](Wait-InputQuiet 320 20000)
+    $clicked = $false
     try {
-        [void][L32]::SetCursorPos($cx, $cy)
-        Start-Sleep -Milliseconds 120
-        # 2026-11-16：Chromium 首击只完成焦点切换是 AutoClaw/Trae 实证过的坑
-        # （面板菜单行单真点 3 帧无变化）；$Clicks=2 时 180ms 间隔连点两下，
-        # 与 AutoClaw 签到按钮同一口径。
-        for ($ci2 = 1; $ci2 -le [Math]::Max(1, $Clicks); $ci2++) {
-            [L32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-            [L32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-            Log ("bringback: real click " + $ci2 + "/" + [Math]::Max(1, $Clicks) + " @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
-            if ($ci2 -lt $Clicks) { Start-Sleep -Milliseconds 180 }
+        for ($attempt = 1; $attempt -le 2 -and -not $clicked; $attempt++) {
+            if ($attempt -gt 1) { [void](Wait-InputQuiet 320 20000) }
+            [void][L32]::SetCursorPos($cx, $cy)
+            Start-Sleep -Milliseconds 120
+            if (-not (Test-CursorAt $cx $cy)) {
+                [void](Log ("bringback: 光标被挪走（attempt " + $attempt + "），不盲点"))
+                continue
+            }
+            # 2026-11-16：Chromium 首击只完成焦点切换是 AutoClaw/Trae 实证过的坑
+            # （面板菜单行单真点 3 帧无变化）；$Clicks=2 时 180ms 间隔连点两下，
+            # 与 AutoClaw 签到按钮同一口径。
+            for ($ci2 = 1; $ci2 -le [Math]::Max(1, $Clicks); $ci2++) {
+                [L32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+                [L32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+                Log ("bringback: real click " + $ci2 + "/" + [Math]::Max(1, $Clicks) + " @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+                if ($ci2 -lt $Clicks) { Start-Sleep -Milliseconds 180 }
+            }
+            $clicked = $true
+        }
+        # 点完立刻还原光标（旧版要等 finally，多占用主人鼠标几十毫秒）
+        [void][L32]::SetCursorPos($saved.X, $saved.Y)
+        if (-not $clicked) {
+            [void](Log ("bringback: 光标两次都被挪走，放弃本次点击 @ " + $cx + "," + $cy))
         }
     } finally {
         # R4：任何异常路径都要恢复光标并重新停到屏外
@@ -786,7 +844,9 @@ $chip=$null
 # A cold-started client has not synced its signed-in state yet: on 2026-10-02 the
 # sidebar was fully drawn (23 lines, ready=True) but the 每日积分礼 chip was simply
 # absent, so every claim path had nothing to act on. Wait for the chip to appear.
-$chipDl=(Get-Date).AddSeconds(75)
+# 2026-10-30：75s→15s（间隔 8s→4s）。10-28/10-30 实测 chip 压根不出现，
+# 白等 75s 后还是走下面的面板路径且一次就成；冷启动同步慢时 15s 也足够。
+$chipDl=(Get-Date).AddSeconds(15)
 while((Get-Date) -lt $chipDl){
     foreach($l in $lines){
         if($l.text -match '积分礼' -and $l.x -gt ($winW*0.45)){
@@ -794,7 +854,7 @@ while((Get-Date) -lt $chipDl){
         }
     }
     if($chip){ break }
-    Start-Sleep -Seconds 8
+    Start-Sleep -Seconds 4
     $lines = Get-OcrLines ""
 }
 Log ("gift chip wait: " + $(if($chip){ "found '"+$chip.text+"'" } else { "NOT FOUND" }))

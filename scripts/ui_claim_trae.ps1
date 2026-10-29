@@ -173,6 +173,42 @@ function Get-IdleSeconds {
     $tick = [uint32][Cap32]::GetTickCount()
     return [int]((($tick - $li.dwTime) -band 0xFFFFFFFF) / 1000)
 }
+function Get-IdleMs {
+    $li = New-Object Cap32+LASTINPUTINFO
+    $li.cbSize = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf($li)
+    if (-not [Cap32]::GetLastInputInfo([ref]$li)) { return 1000000 }
+    $tick = [uint32][Cap32]::GetTickCount()
+    $ms = [int]((($tick - $li.dwTime) -band 0xFFFFFFFF))
+    if ($ms -gt 1000000) { return 1000000 }
+    return $ms
+}
+function Wait-InputQuiet([int]$QuietMs = 320, [int]$MaxWaitMs = 20000) {
+    # 点击前闸门：主人正在动鼠标/敲键盘时先等，停手后立刻点、点完立刻还原光标。
+    $start = Get-Date
+    $deadline = $start.AddMilliseconds($MaxWaitMs)
+    $logged = $false
+    while ($true) {
+        $idle = Get-IdleMs
+        if ($idle -ge $QuietMs) {
+            if ($logged) { [void](Log ("input-quiet: 已静默 " + $idle + "ms，开始点击（等了 " + [int]((Get-Date) - $start).TotalMilliseconds + "ms）")) }
+            return $true
+        }
+        if (-not $logged) {
+            [void](Log ("input-quiet: 用户正在操作（idle=" + $idle + "ms），等键鼠停下再点（上限 " + $MaxWaitMs + "ms）"))
+            $logged = $true
+        }
+        if ((Get-Date) -ge $deadline) {
+            [void](Log ("input-quiet: 等待 " + $MaxWaitMs + "ms 仍有键鼠输入，按最小暴露继续"))
+            return $false
+        }
+        Start-Sleep -Milliseconds 25
+    }
+}
+function Test-CursorAt([int]$x, [int]$y) {
+    $p = [Cap32+POINT]::new()
+    if (-not [Cap32]::GetCursorPos([ref]$p)) { return $false }
+    return ($p.X -eq $x -and $p.Y -eq $y)
+}
 
 function Wait-ForegroundIdle {
     # 仅前台补签需要闸门；屏外模式不动前台，不在此等待。
@@ -540,8 +576,9 @@ function Get-OcrLines {
     # 内容（PoC 实测）——PrintWindow 抓到空白帧时重试（2s 间隔，上限 30s），
     # 且绝不走 CopyFromScreen 兜底：屏外坐标的屏幕捕获拍到的是用户屏幕内容。
     $bmp = $null
+    # 2026-10-30：上限 15→5（30s→8s）。持续空白帧多等也自愈不了，反而吃光外层预算。
     $maxTry = 1
-    if ($Offscreen) { $maxTry = 15 }
+    if ($Offscreen) { $maxTry = 5 }
     for ($tryN = 1; $tryN -le $maxTry; $tryN++) {
         $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
         $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -1022,14 +1059,30 @@ function BringBack-Click([int]$ax, [int]$ay) {
     Save-Foreground
     try { [void](Ensure-Foreground) } catch { }
     Start-Sleep -Milliseconds 150
+    # 2026-10-30：等主人停手再点；hover 的 120ms 里光标被挪走就不盲点，重试一次。
+    [void](Wait-InputQuiet 320 20000)
     $saved = [Cap32+POINT]::new()
     [Cap32]::GetCursorPos([ref]$saved) | Out-Null
+    $clicked = $false
     try {
-        [Cap32]::SetCursorPos($cx, $cy) | Out-Null
-        Start-Sleep -Milliseconds 120
-        [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-        [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-        Log ("bringback: real click @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+        for ($attempt = 1; $attempt -le 2 -and -not $clicked; $attempt++) {
+            if ($attempt -gt 1) { [void](Wait-InputQuiet 320 20000) }
+            [Cap32]::SetCursorPos($cx, $cy) | Out-Null
+            Start-Sleep -Milliseconds 120
+            if (-not (Test-CursorAt $cx $cy)) {
+                [void](Log ("bringback: 光标被挪走（attempt " + $attempt + "），不盲点"))
+                continue
+            }
+            [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+            [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            $clicked = $true
+        }
+        [Cap32]::SetCursorPos($saved.X, $saved.Y) | Out-Null
+        if ($clicked) {
+            [void](Log ("bringback: real click @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")"))
+        } else {
+            [void](Log ("bringback: 光标两次都被挪走，放弃本次点击 @ " + $cx + "," + $cy))
+        }
     } finally {
         # R4：任何异常路径都要恢复光标并重新停到屏外
         [Cap32]::SetCursorPos($saved.X, $saved.Y) | Out-Null

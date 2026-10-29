@@ -11,6 +11,34 @@ param(
 $root = Split-Path -Parent $PSScriptRoot
 $logPath = "$root\logs\ps1_autoclaw.log"
 function Log($m){ $s=(Get-Date -Format "HH:mm:ss")+" "+$m; try{[System.IO.File]::AppendAllText($logPath,$s+"`n",(New-Object System.Text.UTF8Encoding($false)))}catch{}; Write-Output $s }
+function Wait-InputQuiet([int]$QuietMs = 320, [int]$MaxWaitMs = 20000) {
+    # 点击前闸门：主人正在动鼠标/敲键盘时先等，停手后立刻点、点完立刻还原光标。
+    # 内部 Log 一律 [void]：Log 走输出流，混进来会把返回值变成数组。
+    $start = Get-Date
+    $deadline = $start.AddMilliseconds($MaxWaitMs)
+    $logged = $false
+    while ($true) {
+        $idle = [Cap32]::IdleMs()
+        if ($idle -ge $QuietMs) {
+            if ($logged) { [void](Log ("input-quiet: 已静默 " + $idle + "ms，开始点击（等了 " + [int]((Get-Date) - $start).TotalMilliseconds + "ms）")) }
+            return $true
+        }
+        if (-not $logged) {
+            [void](Log ("input-quiet: 用户正在操作（idle=" + $idle + "ms），等键鼠停下再点（上限 " + $MaxWaitMs + "ms）"))
+            $logged = $true
+        }
+        if ((Get-Date) -ge $deadline) {
+            [void](Log ("input-quiet: 等待 " + $MaxWaitMs + "ms 仍有键鼠输入，按最小暴露继续"))
+            return $false
+        }
+        Start-Sleep -Milliseconds 25
+    }
+}
+function Test-CursorAt([int]$x, [int]$y) {
+    $p = [Cap32+POINT]::new()
+    if (-not [Cap32]::GetCursorPos([ref]$p)) { return $false }
+    return ($p.X -eq $x -and $p.Y -eq $y)
+}
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -61,6 +89,17 @@ public static class Cap32 {
   [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
   [DllImport("user32.dll")] public static extern IntPtr ChildWindowFromPointEx(IntPtr hWnd, POINT p, uint flags);
+  // 2026-10-30：点击前的「静默闸门」用 GetLastInputInfo 判断主人是否在操作。
+  [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+  [DllImport("kernel32.dll")] public static extern uint GetTickCount();
+  public static int IdleMs() {
+    LASTINPUTINFO li = new LASTINPUTINFO();
+    li.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+    if (!GetLastInputInfo(ref li)) { return 1000000; }
+    uint idle = unchecked(GetTickCount() - li.dwTime);
+    return idle > 1000000u ? 1000000 : (int)idle;
+  }
   public struct RECT { public int Left, Top, Right, Bottom; }
   public struct POINT { public int X, Y; }
   public delegate bool EnumProc(IntPtr hWnd, IntPtr lp);
@@ -402,8 +441,9 @@ function Get-OcrLines {
     # 方案甲 R2：屏外窗口受 backgroundThrottling 影响，首帧可能 2-8s 才画出
     # 内容（PoC 实测）——PrintWindow 抓到空白帧时重试（2s 间隔，上限 30s），
     # 且绝不走 CopyFromScreen 兜底：屏外坐标的屏幕捕获拍到的是用户屏幕内容。
+    # 2026-10-30：上限 15→5（30s→8s）。持续空白帧多等也自愈不了，反而吃光外层预算。
     $maxTry = 1
-    if ($Offscreen) { $maxTry = 15 }
+    if ($Offscreen) { $maxTry = 5 }
     $bmp = $null
     for ($tryN = 1; $tryN -le $maxTry; $tryN++) {
         $bmp = New-Object System.Drawing.Bitmap($winW, $winH)
@@ -678,15 +718,22 @@ function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1, [int]$IntervalMs 
     [Cap32]::GetWindowRect($hwnd, [ref]$chk) | Out-Null
     Log ("bringback: ensure-foreground=" + $fgOk + " rect=" + $chk.Left + "," + $chk.Top + " click=" + $cx + "," + $cy)
     Start-Sleep -Milliseconds 150
+    # 2026-10-30：等主人停手再点；hover/连点间隔里光标被挪走就停手，不盲点。
+    [void](Wait-InputQuiet 320 20000)
     try {
-        [Cap32]::SetCursorPos($cx, $cy) | Out-Null
-        Start-Sleep -Milliseconds 120
         # 2026-10-25：首击常被 CEF/React 的焦点切换吞掉。调用方可要求短间隔连点
         # （AutoClaw 签到按钮用 2 连击、180ms），全部点完再统一恢复光标/前台/屏外。
         for ($ci = 1; $ci -le [Math]::Max(1, $Clicks); $ci++) {
+            [Cap32]::SetCursorPos($cx, $cy) | Out-Null
+            Start-Sleep -Milliseconds 120
+            if (-not (Test-CursorAt $cx $cy)) {
+                [void](Log ("bringback: 光标被挪走（click " + $ci + "），不盲点"))
+                break
+            }
             [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
             [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-            Log ("bringback: real click " + $ci + "/" + [Math]::Max(1, $Clicks) + " @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+            [void](Log ("bringback: real click " + $ci + "/" + [Math]::Max(1, $Clicks) + " @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")"))
+            [void][Cap32]::SetCursorPos($saved.X, $saved.Y)
             if ($ci -lt $Clicks) { Start-Sleep -Milliseconds $IntervalMs }
         }
     } finally {

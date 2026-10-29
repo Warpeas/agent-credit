@@ -318,9 +318,10 @@ credit.cmd board --json
 | MonkeyCode 积分 | 总余额（**无**逐条过期） | 只读 GET /users/wallet（毫积分 ÷1000） |
 | Qoder CN | 总余额 + 分桶（套餐内/资源包）+ 今日签到态；服务端**不下发**逐条批次，台账用 reconcile 保住每条的推导到期日 | 读客户端自己落的 `me/usage` 日志摘要 |
 
-**每日签到后自动同步**：`checkin` 末尾会跑对账（拉服务端真实余额）并刷一次看板；
-每日链路 `scripts/_daily_chain.ps1` 在 Trae 登记之后再刷一次——因为 Trae 的登记
-发生在 checkin 之后，不刷第二遍看板就少一条真值。
+**每日签到后自动同步**：`checkin` 末尾会跑对账（拉服务端真实余额）并刷一次看板，
+看板已包含 Trae/Qoder 当轮登记的数据。每日链路 `scripts/_daily_chain.ps1` 只在
+「补拉真的又跑过」（`logs/checkin_last.json` 判定本轮不是 pending/failed、且明细
+仍不新鲜）时才再刷一次，避免同一份数据刷两遍。
 
 ⚠️ Qoder CN 的用量只在**打开「我的用量」面板**那一刻才向服务端取（不像 WorkBuddy 那样
 随命令即取），所以它同样有 Trae 那种「新鲜度闸门」：台账里没有当天记录时，对账如实报

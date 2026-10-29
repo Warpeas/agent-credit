@@ -292,7 +292,38 @@ def checkin(
     ledger.save(data)
     trace.note("台账已写回 " + str(ledger.LEDGER_PATH))
     _refresh_board(data, on)
+    _write_last_results(results, on, only)
     return results, data
+
+
+def _write_last_results(
+    results: list[CheckinResult], on: date, only: str | None = None
+) -> None:
+    """落一份本轮结果快照（logs/checkin_last.json）。
+
+    _daily_chain 靠它判断「本轮某个账户到底试过没有」：Qoder 领取失败后，
+    链路以前仍会在 1 分钟内再跑一遍 -Usage，白等 90s（2026-10-30 00:06 实况）。
+    写失败只记一行，绝不影响签到结果。
+    """
+    if _env_flag(SYNC_SKIP_ENV) or _env_flag("AGENT_CREDIT_SKIP_EXTERNAL"):
+        return
+    payload = {
+        "date": on.isoformat(),
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "only": only,
+        "accounts": {
+            r.account_id: {"status": r.status, "detail": r.detail}
+            for r in results
+        },
+    }
+    try:
+        from .paths import LOG_DIR
+
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        (LOG_DIR / "checkin_last.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        trace.note(f"签到结果快照写入失败：{exc}")
 
 
 def _refresh_board(data: dict[str, Any], on: date) -> None:

@@ -327,6 +327,77 @@ def user_idle_seconds() -> int:
     return int(((tick - int(li.dwTime)) & 0xFFFFFFFF) / 1000)
 
 
+def user_idle_ms() -> int:
+    li = LASTINPUTINFO()
+    li.cbSize = ctypes.sizeof(LASTINPUTINFO)
+    if not user32.GetLastInputInfo(ctypes.byref(li)):
+        return 1000000
+    tick = int(kernel32.GetTickCount()) & 0xFFFFFFFF
+    return min(((tick - int(li.dwTime)) & 0xFFFFFFFF), 1000000)
+
+
+def wait_input_quiet(quiet_ms: int = 320, max_wait_ms: int = 20000) -> bool:
+    """点击前等主人停手。
+
+    屏外识别可以全程不碰光标，但真实点击那一下必须占用鼠标。他正在拖动/连点时
+    先等；停手后立刻点、点完立刻还原（见 real_click_at）。超时仍继续——漏签的
+    代价比短暂借用光标大，但会留一行日志。
+    """
+    t0 = time.time()
+    deadline = t0 + max_wait_ms / 1000.0
+    logged = False
+    while True:
+        idle = user_idle_ms()
+        if idle >= quiet_ms:
+            if logged:
+                log(f"input-quiet: 已静默 {idle}ms，开始点击（等了 {int((time.time() - t0) * 1000)}ms）")
+            return True
+        if not logged:
+            log(f"input-quiet: 用户正在操作（idle={idle}ms），等键鼠停下再点（上限 {max_wait_ms}ms）")
+            logged = True
+        if time.time() >= deadline:
+            log(f"input-quiet: 等待 {max_wait_ms}ms 仍有键鼠输入，按最小暴露继续")
+            return False
+        time.sleep(0.025)
+
+
+def cursor_at(x: int, y: int) -> bool:
+    p = _POINT()
+    if not user32.GetCursorPos(ctypes.byref(p)):
+        return False
+    return p.x == int(x) and p.y == int(y)
+
+
+def real_click_at(x: int, y: int) -> bool:
+    """静默闸门 → 移动光标 → 核对仍在目标点 → 按下抬起 → 立刻还原光标。
+
+    hover 的 120ms 里主人把鼠标挪走时，直接按下去会点到他当前所在的位置
+    （可能点进别的窗口），所以按下前必须再核对一次；两次都不中就放弃。
+    """
+    wait_input_quiet()
+    saved = _POINT()
+    user32.GetCursorPos(ctypes.byref(saved))
+    try:
+        for attempt in (1, 2):
+            if attempt == 2:
+                wait_input_quiet()
+            user32.SetCursorPos(int(x), int(y))
+            time.sleep(0.12)
+            if not cursor_at(x, y):
+                log(f"click: 光标被挪走（attempt {attempt}），不盲点")
+                continue
+            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            return True
+        return False
+    finally:
+        # 无论成功、放弃还是异常，光标立刻回原位（不再等外层 sleep）。
+        try:
+            user32.SetCursorPos(saved.x, saved.y)
+        except OSError:
+            pass
+
+
 def wait_for_user_idle(timeout: int, threshold: int) -> bool:
     """等用户空闲 threshold 秒；超时仍活跃返回 False，调用方留 pending。"""
     idle = user_idle_seconds()
@@ -449,11 +520,11 @@ def bringback_click(hwnd: int, screen_x: int, screen_y: int, what: str) -> bool:
                 f"(top={top} class={win_class(top) if top else ''} pid={win_pid(top) if top else 0} "
                 f"root={root} fg={int(user32.GetForegroundWindow() or 0)} hwnd={hwnd})")
             return False
-        log(f"bringback: real click {what} @ {sx},{sy}")
-        user32.SetCursorPos(sx, sy)
-        time.sleep(0.12)
-        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        if real_click_at(sx, sy):
+            log(f"bringback: real click {what} @ {sx},{sy}")
+        else:
+            log(f"bringback: 光标两次被挪走，放弃点击 {what}")
+            return False
         time.sleep(0.4)
         return True
     finally:
@@ -714,11 +785,9 @@ def screen_shot(x: int, y: int, w: int, h: int):
 
 
 def click(x: int, y: int) -> None:
-    user32.SetCursorPos(int(x), int(y))
-    time.sleep(0.2)
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.07)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    # 2026-10-30：走统一的「等主人停手 → 点 → 立刻还原光标」路径。
+    if not real_click_at(x, y):
+        log(f"click: 光标两次被挪走，放弃点击 @ {x},{y}")
     time.sleep(0.5)
 
 

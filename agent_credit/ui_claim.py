@@ -382,28 +382,37 @@ def _claim_qodercn() -> tuple[bool, str]:
         _wait_for_user_idle(QODER_IDLE_WAIT_SEC, QODER_IDLE_THRESHOLD_SEC, "Qoder CN")
     # 客户端没在跑就先拉起（os.startfile 尽力而为；计划任务上下文里若起不来，
     # ps1 会以 notfound 退出，checkin 退化为 pending，不会误记账）。
+    had_window = _has_main_window([QODERCN_PROCESS])
     launched_by_us = False
-    if not _has_main_window([QODERCN_PROCESS]):
+    if not had_window:
         try:
             launch("qodercn")
         except FileNotFoundError:
             return False, "未找到 Qoder CN 客户端，请手动打开后签到"
         launched_by_us = True
-        # 2026-10-14：原来 launch 后只 sleep(3)，实测冷启动主窗口在进程起来后
-        # 还要数秒才出现（当日 00:04:08 进程起，1s 后 ps1 一次性枚举直接
-        # notfound，当天漏签）。改为轮询等主窗口，上限 90s；ps1 内还有一层
-        # 同等等待兜底。
-        deadline = time.time() + 90
+        # 2026-10-30：这里原来等 90s，ps1 里再等 90s，最坏 180s 白等（10-30 00:03
+        # 那轮就是这么耗掉的）。Python 侧只等进程/窗口「起来」——30s 足够冷启动冒头，
+        # 真正的等待交给 ps1 一次做完；心跳日志避免黑框看起来卡死。
+        deadline = time.time() + 30
+        next_beat = deadline - 10
         while time.time() < deadline:
             if _has_main_window([QODERCN_PROCESS]):
+                trace.note("Qoder CN 主窗口已出现（Python 侧）")
                 break
+            if time.time() >= next_beat:
+                trace.note("Qoder CN 等待主窗口 … 最多 30s")
+                next_beat = time.time() + 10
             time.sleep(3)
+    else:
+        trace.note("Qoder CN 主窗口已在，跳过冷启动等待")
 
     # 2026-10-22 方案甲：窗口停屏外 + PrintWindow + BringBack 点击，链路比旧版长；
     # 空闲等待已在上面做过，ps1 不再等（-IdleWaitSec 0），超时放宽到 300s。
+    # 2026-10-30：窗口已在时把 ps1 的等待降到 20s；本次冷启动才给满 90s。
     ok, detail = _run_ps1(SCRIPT_QODERCN_OCR, LOG_DIR / "qodercn_claim.json",
                           timeout=300, process_name=QODERCN_PROCESS, exe_path=exe_path,
-                          extra_args=["-IdleWaitSec", "0"])
+                          extra_args=["-IdleWaitSec", "0",
+                                      "-WindowWaitSec", "20" if had_window else "60"])
     # 2026-10-29：领取成功后趁窗口还开着，立刻点开一次「我的用量」，让客户端把当天
     # 用量写进自己的日志。以前这一步由每日链路单独再开一次 Qoder 来做（实测多花
     # 2–4 分钟：冷启动 + 120s 空闲闸门）。失败只记一笔，不改领取结果；链路兜底会再点。
@@ -411,7 +420,7 @@ def _claim_qodercn() -> tuple[bool, str]:
         usage_ok, usage_detail = _run_ps1(
             SCRIPT_QODERCN_OCR, LOG_DIR / "qodercn_usage.json",
             timeout=150, process_name=QODERCN_PROCESS, exe_path=exe_path,
-            extra_args=["-Usage", "-IdleWaitSec", "0"])
+            extra_args=["-Usage", "-IdleWaitSec", "0", "-WindowWaitSec", "20"])
         detail += "；已点开「我的用量」" if usage_ok else f"；用量面板未打开（{usage_detail}）"
     # 本次冷启动的实例签成功就关掉（与 Trae/LobsterAI/MonkeyCode 一致）；
     # pending/failed 时保留窗口，方便主人接手手动点启动弹窗。

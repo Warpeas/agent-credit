@@ -48,7 +48,9 @@ param(
     [bool]$Offscreen = $true,
     [int]$IdleWaitSec = 120,
     [int]$IdleThresholdSec = 60,
-    [int]$OffscreenStripPx = 48
+    [int]$OffscreenStripPx = 48,
+    # Python 侧已确认主窗口存在时传小值（20s），避免两边各等 90s。
+    [int]$WindowWaitSec = 90
 )
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -115,9 +117,22 @@ public static class Q {
   [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LI info);
   [DllImport("kernel32.dll")] public static extern uint GetTickCount();
   // 用 SendInput 发真实点击（mouse_event 在本机对 Qoder 的 webview 落不进去，只有 SetCursorPos 的 hover 生效）
-  public static void Click(int x, int y) {
+  public static int IdleMs() {
+    // 距最近一次真实键鼠输入的毫秒数。点击前的「静默闸门」靠它判断主人是否在操作。
+    LI li = new LI();
+    li.cbSize = (uint)Marshal.SizeOf(typeof(LI));
+    if (!GetLastInputInfo(ref li)) { return 1000000; }
+    uint idle = unchecked(GetTickCount() - li.dwTime);
+    return idle > 1000000u ? 1000000 : (int)idle;
+  }
+  // 2026-10-30：hover 的 120ms 里主人可能又动了鼠标；此时再按下会把点击落到他
+  // 当前光标处（可能点进别的窗口）。每次按下前核对光标仍在目标点，否则放弃本次
+  // 点击，由调用方重新过静默闸门后重试。
+  public static bool Click(int x, int y) {
     SetCursorPos(x, y);
     Thread.Sleep(120);
+    P p;
+    if (!GetCursorPos(out p) || p.X != x || p.Y != y) { return false; }
     INPUT[] arr = new INPUT[1];
     arr[0].type = 0; arr[0].mi.dx = 0; arr[0].mi.dy = 0; arr[0].mi.mouseData = 0;
     arr[0].mi.dwFlags = 0x0002; arr[0].mi.time = 0; arr[0].mi.dwExtraInfo = UIntPtr.Zero; // LEFTDOWN
@@ -125,10 +140,60 @@ public static class Q {
     Thread.Sleep(80);
     arr[0].mi.dwFlags = 0x0004;                                                            // LEFTUP
     SendInput(1, arr, Marshal.SizeOf(typeof(INPUT)));
+    return true;
   }
 }
 "@
 Add-Type $sig
+# 2026-10-30：黑药丸扫描改编译实现。原 PS 三层嵌套 GetPixel 在 3600x2090 上实测
+# 130s（10-30 01:12 那轮光定位按钮就花了 ~95s）；同等判据走 LockBits 只要 25ms。
+$pillSig = @"
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+public static class Pill {
+  // 与旧 PS 版完全相同的判据：中央区「中性黑」高密度横条 + 上下 14px 也是黑。
+  public static int[] Find(Bitmap bmp, double x0f, double x1f, double y0f, double y1f) {
+    int W = bmp.Width, H = bmp.Height;
+    // LockBits 只认位图自己的像素格式；截图通常是 32bppArgb，但别赌，统一转一份。
+    Bitmap src = bmp;
+    if (bmp.PixelFormat != PixelFormat.Format32bppArgb) {
+      src = new Bitmap(W, H, PixelFormat.Format32bppArgb);
+      using (Graphics g = Graphics.FromImage(src)) { g.DrawImageUnscaled(bmp, 0, 0); }
+    }
+    var rect = new Rectangle(0, 0, W, H);
+    var data = src.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+    byte[] buf; int stride;
+    try { stride = data.Stride; buf = new byte[stride * H]; Marshal.Copy(data.Scan0, buf, 0, buf.Length); }
+    finally { src.UnlockBits(data); if (!ReferenceEquals(src, bmp)) { src.Dispose(); } }
+    int x0 = (int)(W * x0f), x1 = (int)(W * x1f);
+    int y0 = (int)(H * y0f), y1 = (int)(H * y1f);
+    int win = 96;
+    Func<int, int, bool> isBlack = (x, y) => {
+      if (x < 0 || y < 0 || x >= W || y >= H) return false;
+      int o = y * stride + x * 4;           // BGRA
+      int b = buf[o], g = buf[o + 1], r = buf[o + 2];
+      int lum = (r + g + b) / 3;
+      int mx = Math.Max(r, Math.Max(g, b));
+      int mn = Math.Min(r, Math.Min(g, b));
+      return lum < 95 && (mx - mn) < 40;
+    };
+    for (int y = y0 + 20; y < y1 - 20; y += 3) {
+      for (int x = x0; x < x1 - win; x += 4) {
+        int nb = 0, tot = 0;
+        for (int k = 0; k < win; k += 3) { tot++; if (isBlack(x + k, y)) nb++; }
+        if (tot > 0 && (double)nb / tot > 0.70) {
+          int cx = x + win / 2;
+          if (isBlack(cx, y - 14) && isBlack(cx, y + 14)) return new int[] { cx, y };
+        }
+      }
+    }
+    return null;
+  }
+}
+"@
+Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition $pillSig
 try { [void][Q]::SetProcessDpiAwareness(2) } catch {}   # per-monitor v2：全程物理像素
 
 # ---- WinRT OCR ----
@@ -304,10 +369,12 @@ function Test-Blank($bmp) {
 # 抓窗口 -> 位图（供 OCR 与像素扫描）。
 # 屏外模式必须用 PrintWindow：CopyFromScreen(屏外坐标) 拍到的是用户桌面内容。
 # 实测 v0.4.8 的 PrintWindow(PW_RENDERFULLCONTENT) 能抓到活动弹窗叠加层；
-# 屏外窗口受 backgroundThrottling 影响首帧可能空白，2s 间隔重试（上限 30s）。
+# 屏外窗口受 backgroundThrottling 影响首帧可能空白，2s 间隔重试（上限 8s）。
 function Capture-Win($t) {
+    # 2026-10-30：上限从 15 降到 5（30s→8s）。空白帧一旦连续出现，整轮重试也很少
+    # 能自愈，反而把 240s 的外层预算耗尽（10-27 LobsterAI 就是这么被判 failed 的）。
     $maxTry = 1
-    if ($Offscreen) { $maxTry = 15 }
+    if ($Offscreen) { $maxTry = 5 }
     $bmp = $null
     for ($tryN = 1; $tryN -le $maxTry; $tryN++) {
         $bmp = New-Object System.Drawing.Bitmap($t.W, $t.H)
@@ -426,21 +493,12 @@ function Test-Claimed([string]$text){ return Test-Contains $text @('已领取','
 # 启动弹窗和「权益中心」两条路径同一天都 pending，但客户端日志 claimable=true 且从未
 # 发出领取请求。y 上限放宽到 0.90H；x 范围不变，底栏最左的深绿「查看详情」仍被排除。
 function Find-BlackPill($bmp,$t) {
-    $y0=[int]($t.H*0.40); $y1=[int]($t.H*0.90); $x0=[int]($t.W*0.40); $x1=[int]($t.W*0.74)
-    function IsBlack($x,$y){ if($x -lt 0 -or $y -lt 0 -or $x -ge $bmp.Width -or $y -ge $bmp.Height){return $false}; $p=$bmp.GetPixel($x,$y); $r=[int]$p.R;$g=[int]$p.G;$b=[int]$p.B; $lum=($r+$g+$b)/3; $mx=[Math]::Max($r,[Math]::Max($g,$b)); $mn=[Math]::Min($r,[Math]::Min($g,$b)); return ($lum -lt 95) -and (($mx-$mn) -lt 40) }
-    $win=96; $step=3
-    for($y=$y0+20; $y -lt $y1-20;$y+=3){
-        for($x=$x0; $x -lt ($x1-$win);$x+=4){
-            $nb=0; $tot=0
-            for($k=0;$k -lt $win;$k+=$step){ $tot++; if((IsBlack ($x+$k) $y)){$nb++} }
-            if($tot -gt 0 -and ($nb/$tot) -gt 0.70){
-                $cx=[int]($x+$win/2)
-                if((IsBlack $cx ($y-14)) -and (IsBlack $cx ($y+14))){
-                    Log ("blackpill: HIT img($cx,$y) dens=" + [math]::Round($nb/$tot,2))
-                    return @{ ix=$cx; iy=$y }
-                }
-            }
-        }
+    # 判据与采样范围原样保留，只把逐像素循环搬进编译代码（Pill.Find）。
+    # 复核阶段会再调一次本函数，所以这里必须便宜：编译版全扫 ~25ms。
+    $hit = [Pill]::Find($bmp, 0.40, 0.74, 0.40, 0.90)
+    if ($hit) {
+        Log ("blackpill: HIT img(" + $hit[0] + "," + $hit[1] + ")")
+        return @{ ix = [int]$hit[0]; iy = [int]$hit[1] }
     }
     Log "blackpill: no hit"
     return $null
@@ -617,6 +675,35 @@ function Get-IdleSeconds {
     $tick = [uint32][Q]::GetTickCount()
     return [int]((($tick - $li.dwTime) -band 0xFFFFFFFF) / 1000)
 }
+function Wait-InputQuiet([int]$QuietMs = 320, [int]$MaxWaitMs = 20000) {
+    # 点击前闸门：主人正在动鼠标/敲键盘时先等。屏外方案可以用 PrintWindow 静默
+    # 识别，但真实点击那一下必须占用光标；等他停手后立刻点、点完立刻还原，
+    # 才不会出现「脚本把鼠标抢走」的感觉。QuietMs 取 320ms——足够让一次连续
+    # 移动/点击结束，又短到不会明显推迟签到。超时仍继续（漏签代价更大），
+    # 但会记一行日志。
+    $start = Get-Date
+    $deadline = $start.AddMilliseconds($MaxWaitMs)
+    $logged = $false
+    while ($true) {
+        $idle = [Q]::IdleMs()
+        if ($idle -ge $QuietMs) {
+            if ($logged) {
+                Log ("input-quiet: 已静默 " + $idle + "ms，开始点击（等了 " +
+                     [int]((Get-Date) - $start).TotalMilliseconds + "ms）")
+            }
+            return $true
+        }
+        if (-not $logged) {
+            Log ("input-quiet: 用户正在操作（idle=" + $idle + "ms），等键鼠停下再点（上限 " + $MaxWaitMs + "ms）")
+            $logged = $true
+        }
+        if ((Get-Date) -ge $deadline) {
+            Log ("input-quiet: 等待 " + $MaxWaitMs + "ms 仍有键鼠输入，按最小暴露继续")
+            return $false
+        }
+        Start-Sleep -Milliseconds 25
+    }
+}
 function Wait-UserIdle {
     # 空闲闸门：用户刚动过键鼠就不搬窗口，最多等 IdleWaitSec 秒；超时仍继续
     # （签到不能因为主人在用电脑就整天不做），但此时暴露面只有 BringBack 的 ~0.5s。
@@ -731,11 +818,26 @@ function BringBack-Click([int]$ax,[int]$ay) {
         return $false
     }
     Save-Foreground
+    # 2026-10-30：真实点击前先等主人停手（静默闸门），点完立刻把光标放回原处——
+    # 旧顺序是「点完等 250ms 才还原」，期间鼠标一直停在点击位，主人会以为鼠标被抢。
+    [void](Wait-InputQuiet 320 20000)
     $saved = New-Object Q+P
     [void][Q]::GetCursorPos([ref]$saved)
+    $clicked = $false
     try {
-        [Q]::Click($cx,$cy)
-        Log ("bringback: real click @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+        $clicked = [bool][Q]::Click($cx,$cy)
+        if (-not $clicked) {
+            # 120ms hover 里光标被主人挪走了（或系统改了位置）：重新过闸门再点一次。
+            Log "bringback: 按下前光标已离开目标点，重试一次"
+            [void](Wait-InputQuiet 320 20000)
+            $clicked = [bool][Q]::Click($cx,$cy)
+        }
+        [void][Q]::SetCursorPos($saved.X,$saved.Y)
+        if ($clicked) {
+            Log ("bringback: real click @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+        } else {
+            Log ("bringback: 光标两次都被挪走，放弃本次点击 @ " + $cx + "," + $cy)
+        }
         Start-Sleep -Milliseconds 250
     } finally {
         [void][Q]::SetCursorPos($saved.X,$saved.Y)
@@ -748,7 +850,7 @@ function BringBack-Click([int]$ax,[int]$ay) {
         Restore-Foreground
         Move-OffscreenNow
     }
-    return $true
+    return $clicked
 }
 function Click-At([int]$ax,[int]$ay,[switch]$SkipSynth) {
     # 坐标一律是窗口位图内的相对坐标；屏幕坐标按窗口当前位置现算。
@@ -757,9 +859,13 @@ function Click-At([int]$ax,[int]$ay,[switch]$SkipSynth) {
         $cr = New-Object Q+R
         [void][Q]::GetWindowRect($script:Hwnd,[ref]$cr)
         $sx = $cr.L + $ax; $sy = $cr.T + $ay
-        [Q]::Click($sx,$sy)
-        Log ("click screen($sx,$sy)")
-        return $true
+        [void](Wait-InputQuiet 320 20000)
+        $saved = New-Object Q+P
+        [void][Q]::GetCursorPos([ref]$saved)
+        $ok = [bool][Q]::Click($sx,$sy)
+        [void][Q]::SetCursorPos($saved.X,$saved.Y)
+        Log ("click screen($sx,$sy) ok=$ok cursor restored " + $saved.X + "," + $saved.Y)
+        return $ok
     }
     if (-not $SkipSynth) {
         $ok = Send-SynthMouse $ax $ay
@@ -790,7 +896,9 @@ function Grab-Frame($t){
 # 进程压根没起时用 -ExePath 补拉起一次（Python 侧已先 os.startfile，这里只兜底）。
 $script:SelfStarted = $false
 $t = $null
-$winDeadline = (Get-Date).AddSeconds(90)
+$winStart = Get-Date
+$winDeadline = $winStart.AddSeconds($WindowWaitSec)
+$winBeat = $winStart
 while ((Get-Date) -lt $winDeadline) {
     $t = Find-QoderWindow
     if ($t) { break }
@@ -802,11 +910,16 @@ while ((Get-Date) -lt $winDeadline) {
             $script:SelfStarted = $true
         }
     }
+    # 心跳：Python 侧最多再等 30s，两边都不打日志时主人只会看到黑框不动。
+    if (((Get-Date) - $winBeat).TotalSeconds -ge 10) {
+        Log ("window wait: " + [int]((Get-Date) - $winStart).TotalSeconds + "s / " + $WindowWaitSec + "s")
+        $winBeat = Get-Date
+    }
     Start-Sleep -Seconds 2
 }
 if (-not $t) {
     try { Log-WindowProbe } catch {}
-    Out-Json "notfound" "等待 90s 仍未出现 Qoder CN 主窗口（客户端没开、仍处最小化或冷启动失败；本次窗口探针已写 logs/ps1_qodercn.log）"
+    Out-Json "notfound" ("等待 " + $WindowWaitSec + "s 仍未出现 Qoder CN 主窗口（客户端没开、仍处最小化或冷启动失败；本次窗口探针已写 logs/ps1_qodercn.log）")
 }
 
 $hwnd=$t.Hwnd

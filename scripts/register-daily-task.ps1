@@ -13,6 +13,12 @@
 # Check-in is idempotent (already-claimed is detected), so the rare case of
 # both triggers firing in one day is harmless.
 #
+# MultipleInstancesPolicy=Queue (changed 2026-10-29, was IgnoreNew): a chain that
+# starts at 23:58 and runs past midnight used to make the 00:00 trigger get
+# dropped, so the new day never got signed. With Queue the overlapping run waits
+# for the current one and then executes; _daily_chain.ps1 also holds
+# logs\checkin.lock so manual runs cannot collide either.
+#
 # Why HighestAvailable + InteractiveToken:
 #   * InteractiveToken -> runs only while the user is logged on, so desktop GUI
 #     clients really appear and can be clicked by the OCR scripts.
@@ -81,7 +87,7 @@ $randomXml    </CalendarTrigger>
     </Principal>
   </Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>
@@ -100,9 +106,12 @@ $randomXml    </CalendarTrigger>
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
+    <!-- 只能有一个 Exec：本机注册会静默丢第二个 action，链式步骤见 _daily_chain.ps1 -->
+    <!-- -WindowStyle Hidden + -Unattended：任务不弹黑框；启动闸门也不问，
+         直接开始（2026-10-29 起，见 _daily_chain.ps1 的 param 注释）。 -->
     <Exec>
-      <Command>$py</Command>
-      <Arguments>-u "$root\credit.py" checkin</Arguments>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$root\scripts\_daily_chain.ps1" -Unattended</Arguments>
       <WorkingDirectory>$root</WorkingDirectory>
     </Exec>
   </Actions>
@@ -137,3 +146,4 @@ try {
 
 [System.IO.File]::WriteAllText("$root\logs\_register_task_out.txt", $out)
 Write-Output $out
+

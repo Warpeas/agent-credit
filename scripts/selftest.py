@@ -30,16 +30,22 @@ def main() -> None:
     mavis = find_account("mavis")
     assert mavis["claim_policy"] == "never_auto"
 
-    # MiniMax 按天整档额度：必须逐日等于 2026-10-11 服务端下发的值，
-    # 且整周期 = cycle_total。回归防护——服务端调额或有人把表改成两段式时立刻炸。
-    # 实测值：1200/400/400/1000/400/400/1000 = 4800（day1 基础额度是 800 而非 400，
-    # 所以单个 daily_amount + bonus 表达不了，必须走 daily_amount_by_day）。
+    # MiniMax 按天整档额度：必须逐日等于**官方基线**（400/400/400/1000/400/400/1000），
+    # 整周期 = cycle_total = 4000。回归防护——服务端调额或有人把表改成两段式时立刻炸。
+    # 2026-10-24 订正：bonus_points 已包含在 points 里（客户端类型定义原文
+    # "Extra credits already included in points"），所以 day1 不是 800+400=1200。
+    # 活动期服务端会临时翻倍（10-24 实测 day4=2024），那是服务端实发，不进基线表。
     mm = find_account("minimax")
     mm_streak = mm.get("streak") or {}
     per_day = [checkin._grant_amounts(mm, s)[0] + checkin._grant_amounts(mm, s)[1]
                for s in range(1, 8)]
-    assert per_day == [1200, 400, 400, 1000, 400, 400, 1000], per_day
-    assert sum(per_day) == mm_streak["cycle_total"] == 4800
+    assert per_day == [400, 400, 400, 1000, 400, 400, 1000], per_day
+    assert sum(per_day) == mm_streak["cycle_total"] == 4000
+    # vendor 脚本不得再把 bonus_points 加到 points 上（2026-10-24 修的 bug，台账多记 5024）。
+    mm_src = (ROOT / "vendor" / "minimax-auto-signin" / "signin.py").read_text(encoding="utf-8")
+    bad = [ln.strip() for ln in mm_src.splitlines()
+           if "bonus_points" in ln and "+" in ln and "int(" in ln]
+    assert not bad, f"signin.py 又把 bonus_points 加了一遍：{bad}"
     # 没配整档表的账户仍走「daily + bonus」两段式，不能被这次改动带偏。
     assert checkin._grant_amounts({"daily_amount": 100,
                                    "streak": {"bonus_on": [3], "bonus_amount": 50}}, 3) == (100, 50)

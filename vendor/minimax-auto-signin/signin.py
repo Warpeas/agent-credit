@@ -278,11 +278,18 @@ def warm_token() -> bool:
 
 
 def today_granted() -> int | None:
-    """服务端今天这一格实际发放的积分（points + bonus_points），已签才有值。
+    """服务端今天这一格实际发放的积分，已签才有值。
 
-    catalog 的 daily_amount 是常额（400），活动期服务端会翻倍
-    （2026-10 国庆期：day3 = 800+400，day4 = 2000+1000），
-    按常额入账会让账本比实际少一大截，所以以服务端为准。
+    取 `points` 一项即可，**不要再加 bonus_points**：
+    客户端自带的类型定义写明 bonus 是「已包含在 points 里的额外额度」——
+    `SigninDayItem.bonus_points` 的注释原文（app.asar @mavis/shared）：
+        /** Extra credits already included in points; absent on older responses. */
+    前端渲染同源也是 `total_points = points`（签到按钮上的「签到得@N」用的也是 points）。
+
+    2026-10 踩过的坑：早期把 bonus_points 当成额外再加一次，
+    10-04..10-07 国庆期与 10-24 都被多记（多记 5024 积分，账本余额虚高）。
+    活动期服务端会翻倍（2026-10 国庆期：day1 = 800、day4 = 2000，
+    其中 bonus_points 400/1000 是这 800/2000 的**组成部分**，不是另加的一份）。
     """
     code, body = call(STATUS_PATH)
     if code != 200:
@@ -295,7 +302,7 @@ def today_granted() -> int | None:
     today = next((d for d in (data.get("days") or []) if d.get("is_today")), None)
     if not today or today.get("status") != DAY_CLAIMED:
         return None
-    return int(today.get("points") or 0) + int(today.get("bonus_points") or 0)
+    return int(today.get("points") or 0)
 
 
 def cmd_auto() -> int:
@@ -326,7 +333,7 @@ def cmd_auto() -> int:
     if today and today.get("status") == DAY_CLAIMED:
         print(f"[already] 今日已签到（服务端 day_no={today.get('day_no')} status=Claimed），不重复领取")
         # 已签也报实发额：补账/重跑时让 checkin.py 能按服务端口径入账
-        got = int(today.get("points") or 0) + int(today.get("bonus_points") or 0)
+        got = int(today.get("points") or 0)
         if got:
             print(f"[granted] {got}")
         return 0

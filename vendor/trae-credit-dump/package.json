@@ -1,0 +1,23 @@
+{
+  "name": "trae-credit-dump",
+  "displayName": "Trae Credit Dump (agent-credit)",
+  "description": "导出 Trae 客户端内的积分/权益快照到 agent-credit 项目 logs/trae_credit_detail.json。只调用客户端官方命令（executeCommand），不读取凭据、不注入、不改客户端。",
+  "version": "0.0.2",
+  "publisher": "agent-credit",
+  "private": true,
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./main.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentCredit.dumpTraeCredit",
+        "title": "Agent Credit: 导出 Trae 积分明细"
+      }
+    ]
+  }
+}

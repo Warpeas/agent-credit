@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent 评价指标体系</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --orange: #db6d28; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, 'Segoe UI', sans-serif; padding: 24px; line-height: 1.6; }
+  h1 { font-size: 1.6em; margin-bottom: 8px; }
+  h2 { font-size: 1.2em; color: var(--accent); margin: 28px 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { font-size: 1em; color: var(--purple); margin: 16px 0 8px; }
+  .subtitle { color: var(--muted); margin-bottom: 24px; }
+  .dim-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .dim-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .dim-name { font-weight: 600; font-size: 1.05em; }
+  .dim-tag { font-size: 0.75em; padding: 2px 8px; border-radius: 12px; font-weight: 500; }
+  .tag-existing { background: #1f3a20; color: var(--green); border: 1px solid #2d5a30; }
+  .tag-new { background: #3a2a10; color: var(--yellow); border: 1px solid #5a4020; }
+  .tag-subjective { background: #2a1a3a; color: var(--purple); border: 1px solid #4a3060; }
+  .metric-row { display: flex; gap: 12px; padding: 8px 0; border-bottom: 1px solid #21262d; align-items: flex-start; }
+  .metric-row:last-child { border-bottom: none; }
+  .metric-name { min-width: 140px; font-weight: 500; color: var(--text); }
+  .metric-desc { flex: 1; color: var(--muted); font-size: 0.9em; }
+  .metric-status { min-width: 60px; text-align: right; font-size: 0.8em; }
+  .status-filled { color: var(--green); }
+  .status-partial { color: var(--yellow); }
+  .status-empty { color: var(--red); }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.85em; }
+  th { background: #21262d; color: var(--accent); text-align: left; padding: 8px 10px; font-weight: 600; border-bottom: 2px solid var(--border); }
+  td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:hover td { background: #1c2128; }
+  .agent-name { font-weight: 600; white-space: nowrap; }
+  .score-cell { text-align: center; font-weight: 600; min-width: 36px; }
+  .score-high { color: var(--green); }
+  .score-mid { color: var(--yellow); }
+  .score-low { color: var(--red); }
+  .score-na { color: var(--muted); }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 12px 0; font-size: 0.85em; color: var(--muted); }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .dot-green { background: var(--green); }
+  .dot-yellow { background: var(--yellow); }
+  .dot-red { background: var(--red); }
+  .note { background: #1c2128; border-left: 3px solid var(--accent); padding: 10px 14px; margin: 12px 0; font-size: 0.9em; color: var(--muted); border-radius: 0 6px 6px 0; }
+  .formula { font-family: 'Cascadia Code', 'Fira Code', monospace; background: #21262d; padding: 2px 6px; border-radius: 4px; color: var(--purple); font-size: 0.9em; }
+  .section-intro { color: var(--muted); font-size: 0.9em; margin-bottom: 12px; }
+  .test-hint { font-size: 0.8em; color: var(--orange); margin-top: 4px; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; color: var(--accent); font-size: 0.9em; padding: 4px 0; }
+  summary:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>Agent 评价指标体系</h1>
+<p class="subtitle">基于 catalog.yaml 现有数据梳理，分为「已有数据」与「待实测」两组。每个指标附评分口径，方便逐项填充。</p>
+
+<div class="legend">
+  <span class="legend-item"><span class="dot dot-green"></span> 已有数据（catalog 可提取）</span>
+  <span class="legend-item"><span class="dot dot-yellow"></span> 部分有（需补充实测）</span>
+  <span class="legend-item"><span class="dot dot-red"></span> 待实测（目前空白）</span>
+</div>
+
+<!-- ============ 维度一：额度价值 ============ -->
+<h2>维度一：额度价值（V）— 权重 0.4</h2>
+<p class="section-intro">回答一个问题：<b>这些积分到底值多少钱、能用多久？</b>现有 V 分是综合判断，下面拆成可独立打分的子项。</p>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">1.1 日额度（标准化）</span>
+    <span class="dim-tag tag-existing">已有数据</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">每日可获得多少积分/token。token 类需折算（1M token ≈ 多少「有效积分」待定）。</span>
+    <span class="metric-status status-filled">全部有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 500+/天 或 10M+ token &nbsp;|&nbsp;
+      4 = 200-499/天 &nbsp;|&nbsp;
+      3 = 100-199/天 &nbsp;|&nbsp;
+      2 = 20-99/天 &nbsp;|&nbsp;
+      1 = &lt;20/天 或一次性
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">1.2 有效期</span>
+    <span class="dim-tag tag-existing">已有数据</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">积分领完后保留多少天。当日清零=0，30天可累积远优于当日清零。</span>
+    <span class="metric-status status-filled">全部有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 30+天可累积 &nbsp;|&nbsp;
+      4 = 7-29天 &nbsp;|&nbsp;
+      3 = 当日清零但有永久托底 &nbsp;|&nbsp;
+      2 = 当日清零 &nbsp;|&nbsp;
+      1 = 一次性/过期不续
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">1.3 连签/额外加成</span>
+    <span class="dim-tag tag-existing">已有数据</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">连续签到是否有额外奖励（如第7天+1000）。有连签加成的实际周收益远高于线性日额度。</span>
+    <span class="metric-status status-filled">全部有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 7天周期加成 ≥50% &nbsp;|&nbsp;
+      4 = 有加成但 &lt;50% &nbsp;|&nbsp;
+      3 = 每月登录赠固定额 &nbsp;|&nbsp;
+      2 = 无加成但额度本身大 &nbsp;|&nbsp;
+      1 = 无加成且额度小
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">1.4 实际可消耗性</span>
+    <span class="dim-tag tag-new">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">领到的积分能不能真正花出去？有些产品额度大但单次任务消耗极高、或模型调用受限，实际用不掉多少。</span>
+    <span class="metric-status status-empty">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 日常任务轻松消耗、不浪费 &nbsp;|&nbsp;
+      4 = 大部分场景够用 &nbsp;|&nbsp;
+      3 = 偶尔够用、经常花不完 &nbsp;|&nbsp;
+      2 = 基本花不掉（清零=浪费）&nbsp;|&nbsp;
+      1 = 完全用不出去
+    </span>
+  </div>
+  <p class="test-hint">实测方法：连续 3 天正常用，记录每天消耗量 vs 日额度，算消耗率。</p>
+</div>
+
+<!-- ============ 维度二：能力覆盖 ============ -->
+<h2>维度二：能力覆盖（C）— 权重 0.3</h2>
+<p class="section-intro">回答：<b>这个 Agent 能帮我做什么？</b>现有 C 分偏主观，下面拆成可独立验证的子能力。</p>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">2.1 模型代际</span>
+    <span class="dim-tag tag-existing">已有数据</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">提供的模型是哪一代？是否包含当前一线模型（K3/GLM-5/V4/M3 等）。</span>
+    <span class="metric-status status-filled">全部有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 多厂商最新旗舰（K3+GLM-5+V4 级）&nbsp;|&nbsp;
+      4 = 有 1-2 个一线 + 其他 &nbsp;|&nbsp;
+      3 = 上一代旗舰为主 &nbsp;|&nbsp;
+      2 = 仅自研/偏旧 &nbsp;|&nbsp;
+      1 = 模型不明或极旧
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">2.2 编码能力</span>
+    <span class="dim-tag tag-subjective">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">能不能写代码、改 bug、做项目？给一个真实编码任务，看完成度。</span>
+    <span class="metric-status status-empty">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 独立完成中型项目、vibe coding 流畅 &nbsp;|&nbsp;
+      4 = 能写能改、偶尔需要纠正 &nbsp;|&nbsp;
+      3 = 能写简单脚本、复杂项目吃力 &nbsp;|&nbsp;
+      2 = 只能补全/小修 &nbsp;|&nbsp;
+      1 = 编码不可用
+    </span>
+  </div>
+  <p class="test-hint">实测方法：同一个中等复杂度任务（如「写一个 Python CLI 工具+测试」），各家跑一遍，对比完成度。</p>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">2.3 浏览器操控</span>
+    <span class="dim-tag tag-new">部分有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">能否调用内置浏览器打开网页、点击、填表、提取信息？有没有 Playwright 或类似能力。</span>
+    <span class="metric-status status-partial">部分有</span>
+  </div>
+  <table>
+    <tr><th>Agent</th><th>浏览器操控</th><th>依据</th></tr>
+    <tr><td class="agent-name">MiniMax Code</td><td class="score-cell score-mid">?</td><td>Code 2.0 宣称电脑操控，待确认浏览器子项</td></tr>
+    <tr><td class="agent-name">WorkBuddy</td><td class="score-cell score-low">无</td><td>主人实测：没有 Playwright</td></tr>
+    <tr><td class="agent-name">Qoder CN</td><td class="score-cell score-high">有</td><td>Computer Use + browser-use MCP</td></tr>
+    <tr><td class="agent-name">Trae</td><td class="score-cell score-mid">?</td><td>有 MCP 生态，待确认</td></tr>
+    <tr><td class="agent-name">AutoClaw</td><td class="score-cell score-mid">?</td><td>本地执行能力全，待确认浏览器</td></tr>
+    <tr><td class="agent-name">DuMate</td><td class="score-cell score-mid">?</td><td>百度系，宣称网页操作</td></tr>
+    <tr><td class="agent-name">Loomy</td><td class="score-cell score-mid">?</td><td>宣称网页操作能力</td></tr>
+    <tr><td class="agent-name">Mavis</td><td class="score-cell score-mid">?</td><td>宣称浏览器子 Agent</td></tr>
+    <tr><td class="agent-name">千问办公</td><td class="score-cell score-mid">?</td><td>宣称浏览器自动化</td></tr>
+    <tr><td class="agent-name">ToDesk</td><td class="score-cell score-mid">?</td><td>键鼠执行，待确认浏览器</td></tr>
+    <tr><td class="agent-name">其余</td><td class="score-cell score-na">-</td><td>纯编码/办公，无浏览器</td></tr>
+  </table>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 完整浏览器自动化（Playwright 级，能调试）&nbsp;|&nbsp;
+      4 = 能打开/点击/填表&nbsp;|&nbsp;
+      3 = 有限网页交互&nbsp;|&nbsp;
+      2 = 只能打开不能操控&nbsp;|&nbsp;
+      1 = 无浏览器能力
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">2.4 电脑操控（Computer Use）</span>
+    <span class="dim-tag tag-new">部分有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">能否操控桌面应用？键鼠模拟、窗口管理、文件操作等超出浏览器范围的系统级操控。</span>
+    <span class="metric-status status-partial">部分有</span>
+  </div>
+  <table>
+    <tr><th>Agent</th><th>电脑操控</th><th>依据</th></tr>
+    <tr><td class="agent-name">MiniMax Code</td><td class="score-cell score-mid">?</td><td>Code 2.0 宣称办公自动化/电脑操控</td></tr>
+    <tr><td class="agent-name">Qoder CN</td><td class="score-cell score-high">有</td><td>主人实测：Computer Use 能力</td></tr>
+    <tr><td class="agent-name">AutoClaw</td><td class="score-cell score-mid">?</td><td>本地执行，待确认范围</td></tr>
+    <tr><td class="agent-name">Loomy</td><td class="score-cell score-mid">?</td><td>宣称文件整理/数据分析</td></tr>
+    <tr><td class="agent-name">Mavis</td><td class="score-cell score-mid">?</td><td>宣称电脑/文件/软件 4 子 Agent</td></tr>
+    <tr><td class="agent-name">ToDesk</td><td class="score-cell score-mid">?</td><td>远控+键鼠执行</td></tr>
+    <tr><td class="agent-name">其余</td><td class="score-cell score-na">-</td><td>无此能力</td></tr>
+  </table>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 全系统级操控（键鼠+窗口+文件+应用）&nbsp;|&nbsp;
+      4 = 大部分桌面操控&nbsp;|&nbsp;
+      3 = 有限（如只能文件操作）&nbsp;|&nbsp;
+      2 = 仅沙箱内执行&nbsp;|&nbsp;
+      1 = 无
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">2.5 多模态</span>
+    <span class="dim-tag tag-subjective">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">能否处理图片/音频/视频？输入端（看图、听音）和输出端（生图、生视频）分别如何。</span>
+    <span class="metric-status status-partial">部分有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 输入+输出全模态（图/音/视频）&nbsp;|&nbsp;
+      4 = 图+文多模态输入&nbsp;|&nbsp;
+      3 = 能看图但不能生成&nbsp;|&nbsp;
+      2 = 仅文本&nbsp;|&nbsp;
+      1 = 纯文本无多模态
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">2.6 移动端 + 跨端同步</span>
+    <span class="dim-tag tag-existing">已有数据</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">有没有手机客户端？移动端和桌面端任务/项目能否同步？</span>
+    <span class="metric-status status-filled">全部有</span>
+  </div>
+  <table>
+    <tr><th>Agent</th><th>移动端</th><th>同步</th><th>依据</th></tr>
+    <tr><td class="agent-name">MiniMax</td><td class="score-cell score-high">有</td><td class="score-cell score-high">同步</td><td>能看到桌面端项目并继续对话</td></tr>
+    <tr><td class="agent-name">AutoClaw</td><td class="score-cell score-high">有</td><td class="score-cell score-low">不同步</td><td>独立云端 claw 环境</td></tr>
+    <tr><td class="agent-name">Loomy</td><td class="score-cell score-mid">有</td><td class="score-cell score-low">不同步</td><td>主人 10-23 实测</td></tr>
+    <tr><td class="agent-name">MonkeyCode</td><td class="score-cell score-mid">有</td><td class="score-cell score-na">-</td><td>扫码登录，体验差</td></tr>
+    <tr><td class="agent-name">其余</td><td class="score-cell score-na">无</td><td class="score-cell score-na">-</td><td>纯桌面端</td></tr>
+  </table>
+</div>
+
+<!-- ============ 维度三：领取可靠性 ============ -->
+<h2>维度三：领取可靠性（A）— 权重 0.3</h2>
+<p class="section-intro">回答：<b>签到能不能稳定跑通、不靠人盯着？</b>这部分数据最完整。</p>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">3.1 领取方式</span>
+    <span class="dim-tag tag-existing">已有数据</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">external 直签 > UI 自动化 > 手动签到 > 不自动。越自动越可靠。</span>
+    <span class="metric-status status-filled">全部有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = external 直签（零 GUI）&nbsp;|&nbsp;
+      4 = UI 全自动且稳定&nbsp;|&nbsp;
+      3 = UI 自动但偶发失败&nbsp;|&nbsp;
+      2 = 需手动触发&nbsp;|&nbsp;
+      1 = 不自动
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">3.2 自动化稳定性</span>
+    <span class="dim-tag tag-new">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">过去 30 天签到成功率。UI 路线改版就挂、external 几乎不掉。</span>
+    <span class="metric-status status-partial">部分有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 30 天 100% 成功&nbsp;|&nbsp;
+      4 = ≥90%&nbsp;|&nbsp;
+      3 = ≥70%&nbsp;|&nbsp;
+      2 = ≥50%&nbsp;|&nbsp;
+      1 = &lt;50% 或从未自动过
+    </span>
+  </div>
+  <p class="test-hint">实测方法：看 logs/checkin_*.log 统计 30 天 ok/already vs pending/fail 比例。</p>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">3.3 脆弱性（改版风险）</span>
+    <span class="dim-tag tag-subjective">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">客户端改版后签到会不会挂？external 几乎免疫，UI OCR 路线一改版就废。</span>
+    <span class="metric-status status-partial">部分有</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = external 直签，改版免疫&nbsp;|&nbsp;
+      4 = UI 锚点健壮、改版后易修&nbsp;|&nbsp;
+      3 = 偶需调整&nbsp;|&nbsp;
+      2 = 经常因改版失效&nbsp;|&nbsp;
+      1 = 每次改版必挂
+    </span>
+  </div>
+</div>
+
+<!-- ============ 维度四：实际体验 ============ -->
+<h2>维度四：实际体验（主观评分，不纳入综合分）</h2>
+<p class="section-intro">这些指标不影响 V/C/A 综合分，但对「今天用哪个」的决策很关键。全部待实测。</p>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">4.1 响应速度</span>
+    <span class="dim-tag tag-subjective">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">从发出指令到开始输出的延迟，以及流式输出的吞吐。</span>
+    <span class="metric-status status-empty">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 秒回、流式飞快&nbsp;|&nbsp;
+      4 = 1-3s 起、流畅&nbsp;|&nbsp;
+      3 = 3-8s 起、可接受&nbsp;|&nbsp;
+      2 = 8-15s 起、偶尔卡&nbsp;|&nbsp;
+      1 = 经常超 15s 或卡死
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">4.2 指令遵循</span>
+    <span class="dim-tag tag-subjective">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">能不能听懂人话？给复杂指令时是否抓得住重点、不跑偏。</span>
+    <span class="metric-status status-empty">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 复杂指令一次到位&nbsp;|&nbsp;
+      4 = 偶尔需补充说明&nbsp;|&nbsp;
+      3 = 经常抓不住重点&nbsp;|&nbsp;
+      2 = 需反复纠正&nbsp;|&nbsp;
+      1 = 基本听不懂
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">4.3 上下文管理</span>
+    <span class="dim-tag tag-subjective">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">长对话中是否丢失早期上下文，多轮迭代是否稳定。</span>
+    <span class="metric-status status-empty">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = 长对话不丢、多轮稳定&nbsp;|&nbsp;
+      4 = 偶尔需要提醒&nbsp;|&nbsp;
+      3 = 10+ 轮后开始忘&nbsp;|&nbsp;
+      2 = 5 轮后就丢&nbsp;|&nbsp;
+      1 = 几乎没有上下文
+    </span>
+  </div>
+</div>
+
+<div class="dim-card">
+  <div class="dim-header">
+    <span class="dim-name">4.4 工具/MCP 生态</span>
+    <span class="dim-tag tag-subjective">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">指标</span>
+    <span class="metric-desc">支持多少工具/插件/MCP？能否自定义扩展？生态丰富度。</span>
+    <span class="metric-status status-empty">待实测</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-name">评分口径</span>
+    <span class="metric-desc">
+      5 = MCP + 丰富插件市场&nbsp;|&nbsp;
+      4 = MCP 或自有插件体系&nbsp;|&nbsp;
+      3 = 有限工具支持&nbsp;|&nbsp;
+      2 = 仅内置工具&nbsp;|&nbsp;
+      1 = 无扩展能力
+    </span>
+  </div>
+</div>
+
+<!-- ============ 各 Agent 现有数据一览 ============ -->
+<h2>各 Agent 现有 V/C/A 评分一览</h2>
+<p class="section-intro">从 catalog.yaml 直接提取。C 分（能力覆盖）目前最主观——上面的子指标就是用来拆解它的。</p>
+
+<table>
+  <tr>
+    <th>Agent</th>
+    <th>V 额度</th>
+    <th>C 能力</th>
+    <th>A 可靠</th>
+    <th>综合</th>
+    <th>档位</th>
+    <th>日额度</th>
+    <th>有效期</th>
+    <th>领取方式</th>
+  </tr>
+  <tr>
+    <td class="agent-name">MiniMax</td>
+    <td class="score-cell score-high">5</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-high">5</td>
+    <td class="score-cell score-high">4.7</td>
+    <td class="score-cell score-high">S</td>
+    <td>400/天</td><td>30天</td><td>external</td>
+  </tr>
+  <tr>
+    <td class="agent-name">WorkBuddy</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-high">5</td>
+    <td class="score-cell score-high">5</td>
+    <td class="score-cell score-high">4.6</td>
+    <td class="score-cell score-high">S</td>
+    <td>100/天</td><td>30天</td><td>external</td>
+  </tr>
+  <tr>
+    <td class="agent-name">Qoder CN</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-high">5</td>
+    <td class="score-cell score-low">2</td>
+    <td class="score-cell score-mid">3.3</td>
+    <td class="score-cell score-mid">B</td>
+    <td>100/天</td><td>30天</td><td>UI/OCR</td>
+  </tr>
+  <tr>
+    <td class="agent-name">Trae</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-mid">3.3</td>
+    <td class="score-cell score-mid">B</td>
+    <td>100/天</td><td>31天</td><td>UI/OCR</td>
+  </tr>
+  <tr>
+    <td class="agent-name">AutoClaw</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-low">2</td>
+    <td class="score-cell score-mid">3.1</td>
+    <td class="score-cell score-mid">B</td>
+    <td>200/天</td><td>服务端</td><td>UI/OCR</td>
+  </tr>
+  <tr>
+    <td class="agent-name">DuMate</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-mid">2.8</td>
+    <td class="score-cell score-mid">B</td>
+    <td>500/天</td><td>30天</td><td>手签</td>
+  </tr>
+  <tr>
+    <td class="agent-name">JoyCode</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-mid">2.8</td>
+    <td class="score-cell score-mid">B</td>
+    <td>一次性</td><td>至10-16</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">MonkeyCode T</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-mid">2.8</td>
+    <td class="score-cell score-mid">B</td>
+    <td>10M/天</td><td>当日清零</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">Kimi Work</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-mid">2.7</td>
+    <td class="score-cell score-mid">B</td>
+    <td>周期制</td><td>服务端</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">Loomy</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-mid">2.7</td>
+    <td class="score-cell score-mid">B</td>
+    <td>5000/天</td><td>当日清零</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">Mavis</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-low">2</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">2.5</td>
+    <td class="score-cell score-mid">B</td>
+    <td>10M/天</td><td>当日清零</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">CatPaw</td>
+    <td class="score-cell score-low">2</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">2.3</td>
+    <td class="score-cell score-low">C</td>
+    <td>一次性</td><td>365天</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">LobsterAI</td>
+    <td class="score-cell score-low">2</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">2.3</td>
+    <td class="score-cell score-low">C</td>
+    <td>100/天</td><td>30天</td><td>UI/OCR</td>
+  </tr>
+  <tr>
+    <td class="agent-name">扣子 Coze</td>
+    <td class="score-cell score-low">2</td>
+    <td class="score-cell score-mid">4</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">2.3</td>
+    <td class="score-cell score-low">C</td>
+    <td>1500/天</td><td>当日清零</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">ToDesk</td>
+    <td class="score-cell score-low">2</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">2.0</td>
+    <td class="score-cell score-low">C</td>
+    <td>100/天</td><td>30天</td><td>手签</td>
+  </tr>
+  <tr>
+    <td class="agent-name">MC 积分</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">1.6</td>
+    <td class="score-cell score-low">C</td>
+    <td>100/天</td><td>服务端</td><td>external</td>
+  </tr>
+  <tr>
+    <td class="agent-name">千问办公</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">1.6</td>
+    <td class="score-cell score-low">C</td>
+    <td>100/天</td><td>当日清零</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">小浣熊</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">1.6</td>
+    <td class="score-cell score-low">C</td>
+    <td>300/天</td><td>待确认</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">阶跃 AI</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-mid">3</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">1.6</td>
+    <td class="score-cell score-low">C</td>
+    <td>20/天</td><td>当日清零</td><td>不自动</td>
+  </tr>
+  <tr>
+    <td class="agent-name">Accio</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">2</td>
+    <td class="score-cell score-low">1</td>
+    <td class="score-cell score-low">1.3</td>
+    <td class="score-cell score-low">D</td>
+    <td>200/天</td><td>当日清零</td><td>不自动</td>
+  </tr>
+</table>
+
+<!-- ============ 实测计划建议 ============ -->
+<h2>实测优先级建议</h2>
+<div class="note">
+  <b>优先测 S/B 档的「待实测」指标</b>——它们是你真正会用的，评分细化有实际决策价值。C/D 档大多「不自动」，除非发现惊喜否则不值得花时间测。
+</div>
+
+<details open>
+  <summary><b>第一批：高优先级（日常在用的）</b></summary>
+  <table>
+    <tr><th>Agent</th><th>待测指标</th><th>建议任务</th></tr>
+    <tr><td class="agent-name">MiniMax</td><td>浏览器操控、电脑操控、多模态</td><td>给一个需要打开网页填表的任务</td></tr>
+    <tr><td class="agent-name">WorkBuddy</td><td>编码能力、响应速度、指令遵循</td><td>同一个编码任务跑一遍</td></tr>
+    <tr><td class="agent-name">Qoder CN</td><td>响应速度、指令遵循、上下文</td><td>长对话 10+ 轮看丢不丢</td></tr>
+    <tr><td class="agent-name">Trae</td><td>浏览器操控、编码能力</td><td>对比 WorkBuddy 同一任务</td></tr>
+  </table>
+</details>
+
+<details>
+  <summary><b>第二批：中优先级（偶尔用的）</b></summary>
+  <table>
+    <tr><th>Agent</th><th>待测指标</th><th>建议任务</th></tr>
+    <tr><td class="agent-name">AutoClaw</td><td>浏览器操控、电脑操控</td><td>试一个本地文件操作任务</td></tr>
+    <tr><td class="agent-name">Loomy</td><td>浏览器操控、电脑操控、移动端同步</td><td>手机端创建一个任务看桌面端能否看到</td></tr>
+    <tr><td class="agent-name">DuMate</td><td>浏览器操控、编码能力</td><td>搜索+文档任务</td></tr>
+    <tr><td class="agent-name">Mavis</td><td>浏览器操控、电脑操控</td><td>试电脑管理场景</td></tr>
+  </table>
+</details>
+
+<details>
+  <summary><b>第三批：低优先级（备用/清零档）</b></summary>
+  <table>
+    <tr><th>Agent</th><th>待测指标</th><th>建议任务</th></tr>
+    <tr><td class="agent-name">LobsterAI</td><td>编码能力（BYOK 场景）</td><td>接 Claude/GPT 后跑同一任务</td></tr>
+    <tr><td class="agent-name">扣子 Coze</td><td>多模态、工具生态</td><td>试 Seedream 生图</td></tr>
+    <tr><td class="agent-name">ToDesk</td><td>浏览器操控</td><td>远控场景下的浏览器操作</td></tr>
+  </table>
+</details>
+
+</body>
+</html>

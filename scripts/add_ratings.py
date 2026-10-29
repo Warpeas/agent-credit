@@ -38,9 +38,9 @@ DATA: dict[str, tuple[int, int, int, str, str]] = {
         "只用 GLM 就够、需要本地执行能力的场景；资源紧张时段别指望它",
     ),
     "lobsterai": (
-        2, 4, 1,
-        "纸面 100/天、10+ 模型（GPT-4o/Claude/Gemini/DeepSeek）看着香，但服务端当前根本没下发签到活动（slot 返回 empty），external 脚本只能报 no-activity。UI 路线已打通，冷启动 20s + 广告遮罩，实测收益仅 +100。属于占着坑不产粮。",
-        "活动下发后再评估；当前只作备用",
+        2, 4, 3,
+        "100/天、30 天可累积、无连签加成，额度本身不大；但每日「每日积分礼」UI 路线已连续实测入账（09-28..10-25 共 28 天，服务端 context claimedDays=34 / claimedCredits=3400），不再是「占着坑不产粮」。模型侧 2026.10.16 客户端已换到 DeepSeek V4 Flash/Pro、Kimi K3、GLM 5.1、MiniMax M3、Qwen3.6、Doubao 2.0，BYOK 还能接 GPT-5.6 / Claude Opus 4.7 / Gemini 3.1 Pro；浏览器自动化可调试，办公文档链路完整。短板：UI 签到依赖窗口锚点/OCR，近一个月多次因合成点击与前台遮挡失效；无原生 Computer Use；无手机客户端（仅 IM 远控）。",
+        "日常办公/编码副手；每日顺手领，UI 自动签到已跑通",
     ),
     "dumate": (
         4, 3, 1,

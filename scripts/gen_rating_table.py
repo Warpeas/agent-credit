@@ -82,6 +82,9 @@ def mode_text(acc: dict) -> str:
 
 
 def validity_text(acc: dict) -> str:
+    note = acc.get("validity_note")
+    if note:
+        return str(note)
     gt = acc.get("grant_type")
     if gt == "daily_expire":
         # 规则有更新但天数未确认时，validity_days 置 null，显示待确认而不是硬说当日清零
@@ -100,10 +103,13 @@ def validity_text(acc: dict) -> str:
 
 def streak_text(acc: dict) -> str:
     st = acc.get("streak")
+    note = acc.get("extra_note")
     if not st:
-        return "无"
-    days = "/".join(str(d) for d in (st.get("bonus_on") or []))
-    return f"{st.get('cycle_days')} 天周期，第 {days} 天 +{st.get('bonus_amount')}"
+        base = "无"
+    else:
+        days = "/".join(str(d) for d in (st.get("bonus_on") or []))
+        base = f"{st.get('cycle_days')} 天周期，第 {days} 天 +{st.get('bonus_amount')}"
+    return f"{base}（{note}）" if note else base
 
 
 def rows() -> list[dict]:

@@ -3,47 +3,89 @@
 | 项 | 值 |
 |---|---|
 | 账户 id | `monkeycode_credit` |
-| 状态 | **待填** |
-
-把 MonkeyCode 积分 的回答原样粘到下面。粘之前确认：`evidence` 段里没有 token / cookie / 密码明文，
-有的话全部替换成 `<redacted>`。
+| 状态 | **已填（2026-10-20 复核）** |
 
 ```yaml
 account_id: monkeycode_credit
 software: MonkeyCode 积分
-version: unknown
-researched_at: YYYY-MM-DD
-confidence: unknown                # high | medium | low
+version: "monkeycode-desktop.exe 51MB（2026-10-20 复扫）"
+researched_at: 2026-10-20
+confidence: high
 
 checkin:
-  supported: unknown               # true | false | unknown
-  human_path: unknown               # 人类在界面里的点击路径，如「左下角头像 → 每日签到」
-  api: unknown                      # "POST https://.../path" + 关键参数形状
-  cli: unknown                      # 官方 CLI / 脚本命令
-  daily_amount: unknown
-  streak_cycle: unknown             # 如 "7 天一轮；第 4、7 天各 +1000"
-  validity_days: unknown            # 积分有效期，无过期写 null
-  cap: unknown                      # 领取上限，测不出写 null
-  idempotent: unknown               # 重复触发签到是否安全
+  supported: true
+  human_path: "左下角设置 → 账号页积分卡片下方「签到 +100」"
+  api: "POST https://monkeycode-ai.com/api/v1/users/wallet/checkin（需 captcha，code 10701，禁止破解）"
+  cli: "python {REPO}\\scripts\\ui_claim_monkeycode.py"
+  daily_amount: 100
+  streak_cycle: null
+  validity_days: unknown
+  cap: null
+  idempotent: true                 # GET /wallet/checkin 先查 checked_in，已签直接返回
 
 status:
-  balance: unknown                  # 查剩余积分：界面路径 / API / 本机文件
-  claimed_today: unknown            # 查今日是否已签
+  balance: "GET https://monkeycode-ai.com/api/v1/users/wallet → data.balance 毫积分；界面积分 = balance // 1000"
+  claimed_today: "GET https://monkeycode-ai.com/api/v1/users/wallet/checkin → data.checked_in"
   unit: credit
+  per_grant_expiry: false          # 官方接口与 UI 都没有逐条 grant / 过期时间
 
 automation:
-  claim_mode: unknown               # external | ui | manual | never
-  command: unknown                  # Windows 一行命令，签到成功 exit 0
-  status_command: unknown           # 输出 JSON: {"balance": 0, "claimed_today": false}
-  blockers: unknown                 # 如 "模拟点击被 isTrusted 过滤 / UIPI 拦截"
-  reliability: unknown              # 已实测 | 未实测 | 推测
+  claim_mode: ui
+  command: "python {REPO}\\scripts\\ui_claim_monkeycode.py"
+  status_command: "set PYTHONPATH={REPO}&& python -m agent_credit.mc_credits --line"
+  credits_command: "set PYTHONPATH={REPO}&& python -m agent_credit.mc_credits --ledger"
+  blockers: "POST checkin 需图形验证码，禁止破解；external 直签不可行"
+  reliability: 已实测
 
 evidence:
-  - unknown                         # 文件 / URL / 命令 -> 看到了什么；token 一律 <redacted>
+  - "2026-10-20 只读 GET /api/v1/users/wallet HTTP 200：字段仅 id / balance / daily_token_balance / daily_token_limit，无 expire、grants、records"
+  - "2026-10-20 只读 GET /api/v1/users/wallet/checkin HTTP 200：{checked_in: true}"
+  - "2026-10-20 只读 GET /api/v1/users/subscription HTTP 200：会员 plan=basic，不是积分包"
+  - "2026-10-20 复扫 monkeycode-desktop.exe：积分相关路径仍只有 /api/v1/users/wallet 与 /api/v1/users/wallet/checkin"
+  - "2026-10-04 UI：设置→账号 三栏（今日额度 / 积分 / 已邀请），无明细、无有效期文案"
+  - "毫积分口径：2026-10-04 界面「积分 195」vs API 195267；签到 +100 后界面 295 vs API 295267。把 raw 入账会放大 1000 倍"
+  - "凭据：明文 cookie 文件 %APPDATA%\\com.chaitin.baizhi.monkeycode\\monkeycode-cookies.json（运行时读取，不落盘、不打印）"
 
 open_questions:
-  - unknown
+  - "有效期服务端到底有没有、只是不下发？维持 unknown，不再扩探测面"
 
-catalog_patch:                      # 只写确定要改的字段，不确定的整块删掉
-  monkeycode_credit: {}
+catalog_patch:
+  monkeycode_credit:
+    status_command: "set PYTHONPATH={REPO}&& python -m agent_credit.mc_credits --line"
+    credits_command: "set PYTHONPATH={REPO}&& python -m agent_credit.mc_credits --ledger"
 ```
+
+## 查询 / 登记流程（2026-10-20）
+
+能拿到的：
+
+- 积分**总量**（界面积分）
+- 今日是否已签
+- 当日 token 额度（属 `monkeycode_token`，不入积分账本）
+
+拿不到的：
+
+- 每条积分的剩余
+- 每条积分的过期时间
+
+每日签到后自动同步：
+
+1. `checkin` 跑 UI 签到（已签则 GET checkin 短路）
+2. 末尾对账：`credits_command` → `python -m agent_credit.mc_credits --ledger`
+   输出 `{"grants":[{"remain":N,"expires":null}],"total":N}`，source=sync 重建账本
+3. `_refresh_board` 写 `logs/board/board-日期.md` 与 `data/board.json`
+4. 计划任务 `scripts/_daily_chain.ps1` 末尾再跑一次 `credit board`
+
+手动：
+
+```bat
+python -m agent_credit.mc_credits
+python -m agent_credit.mc_credits --line
+python credit.py credits monkeycode_credit
+python credit.py sync --only monkeycode_credit
+python credit.py board
+```
+
+回归：`python scripts/test_mc_credits.py`
+
+⚠️ 不要把 wallet.balance 原样 `set-balance`。必须 ÷1000。

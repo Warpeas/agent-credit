@@ -286,3 +286,205 @@ POST https://account.minimax.cn/oauth2/device/code
 ⚠️ 待主人定夺，不要擅自执行：错误文案暗示 refresh token **轮换**（旧 token 刷新后作废），
 因此刷新成功后必须把新 token 写回 `auth.json`，否则客户端下次刷新会失败（掉登录）。
 写入前应先备份该文件。这条路线属凭据操作，按本文件第四节第 4 条仍需主人明确授权。
+
+## 八、2026-10-24 · `bonus_points` 语义订正（台账多记 5024，已修）
+
+### 8.1 根因：把 bonus_points 当成「额外再加一份」
+
+本文件第三节写「字段是 points(基础) + bonus_points(加成)」——**这句话是错的**。
+客户端自带的类型定义已经把话说死了（`app.asar` → `@mavis/shared/src/daily-signin.ts`）：
+
+```ts
+export interface SigninDayItem {
+  day_no: number;
+  points: number;
+  /** Extra credits already included in points; absent on older responses. */
+  bonus_points?: number;
+  status: SigninDayStatus;
+  is_today: boolean;
+}
+```
+
+> **bonus_points 是「已经包含在 points 里」的额外额度**，不是另一份待加的奖励。
+
+前端渲染同源，可交叉验证：
+
+- `...(z ? { points: _(z.points), total_points: _(z.points) } : {})` → `total_points` 就是 `points`
+- 签到按钮文案 `signin.claim_now` 里的 `{points: q}`，`q = _(R?.points ?? 0)` → 按钮上写的「签到得@N」= points
+- `bonus_points` 只作为「这 800 里有 400 是活动多给的」这种**构成说明**单独展示
+
+### 8.2 三条独立证据都指向同一结论
+
+| 证据 | 内容 |
+|---|---|
+| 类型定义注释 | `Extra credits already included in points` |
+| 官方口径 | 每日 400、第 4/7 天加码至 1000 → 基线就是 400/1000 |
+| 实测数据 | 每一格 `points - bonus_points` 都正好落在 {400, 1000}，没有一个例外 |
+
+实测三例：
+
+| 日期 | 场景 | points | bonus_points | 真值 = points | 旧口径 points+bonus |
+|---|---|---|---|---|---|
+| 10-07 | 国庆期 day1 | 800 | 400 | **800** | 1200 ❌ |
+| 10-13 | 国庆期 day4 | 2000 | 1000 | **2000** | 3000 ❌ |
+| 10-24 | 活动期 day4 | 2024 | 1024 | **2024** | 3048 ❌ |
+
+`points - bonus_points` 恰好等于官方基线（400 / 1000），这说明 points 是**当日总额**，
+bonus 只是告诉客户端「其中多少是活动加成」。
+
+### 8.3 错在哪、怎么错的
+
+- 10-04 记「平时 1200/天、第 4/7 天 3000、整周期 12000」→ 把 bonus 又加了一次，实际是 800/2000。
+- 10-11 记「平时 400/天、day1=1200、整周期 4800」→ 同样的错，数字对上了但语义还是错的。
+- `vendor/minimax-auto-signin/signin.py` 的 `today_granted()` 与 `cmd_auto()` 都按
+  `points + bonus_points` 上报实发额 → 凡 bonus>0 的日子都多记。
+- 2026-10-04 还手工把台账里 09-30 / 10-01 两条从 800 改成 1200「补连签加成」——按新语义那两条 800 本来就是对的。
+
+> 讽刺的是 MEMORY.md 10-13 那条「day1=800(+bonus 400)……周期合计 **4400**」反而是对的
+> （它把 day1 当 800 算），只是没把「为什么 800 不用再加 400」讲清楚，错在解释不在数字。
+
+### 8.4 影响面与已做的修正
+
+台账多记 **5024** 积分（余额虚高）：
+
+| 日期 | 旧入账 | 真值 | 多记 |
+|---|---|---|---|
+| 09-30 | 1200 | 800 | 400 |
+| 10-01 | 1200 | 800 | 400 |
+| 10-03 | 3000 | 2000 | 1000 |
+| 10-04 | 1200 | 800 | 400 |
+| 10-05 | 1200 | 800 | 400 |
+| 10-06 | 3000 | 2000 | 1000 |
+| 10-07 | 1200 | 800 | 400 |
+| 10-24 | 3048 | 2024 | 1024 |
+| | | | **合计 5024** |
+
+修正动作：
+
+1. 备份 `data/_ledger_backup_20261024_before_mmbonus_fix.json`，定点改这 8 条的 amount/remaining；
+   余额是按条目累加算出来的，不另存字段 → **余额 27648 → 22624**。
+2. `vendor/minimax-auto-signin/signin.py` 改为只取 `points`（`today_granted()` 与已签分支各一处），
+   docstring 写明依据，避免以后再被改回去。
+3. `catalog.yaml` 的 `daily_amount_by_day` / `streak` 改回**官方基线**
+   `{1..7} = 400/400/400/1000/400/400/1000`，`cycle_total: 4000`，
+   `bonus_on: [4,7]`、`bonus_amount: 600`（= 1000 - 400）；`rating.review` 里那套
+   「1200/天、第 4/7 天 3000、周期 12000」一并作废。
+
+### 8.5 官方口径（2026-10-24 核对）
+
+`https://agent.minimax.cn/docs/code/account/usage`（M Plan 与积分）原文：
+
+- 每日签到可领取 **400 积分**
+- 连续签到第 **4** 天、第 **7** 天，单日奖励加码至 **1000 积分**
+- 完成一周签到，累计可领取 **4000 积分**
+- 签到积分可累计使用，自到账之日起 **30 天**内有效
+
+2026-10-24 实测 `GET /signin/status`（is_today=day4，全周期可读）：
+
+```
+day1=400  day2=400  day3=400  day4=2024(1000基线+1024活动加成)
+day5=400  day6=400  day7=1000            → 整周期 5024
+```
+
+即**活动期服务端会把当天额度翻倍**，并把多出来的部分记在 `bonus_points`。
+所以「日额度」在活动期会临时高于基线，基线才是稳定承诺。
+
+### 8.6 留下的判断
+
+M Plan（订阅）的额度与签到积分是两套：M Plan 按 **5 小时窗口 + 周窗口** 刷新，
+不结转、用完不累积；签到积分则是 30 天可累积。两者不能混算，
+台账只跟签到赠予的那份（README「本地估算」口径）。
+
+## 九、2026-10-24 · 服务端真值通道打通（`/credit/details`）
+
+### 9.1 端点
+
+第三节留下的 open question ——「余额/今日已签是 GET status 同路径返回，还是另有 quota 接口」——
+**答：另有端点，而且就是逐笔明细**。
+
+从客户端 bundle 里扒出来的调用（app.asar，模块 11557）：
+
+```js
+async function s(e, t) {
+  let n = "/minimax-cloud/api/v1/credit/details",
+      {data: i} = await r.ZP.get(n, {...t, params: e});
+  if (!Array.isArray(i.details) || "number" != typeof i.total_count)
+    throw Error("Credit details response payload is invalid");
+  return {details: i.details, total_count: i.total_count};
+}
+```
+
+调用方（设置→用量→积分明细面板）传的是：
+
+```js
+xK({page_number: u, page_size: d, include_expired: true}, {...})
+```
+
+**只读 GET，无副作用，不触发领取。**
+
+### 9.2 每条字段（客户端自己的映射函数 `et`）
+
+| 字段 | 含义 |
+|---|---|
+| `credit_type` | `1 = Purchased`（购买）、`2 = Free`（签到赠予）——枚举见 asar `Purchased=1, Free=2` |
+| `granted_amount` | 当笔总量 |
+| `remaining_amount` | 当笔剩余 |
+| `consumed_amount` | 当笔已用 |
+| `granted_at_ms` / `expire_at_ms` | 毫秒时间戳 |
+
+客户端 UI 文案也对得上：`usage_credit_type_free:"签到"`、`usage_credit_type_purchased:"购买"`、
+`usage_credit_details_expires_at:"到期时间"`、`usage_credit_status_active:"生效中"`。
+
+### 9.3 打通方式
+
+新增 `vendor/minimax-auto-signin/credits.py`（只读，输出对齐项目 `credits_command` 契约），
+`catalog.yaml` 的 minimax 配 `credits_command` → `checkin` 末尾自动对账，`credit sync --only minimax` 手动可跑。
+
+```json
+{"account": "minimax", "total": 16550,
+ "grants": [{"remain": 400, "expires": "2026-09-04", "granted_at": "2026-08-05", "package": "签到赠予", ...}]}
+```
+
+### 9.4 对账暴露的三类漂移（本地台账此前看不见）
+
+拿服务端 40 笔逐笔比对本地 30 条，差的不只是第八节那个多记：
+
+1. **漏记 8 笔早期签到**（08-05、08-11、09-07、09-15、09-16、09-17 等）。
+   其中 08-05/08-11/09-07/09-15/09-16/09-17 这几笔**现在还没到期**，本地台账压根没有。
+2. **漏记 09-24、09-25 两天**——服务端有，本地没有。
+   所以本地 `streak_current=29` 是**记账断档**，不是领取断档；
+   服务端口径 09-23..10-24 **连续 32 天每天都有签到**（100%）。
+3. **漏记活动期加成与扣减**：09-28 本地记 400、服务端 800；09-29 本地 1000、服务端 2000；
+   10-02 本地 1000、服务端 800；10-05 服务端显示已用 138，09-07 已用 136。
+
+### 9.5 余额口径变更
+
+| | 数值 | 说明 |
+|---|---|---|
+| 修正 bonus 双计后（上一版） | 22624 | 本地估算 |
+| **接真值通道后** | **14286** | 服务端真值（26 条 source=sync） |
+
+差的 8338 = 服务端剩余 16550 减去 6 笔已过期但服务端仍记着 remaining 的
+（08-05/08-11/09-07/09-15/09-16/09-17 共 2264）+ 本地多记的 5024 + 本地漏记的早期签到与加成等。
+
+看板里 MiniMax 的口径标签也从「本地估算」变成「服务端真值」，层级从 T1 变成 T2 长期 FIFO。
+
+### 9.6 扣减机制（原来完全不知道）
+
+签到赠予积分**确实会被扣**，来源是 M Plan 额度用尽后的自动溢出扣费，官方文案：
+
+> `usage_resource_tooltip_rule3`：「扣费顺序：Token Plan > 积分。当达到 5 小时或周额度上限后，
+> 超出用量将默认按到期时间扣除积分（含赠予积分），可在设置中关闭。」
+
+实测印证：10-05 那笔 800 在 2026-10-24 下午一小时内从 709 掉到 662；09-19~10-04 那批 14 笔
+remaining 全部为 0（已用尽）。**本地台账此前把 `remaining` 一直记成等于 `amount`，
+所以完全看不到这些扣减** —— 接了 `/credit/details` 才暴露。
+
+### 9.7 安全边界
+
+- 只读 GET 官方接口，不碰领取端点。
+- 只读本机**明文**凭据（`~/.minimax/auth/.../auth.json`），token 不进命令行/日志/输出。
+- 同一端点最多试 2 次的规矩照旧；本次只发了 2 次探测 GET（一次探端点、一次全量）。
+- 不解密登录态、不开调试口、不做任何客户端本地数据改写。
+
+

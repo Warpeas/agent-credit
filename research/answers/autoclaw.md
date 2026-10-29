@@ -3,9 +3,9 @@
 | 项 | 值 |
 |---|---|
 | 账户 id | `autoclaw` |
-| 状态 | **已填** · 可靠性：**未实测**（端点/host/鉴权 high；额度与周期仍 unknown） |
-| 来源 | AutoClaw 客户端自述 + 本机复核，2026-09-24 |
-| 版本 | 1.19.0（`resources/app.asar` 内 `package.json`，`name=autoclaw`） |
+| 状态 | **已填** · 可靠性：**已实测**（2026-09-24 链路打通；2026-10-25 按 1.20.0 复核，09-24 起 31/32 天有记录） |
+| 来源 | AutoClaw 客户端自述 + 本机复核，2026-09-24；2026-10-25 按 1.20.0 复核版本/模型/有效期 |
+| 版本 | 当前 1.20.0（`resources/app.asar` 内 `package.json`，`name=autoclaw`）；2026-09-24 调研时为 1.19.0 |
 | 安全检查 | 已跑 `check_research_answers.py`；`APP_KEY` 在入库前已 `<redacted>` |
 
 ---
@@ -77,6 +77,8 @@ catalog_patch:
 
 复核方式：一次性脚本对 309,819,360 字节的 `app.asar` 做字节级正则命中，输出上下文中的
 长串（APP_KEY / token）一律 mask。脚本为临时产物，未入库。
+
+> 本节是 2026-09-24 对 1.19.0 的复核记录；当前版本 1.20.0（asar 310,216,022 字节）的差异见第六节。
 
 | 自述项 | 复核 | 说明 |
 |---|---|---|
@@ -323,12 +325,12 @@ python <REPO>\scripts\run_claim_only.py --dry-run
 
 ## 四、处置
 
-- **`catalog.yaml` 的 `claim_mode` 保持 `ui`，`command` 不填**——`reliability: 未实测`，
-  按 `research/README.md` 的规矩不得改运行时字段。
+- **`catalog.yaml` 的 `claim_mode` 保持 `ui`，`command` 不填**——2026-09-24 当时 `reliability: 未实测`，
+  按 `research/README.md` 的规矩不得改运行时字段；后续已实测跑通（见第三节补与第六节），`claim_mode: ui` 保持不变。
 - 已把端点来源、入口线索、横幅开关、失效条件写进 `catalog.yaml` 的 `autoclaw.notes`（纯注释，不改行为）。
 - `skill/SKILL.md` 已加一条：不为签到常开 CDP；OCR 找不到锚点先怀疑入口没渲染。
 
-## 五、下一步（均未执行，需主人定夺）
+## 五、下一步（2026-09-24 当时；后续已执行，见第三节补）
 
 1. **DryRun 定位**：在你不用 AutoClaw 时跑
    `powershell -ExecutionPolicy Bypass -File scripts\ui_claim_autoclaw.ps1 -DryRun -OutFile logs\autoclaw_claim.json`。
@@ -337,3 +339,23 @@ python <REPO>\scripts\run_claim_only.py --dry-run
    且启用必须重启客户端。只在 OCR 彻底走不通时再评估。
 3. **它的 cron 自签没有优势**：AutoClaw 内的 agent 跨进程调不到 IPC，cron 最终还是要落到
    CDP 或 UI 点击上，反而多一层依赖。
+
+---
+
+## 六、2026-10-25 复核（1.20.0）
+
+> 本节只记录与 1.19.0 旧记录的差异；上文的 2026-09-24 调研仍是当时有效的原始记录。
+
+1. **版本与体积**：`resources/app.asar` 内 `package.json` 为 `{name:"autoclaw", version:"1.20.0"}`，asar 310,216,022 字节（1.19.0 时为 309,819,360 字节）。因此旧记录里的 `version: 1.19.0` 与「失效条件：v1.19.0 改版」都应按 1.20.0 更新。
+2. **模型目录不是「只有 GLM」**：`%APPDATA%\autoclaw\settings.json` 的 `models.catalog` 为：
+   - `zai_auto` / Auto：路由，`metadata.auto_model_name=deepseek-v4-pro`，1M 上下文 / 393,216 输出，低消耗；
+   - `zai_auto-fast` / Auto-Fast：1M / 131,072，支持图片，中消耗；
+   - `zaicoding_glm-5.3` / GLM-5.3：1M / 307,200，高消耗；
+   - `zai_glm-5.3-flash` / GLM-5.3-Flash：1M / 131,072，支持图片，低消耗；
+   - 自定义 API：本机已加 Ollama `qwen3:14b`（200k 上下文）。
+   旧记录「桌面端和移动端都只有 GLM 模型」不成立；更早的「Pony-Alpha-2/DeepSeek/Kimi/MiniMax 多模型池」也不准确。准确说法是「Auto 路由 + 两个 GLM + 自定义 API」，Auto 的实际落点由服务端决定。
+3. **有效期不是「无过期」**：积分分 `daily` / `monthly` / `longTerm` / `campaign` 四类，各类独立；客户端有「长期积分」，也会滚动提示「N 积分将于 3 天内到期」。台账 `expires_at=null` 只表示服务端不下发逐条到期日，不能写成「永不过期」；`validity_days` 保持 `null` 是对的。
+4. **10-25 双击修复**：CEF/React 首击有时只完成焦点切换、`onClick` 未触发；脚本改为每轮连点 2 下（180ms）、最多 3 轮（共 6 击），每轮 OCR 复核；成功判据增加「已签到N天」数值上涨和「按钮连续两帧消失」。12:40 实跑：首击无效 → 2s 后第二击 → 已签到18天 +200。10-25 11:08 首击失败、12:40 补击成功，说明这条修复有效。
+5. **稳定性**：09-24 自动化上线后，本地台账 31/32 天有记录（只缺 10-07），约 97%；最近 10-23/24/25 均成功。仍没有独立 30 天成功率日志，不能报 100%。
+6. **仍是 unknown 的项**：四类积分的具体有效天数、是否有频控、移动端模型是否与桌面一致。不要用旧记录的「无明确过期」「只有 GLM」替代实测。
+7. **实测体验（2026-10-25，主人反馈）**：经常容易资源紧张，任务会停止执行；时不时有送大额积分的活动（非固定周期，不能当稳定日额度）。

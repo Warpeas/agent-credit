@@ -41,6 +41,8 @@ LOGDIR = ROOT / "logs"
 EXE = str(Path(os.environ["LOCALAPPDATA"]) / "MonkeyCode" / "monkeycode-desktop.exe")
 PROC = "monkeycode-desktop.exe"
 RESULT = LOGDIR / "monkeycode_claim.json"
+UIA_SCRIPT = ROOT / "scripts" / "uia_monkeycode.ps1"
+UIA_RESULT = LOGDIR / "_monkeycode_uia.json"
 
 # webview 渲染就绪阈值（content_ink 的千分比）。空白/半空白窗口远低于此，
 # 画完的客户端工作台远高于此。没有这个判断时，会把「没渲染」当成「弹层没开」
@@ -57,12 +59,42 @@ INK_WAIT_MAX = 60.0
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 user32.SetProcessDPIAware()
 
 SW_RESTORE = 9
+SW_MAXIMIZE = 3
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 SRCCOPY = 0x00CC0020
+# 方案甲：窗口停到主屏左界外，只留一条窄边给 DWM/WebView2 保持渲染。
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+OFFSCREEN_STRIP = 48
+IDLE_THRESHOLD_SEC = 60
+# 脚本内部默认不等待：checkin.py 会在 60s 命令超时之外先等空闲；
+# 手动跑可显式 --idle-wait 300。内部闸门只做“活跃就 pending”的最后一道保险。
+IDLE_WAIT_SEC = 0
+# 2026-10-25：--no-idle-gate 同时关闭**点击前**的空闲复查。实测 MonkeyCode
+# 客户端一启动就会自己注入一次输入事件（Popen 后 GetLastInputInfo 立即归零），
+# 于是「启动后等 20s 再点」时 idle 必然 <60，per-click 闸门 100% 拒绝点击。
+# 10-24/10-25 连续两天「UIA 找到设置按钮但点击被遮挡或用户活跃」就是这么来的，
+# 共享闸门通过也没用。启动前的空闲已由 checkin 统一确认，这里不再二次判断。
+SKIP_CLICK_IDLE = False
+# 记录签到前窗口的原始 rect / hwnd，任何退出路径都要还原。
+CURRENT_HWND = None
+ORIG_RECT = None
+# 屏外停放时的「正常态」rect（最大化窗口会先还原再停放）：
+# 2026-10-25 实测最大化窗口被移回屏内并 SetForegroundWindow 时，Windows/Electron
+# 会把它还原成 normal rect（3866x2090 -> 2426x1615 @294,294），UIA 探针按最大化
+# 布局给出的坐标立刻失效（按钮 y=2038 -> 实际点 y=2332，屏幕外）。停放前先
+# SW_RESTORE，用正常态 rect 做后续换算；收尾时再按需恢复最大化。
+PARK_RECT = None
+WAS_MAXIMIZED = False
 
 
 class RECT(ctypes.Structure):
@@ -80,6 +112,18 @@ class BITMAPINFOHEADER(ctypes.Structure):
 
 class BITMAPINFO(ctypes.Structure):
     _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wt.DWORD * 3)]
+
+
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.UINT), ("dwTime", wt.DWORD)]
+
+
+user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, wt.UINT]
+user32.SetWindowPos.restype = wt.BOOL
+user32.GetLastInputInfo.argtypes = [ctypes.POINTER(LASTINPUTINFO)]
+user32.GetLastInputInfo.restype = wt.BOOL
+kernel32.GetTickCount.restype = wt.DWORD
 
 
 def log(m: str) -> None:
@@ -238,30 +282,193 @@ def ensure_foreground(hwnd: int) -> bool:
     if int(user32.GetForegroundWindow() or 0) == hwnd:
         return True
 
-    # 绑输入队列后强切
+    # 绑输入队列后强切。除了目标线程，还要临时绑上**当前前台窗口**的线程：
+    # Windows 的前台锁是按输入队列判定的，只绑目标线程往往仍被拒
+    # （2026-10-18 远程会话实测：目标可见但被终端盖住，单绑目标线程失败）。
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     target_tid = user32.GetWindowThreadProcessId(hwnd, None)
     cur_tid = kernel32.GetCurrentThreadId()
+    fg = int(user32.GetForegroundWindow() or 0)
+    fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+    attached_fg = False
+    if fg_tid and fg_tid != cur_tid:
+        attached_fg = bool(user32.AttachThreadInput(cur_tid, fg_tid, True))
     if target_tid:
         user32.AttachThreadInput(cur_tid, target_tid, True)
+        user32.BringWindowToTop(hwnd)
         user32.ShowWindow(hwnd, SW_RESTORE)
         user32.SetForegroundWindow(hwnd)
         user32.AttachThreadInput(cur_tid, target_tid, False)
         time.sleep(0.5)
+    if attached_fg:
+        user32.AttachThreadInput(cur_tid, fg_tid, False)
     if not user32.IsWindowVisible(hwnd):
         return False
     return int(user32.GetForegroundWindow() or 0) == hwnd
 
 
-def restore_foreground(hwnd: int) -> None:
+def restore_foreground(prev_foreground: int) -> None:
     """把前台还给运行前的窗口，别让用户对着一个死掉的客户端。"""
-    fg = user32.GetForegroundWindow()
-    if fg and fg != hwnd and user32.IsWindow(fg):
+    fg = int(prev_foreground or user32.GetForegroundWindow() or 0)
+    if fg and fg != CURRENT_HWND and user32.IsWindow(fg):
         try:
             user32.ShowWindow(fg, SW_RESTORE)
             user32.SetForegroundWindow(fg)
         except OSError:
             pass
+
+
+def user_idle_seconds() -> int:
+    li = LASTINPUTINFO()
+    li.cbSize = ctypes.sizeof(LASTINPUTINFO)
+    if not user32.GetLastInputInfo(ctypes.byref(li)):
+        return 999999
+    tick = int(kernel32.GetTickCount()) & 0xFFFFFFFF
+    return int(((tick - int(li.dwTime)) & 0xFFFFFFFF) / 1000)
+
+
+def wait_for_user_idle(timeout: int, threshold: int) -> bool:
+    """等用户空闲 threshold 秒；超时仍活跃返回 False，调用方留 pending。"""
+    idle = user_idle_seconds()
+    if idle >= threshold:
+        log(f"idle gate: idle={idle}s, proceed")
+        return True
+    log(f"idle gate: user active (idle={idle}s), wait up to {timeout}s")
+    deadline = time.time() + timeout
+    last_log = idle
+    while time.time() < deadline:
+        time.sleep(5)
+        idle = user_idle_seconds()
+        if idle >= threshold:
+            log(f"idle gate: idle={idle}s, proceed")
+            return True
+        if idle - last_log >= 120:
+            log(f"idle gate: still active (idle={idle}s)")
+            last_log = idle
+    log(f"idle gate: still active after {timeout}s; abort")
+    return False
+
+
+def restore_rect(hwnd: int, rect: RECT) -> None:
+    w = rect.right - rect.left
+    h = rect.bottom - rect.top
+    if w <= 0 or h <= 0:
+        return
+    user32.SetWindowPos(wt.HWND(hwnd), None, rect.left, rect.top, w, h,
+                        SWP_NOZORDER | SWP_NOACTIVATE)
+    time.sleep(0.3)
+
+
+def park_offscreen(hwnd: int, record: bool = False) -> None:
+    """把窗口停到主屏左界外，只留 OFFSCREEN_STRIP 像素窄边。
+
+    窄边留给 DWM/WebView2 继续合成；UIA 探针用 -AllowOffscreen 忽略
+    IsOffscreen，因此窗口屏外也能定位控件。
+    """
+    global PARK_RECT, WAS_MAXIMIZED
+    # 先还原最大化：最大化窗口移到屏外后，SetForegroundWindow 会触发
+    # Windows/Electron 还原成 normal rect，坐标与 UIA 探针不一致（见 PARK_RECT 注释）。
+    if not WAS_MAXIMIZED and user32.IsZoomed(hwnd):
+        WAS_MAXIMIZED = True
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        time.sleep(0.4)
+    r = win_rect(hwnd)
+    if not r:
+        return
+    # 只有第一次（窗口还在屏内）记录正常态 rect；后续重复 park 时窗口已在屏外，
+    # 记下来会把 PARK_RECT 写成屏外坐标，bringback 又被钳回屏幕边缘。
+    if record:
+        PARK_RECT = r
+    w, h = r.right - r.left, r.bottom - r.top
+    if w <= 0 or h <= 0:
+        return
+    user32.SetWindowPos(wt.HWND(hwnd), None, OFFSCREEN_STRIP - w, 0, 0, 0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+    time.sleep(0.3)
+
+
+def bringback_click(hwnd: int, screen_x: int, screen_y: int, what: str) -> bool:
+    """屏外模式下只把窗口移回屏内点击一下，随后立刻停回屏外。
+
+    点击目标坐标来自屏外 UIA 探针（屏幕坐标）；先用当前窗口原点换算成
+    客户区相对坐标，再把窗口移回原 rect 后点同一相对位置。
+    """
+    cur = win_rect(hwnd)
+    if not cur:
+        return False
+    client_x = screen_x - cur.left
+    client_y = screen_y - cur.top
+    log(f"bringback: target screen=({screen_x},{screen_y}) parked rect="
+        f"{cur.left},{cur.top} {cur.right - cur.left}x{cur.bottom - cur.top}")
+    target = PARK_RECT or ORIG_RECT or cur
+    sw, sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    w, h = target.right - target.left, target.bottom - target.top
+    # 2026-10-25：按「窗口左上角」钳制不够——MonkeyCode 冷启动后窗口高 2192px，
+    # 比 2160px 的屏幕还高，设置/签到按钮在 client y≈2038，窗口一放回原位
+    # 点击点就落到 y=2185（屏幕外），client_owns_point 必然失败。改为按**点击点**
+    # 钳制到工作区（排除任务栏），允许标题栏暂时移出屏幕上缘；只暴露一次点击的时间。
+    work = RECT()
+    if not user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0):
+        work = RECT(0, 0, sw, sh)
+    min_tx = work.left - client_x
+    max_tx = max(min_tx, work.right - 1 - client_x)
+    min_ty = work.top - client_y
+    max_ty = max(min_ty, work.bottom - 1 - client_y)
+    tx = max(min_tx, min(target.left, max_tx))
+    ty = max(min_ty, min(target.top, max_ty))
+    prev_fg = int(user32.GetForegroundWindow() or 0)
+    saved = _POINT()
+    user32.GetCursorPos(ctypes.byref(saved))
+    try:
+        log(f"bringback: {what} client=({client_x},{client_y}) -> visible {tx},{ty}")
+        user32.SetWindowPos(wt.HWND(hwnd), None, tx, ty, 0, 0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+        user32.ShowWindow(hwnd, SW_SHOW)
+        # 2026-10-25：前台锁/置顶窗口会让「移回屏内」仍被盖住（实测 rect 已正确
+        # 但 WindowFromPoint 命中别人）。和 Trae/AutoClaw 同口径：点击前临时提为
+        # TOPMOST（SWP_NOACTIVATE，不抢焦点），点完立刻降回。
+        user32.SetWindowPos(wt.HWND(hwnd), wt.HWND(HWND_TOPMOST), tx, ty, 0, 0,
+                            SWP_NOSIZE | SWP_NOACTIVATE)
+        time.sleep(0.3)
+        # 2026-10-25：这里不再调 ensure_foreground —— 它为了绕前台锁会按 Alt 再切，
+        # 在本机实测会把 Windows 壳层的「Shell_SystemDim」遮罩拉起来，反遮挡检查
+        # 于是看到顶层是 explorer 的 dim 窗（不是客户端），永远放弃点击。
+        # TOPMOST 已经足够让窗口出现在最上层并接收真实点击（点击本身会激活它），
+        # 收尾 restore_foreground 会把前台还回去。
+        if not user32.IsWindowVisible(hwnd):
+            log("bringback: window not visible after raise; skip")
+            return False
+        r = win_rect(hwnd)
+        log(f"bringback: rect now {r.left},{r.top} {r.right - r.left}x{r.bottom - r.top} (want {tx},{ty})")
+        sx, sy = r.left + client_x, r.top + client_y
+        if not client_owns_point(hwnd, sx, sy):
+            pt = _POINT(sx, sy)
+            top = int(user32.WindowFromPoint(pt) or 0)
+            root = int(user32.GetAncestor(top, GA_ROOT) or 0) if top else 0
+            log(f"bringback: click point ({sx},{sy}) covered by another window; skip "
+                f"(top={top} class={win_class(top) if top else ''} pid={win_pid(top) if top else 0} "
+                f"root={root} fg={int(user32.GetForegroundWindow() or 0)} hwnd={hwnd})")
+            return False
+        log(f"bringback: real click {what} @ {sx},{sy}")
+        user32.SetCursorPos(sx, sy)
+        time.sleep(0.12)
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        time.sleep(0.4)
+        return True
+    finally:
+        try:
+            user32.SetCursorPos(saved.x, saved.y)
+        except OSError:
+            pass
+        # 摘掉 TOPMOST，避免窗口日后回屏内时一直钉在最上层
+        try:
+            user32.SetWindowPos(wt.HWND(hwnd), wt.HWND(HWND_NOTOPMOST), 0, 0, 0, 0,
+                                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+        except OSError:
+            pass
+        park_offscreen(hwnd)
+        restore_foreground(prev_fg)
 
 
 def _cleanup(launched_by_us: bool, prev_foreground: int) -> None:
@@ -275,6 +482,17 @@ def _cleanup(launched_by_us: bool, prev_foreground: int) -> None:
     这个逻辑对齐 ui_claim_autoclaw.ps1 的 $script:LaunchedByUs
     与 ui_claim_trae.ps1 的 taskkill 收尾。
     """
+    if not launched_by_us and CURRENT_HWND and ORIG_RECT:
+        try:
+            restore_rect(CURRENT_HWND, ORIG_RECT)
+            # 停放前若窗口是最大化，收尾恢复最大化状态，别把主人的窗口留成还原态
+            if WAS_MAXIMIZED:
+                user32.ShowWindow(CURRENT_HWND, SW_MAXIMIZE)
+                time.sleep(0.2)
+            log("cleanup: restored original window rect"
+                + (" (maximized)" if WAS_MAXIMIZED else ""))
+        except OSError:
+            pass
     if launched_by_us:
         n = close_client()
         log(f"cleanup: closed {n} client process(es) we launched")
@@ -504,6 +722,249 @@ def click(x: int, y: int) -> None:
     time.sleep(0.5)
 
 
+def ensure_visible(hwnd: int) -> None:
+    """把窗口显示/还原出来，但**不要求它在前台**。
+
+    UIA 定位 + OS 点击不需要前台：只需要窗口可见，且点击点没有被别的窗口盖住
+    （由 client_owns_point 单独校验）。远程桌面/后台会话里
+    SetForegroundWindow 经常被前台锁拒绝，以前整条 UI 路径就卡死在那里；
+    现在（2026-10-18）改由 UIA 主路承担，前台不再是非要不可的条件。
+    """
+    if not user32.IsWindowVisible(hwnd):
+        user32.ShowWindow(hwnd, SW_SHOW)
+        time.sleep(0.5)
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        time.sleep(0.4)
+
+
+def uia_probe(hwnd: int, timeout: float = 40.0, allow_offscreen: bool = False) -> dict | None:
+    """跑 PowerShell UIA 探针，返回它写的状态 JSON；失败返回 None。
+
+    探针只读可访问树，不点击。按控件名（设置/账号/签到/微信扫码登录）
+    定位，因此与分辨率、DPI 缩放、窗口比例都无关。
+    """
+    if not UIA_SCRIPT.is_file():
+        return None
+    try:
+        if UIA_RESULT.exists():
+            UIA_RESULT.unlink()
+    except OSError:
+        pass
+    cmd = [
+        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-WindowStyle", "Hidden", "-File", str(UIA_SCRIPT),
+        "-Hwnd", str(int(hwnd)), "-OutFile", str(UIA_RESULT),
+    ]
+    if allow_offscreen:
+        cmd.append("-AllowOffscreen")
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except (subprocess.SubprocessError, OSError) as e:  # noqa: BLE001
+        log(f"uia probe failed: {e}")
+        return None
+    try:
+        payload = json.loads(UIA_RESULT.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def uia_click(hwnd: int, target: dict, what: str, offscreen: bool = False) -> bool:
+    """按 UIA 给出的屏幕坐标点击，并先确认该点确实属于本客户端。
+
+    屏外模式下坐标是屏外屏幕坐标，不能直接点：短暂 bringback 到原 rect
+    点一下再停回屏外；点击前再查一次用户空闲，活跃就放弃本次点击。
+
+    非屏外模式仍用 OS 级 mouse_event 而不是 InvokePattern：WebView2 前端可能把
+    isTrusted=false 的脚本层调用过滤掉（MiniMax 已实证）。UIA 只负责
+    「控件在哪」，点击仍走真实输入队列。
+    """
+    try:
+        x, y = int(target["x"]), int(target["y"])
+    except (KeyError, TypeError, ValueError):
+        log(f"uia: {what} target missing coordinates")
+        return False
+    if offscreen:
+        if not SKIP_CLICK_IDLE and user_idle_seconds() < IDLE_THRESHOLD_SEC:
+            log(f"uia: {what}: user became active; skip bringback click")
+            return False
+        return bringback_click(hwnd, x, y, what)
+    if not client_owns_point(hwnd, x, y):
+        log(f"uia: {what} at ({x},{y}) is covered by another window; refuse to click")
+        return False
+    log(f"uia: click {what} at ({x},{y})")
+    click(x, y)
+    return True
+
+
+def uia_claim_flow(hwnd: int, offscreen: bool = False) -> tuple[str, str] | None:
+    """UIA 主路：打开设置 → 账号页 → 签到。
+
+    返回 (status, detail)，status ∈ already | claimed | clicked |
+    login_required | pending；None 表示 UIA 不可用，调用方回落到像素路径。
+
+    登录页识别是这里的硬闸门：只要出现「用微信扫一扫登录 / 微信扫码 /
+    扫码登录」，立刻返回 login_required，绝不在登录页上点任何坐标。
+
+    offscreen=True 时窗口先停到屏外条带；UIA 探针用 -AllowOffscreen，
+    只有真正点击时才短暂 bringback 到原 rect。
+    """
+    if os.environ.get("AGENT_CREDIT_MONKEY_NO_UIA", "").strip().lower() in ("1", "true", "yes"):
+        log("uia: disabled by AGENT_CREDIT_MONKEY_NO_UIA")
+        return None
+
+    ensure_visible(hwnd)
+    if offscreen:
+        park_offscreen(hwnd)
+        log("uia: offscreen mode; window parked, probe allows offscreen elements")
+    else:
+        # 前台不是硬条件（点击前还有 ownership 校验），但能拿到就拿：
+        # 远程会话里窗口常被终端盖住，拿到前台才点得到。
+        if not ensure_foreground(hwnd):
+            log("uia: foreground not acquired; clicks will still be ownership-checked")
+    tried_connect = False
+    account_clicks = 0
+    for _ in range(8):
+        probe = uia_probe(hwnd, allow_offscreen=offscreen)
+        if not probe:
+            log("uia: probe unavailable; falling back to pixel path")
+            return None
+        state = probe.get("state")
+        log(f"uia: state={state} count={probe.get('count')}")
+
+        if state == "account":
+            if probe.get("already"):
+                name = probe.get("claim_name") or "今日已签到"
+                return "already", f"UIA 确认今日已签到（{name}）"
+            if not uia_click(hwnd, probe.get("claim") or {}, "签到", offscreen=offscreen):
+                return "pending", "UIA 找到签到按钮但点击被遮挡或用户活跃，未入账"
+            time.sleep(1.5)
+            after = uia_probe(hwnd, allow_offscreen=offscreen)
+            if after and after.get("state") == "account" and after.get("already"):
+                return "claimed", "UIA 点击后在界面确认「今日已签到」"
+            return "clicked", "UIA 已点击签到，界面尚未确认"
+
+        if state == "login":
+            marker = probe.get("login_marker") or "微信扫码登录"
+            log(f"uia: login marker detected: {marker}")
+            return "login_required", f"检测到登录页（{marker}），登录态已失效，请扫码登录"
+
+        if state == "closed":
+            if not uia_click(hwnd, probe.get("settings") or {}, "设置", offscreen=offscreen):
+                return "pending", "UIA 找到设置按钮但点击被遮挡或用户活跃，未入账"
+            time.sleep(1.5)
+            continue
+
+        if state == "other":
+            # 2026-10-26：会话过期后账号页没有「签到」，只有一个绿色「连接」按钮。
+            # 主人实测点一下就能恢复登录（客户端随之回写 cookies.json），
+            # 所以这里是明确的恢复动作，不是重试噪声；每轮只点一次。
+            connect = probe.get("connect")
+            if connect and not tried_connect:
+                tried_connect = True
+                log("uia: session looks disconnected; clicking 连接")
+                if not uia_click(hwnd, connect, "连接", offscreen=offscreen):
+                    return "pending", "UIA 找到「连接」按钮但点击被遮挡或用户活跃，未入账"
+                time.sleep(3.0)
+                continue
+            if account_clicks < 2:
+                account_clicks += 1
+                if not uia_click(hwnd, probe.get("account_nav") or {}, "账号", offscreen=offscreen):
+                    return "pending", "UIA 未能打开账号页（导航按钮被遮挡或用户活跃）"
+                time.sleep(1.2)
+                continue
+            return "pending", ("账号页没有签到入口：已尝试「连接」与「账号」仍未出现签到按钮；"
+                               "多半是登录态失效。请在客户端点绿色「连接」完成授权后重跑")
+
+        return None
+    return "pending", "UIA 在等待时间内未进入账号页（面板可能停在未连接/其它页）"
+
+
+def looks_like_login_page(img) -> bool:
+    """像素兜底用的登录页识别：找一块大的高密度深色方块（二维码）。
+
+    为什么不能只看绿色：登录页有绿色竖分隔条和绿色状态点，旧 green 判据
+    会把它算成 200（账号页约 120），于是误以为账号页已开。
+    这里按粗网格统计深色占比，取最大连通块；二维码约 6x6 个格子，
+    普通标题文字/黑色按钮达不到这个规模。
+    """
+    p, w, h = img
+    x0, x1 = int(w * 0.40), int(w * 0.85)
+    y0, y1 = int(h * 0.25), int(h * 0.75)
+    cell = max(12, int(min(w, h) / 45))
+    cols = max(1, (x1 - x0) // cell)
+    rows = max(1, (y1 - y0) // cell)
+    if cols < 4 or rows < 4:
+        return False
+    step = max(1, cell // 5)
+
+    light = 0
+    total = 0
+    grid = [[False] * cols for _ in range(rows)]
+    for gy in range(rows):
+        for gx in range(cols):
+            dark = 0
+            n = 0
+            for y in range(y0 + gy * cell, min(y0 + (gy + 1) * cell, y1), step):
+                base = y * w
+                for x in range(x0 + gx * cell, min(x0 + (gx + 1) * cell, x1), step):
+                    o = (base + x) * 4
+                    b_, g_, r_ = p[o], p[o + 1], p[o + 2]
+                    n += 1
+                    if r_ < 90 and g_ < 90 and b_ < 90:
+                        dark += 1
+                    if r_ > 200 and g_ > 200 and b_ > 200:
+                        light += 1
+                    total += 1
+            grid[gy][gx] = n > 0 and dark >= n * 0.35
+
+    # 深色主题/全黑画面不是「登录页」，别误报
+    if total == 0 or light < total * 0.30:
+        return False
+
+    best = 0
+    best_w = best_h = 0
+    seen = [[False] * cols for _ in range(rows)]
+    for gy in range(rows):
+        for gx in range(cols):
+            if not grid[gy][gx] or seen[gy][gx]:
+                continue
+            stack = [(gy, gx)]
+            seen[gy][gx] = True
+            n = 0
+            min_y = max_y = gy
+            min_x = max_x = gx
+            while stack:
+                cy, cx = stack.pop()
+                n += 1
+                min_y, max_y = min(min_y, cy), max(max_y, cy)
+                min_x, max_x = min(min_x, cx), max(max_x, cx)
+                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < rows and 0 <= nx < cols and grid[ny][nx] and not seen[ny][nx]:
+                        seen[ny][nx] = True
+                        stack.append((ny, nx))
+            if n > best:
+                best = n
+                best_w, best_h = max_x - min_x + 1, max_y - min_y + 1
+    log(f"login-page check: dark-block cells={best} box={best_w}x{best_h}")
+    # 二维码是「又大又方」的深色块；整行文字是 1 格高，不满足。
+    return best >= 10 and best_w >= 4 and best_h >= 4
+
+
+def api_checked_in(jar: str) -> bool:
+    """GET /wallet/checkin，返回服务端是否已签到。异常由调用方处理。"""
+    import urllib.request
+    req = urllib.request.Request(
+        "https://monkeycode-ai.com/api/v1/users/wallet/checkin",
+        headers={"Accept": "application/json", "Cookie": jar,
+                 "User-Agent": "monkeycode-ui-claim/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return bool((json.loads(resp.read().decode("utf-8")).get("data") or {})
+                    .get("checked_in"))
+
+
 def content_ink(img) -> int:
     """内容区「非纯色像素」占比×1000，衡量 webview 画了多少东西。
 
@@ -548,6 +1009,7 @@ def write_result(status: str, detail: str) -> None:
 
 
 def main() -> int:
+    global IDLE_THRESHOLD_SEC, SKIP_CLICK_IDLE, CURRENT_HWND, ORIG_RECT
     ap = argparse.ArgumentParser()
     ap.add_argument("--explore", action="store_true", help="只截图，不点击")
     ap.add_argument("--steps", type=int, default=0,
@@ -557,8 +1019,18 @@ def main() -> int:
     ap.add_argument("--ink-min", type=int, default=INK_MIN_DEFAULT,
                     help="webview 渲染就绪阈值（content_ink 千分比）。空白窗口约 40，"
                          "画完的工作台远高于此；用 --explore 观察 content_ink 曲线即可标定")
+    ap.add_argument("--no-offscreen", action="store_true",
+                    help="不把窗口停到屏外（旧行为，会显示窗口）")
+    ap.add_argument("--no-idle-gate", action="store_true",
+                    help="跳过用户空闲闸门（仅调试用）")
+    ap.add_argument("--idle-wait", type=int, default=IDLE_WAIT_SEC,
+                    help="等待用户空闲的上限秒数")
+    ap.add_argument("--idle-threshold", type=int, default=IDLE_THRESHOLD_SEC,
+                    help="判定空闲所需的秒数")
     args = ap.parse_args()
     ink_min = args.ink_min
+    IDLE_THRESHOLD_SEC = args.idle_threshold
+    SKIP_CLICK_IDLE = bool(args.no_idle_gate)
     if RESULT.exists():
         RESULT.unlink()
 
@@ -588,6 +1060,14 @@ def main() -> int:
         # 查不到就继续走 UI，不要因为接口异常卡住签到
         log(f"pre-check failed ({e}); continue to UI path")
 
+    offscreen = not args.explore and not args.no_offscreen
+    if not args.explore and not args.no_idle_gate:
+        if not wait_for_user_idle(args.idle_wait, args.idle_threshold):
+            log("user active; aborting before launching any client")
+            write_result("pending",
+                         "用户正在使用电脑（空闲未达阈值）；MonkeyCode 未启动/未点击，不入账")
+            return 2
+
     pids = set(proc_pids(PROC))
     # 签到前的前台窗口，收尾时还回去（别让主人对着一个死掉的客户端）
     prev_foreground = int(user32.GetForegroundWindow())
@@ -606,6 +1086,14 @@ def main() -> int:
             if pids:
                 log(f"pid appeared after {time.time()-t0:.0f}s")
                 break
+    early_hwnd = find_main(pids)
+    if early_hwnd and offscreen:
+        CURRENT_HWND = early_hwnd
+        ORIG_RECT = win_rect(early_hwnd)
+        ensure_visible(early_hwnd)
+        park_offscreen(early_hwnd, record=True)
+        log("offscreen: parked before settle")
+
     time.sleep(args.settle)          # 等webview 拉完远程页面
 
     pids = set(proc_pids(PROC))
@@ -621,6 +1109,52 @@ def main() -> int:
         _cleanup(launched_by_us, prev_foreground)
         write_result("notfound", "no main window")
         return 1
+    if offscreen:
+        if CURRENT_HWND != hwnd:
+            if CURRENT_HWND and ORIG_RECT:
+                try:
+                    restore_rect(CURRENT_HWND, ORIG_RECT)
+                except OSError:
+                    pass
+            CURRENT_HWND = hwnd
+            ORIG_RECT = win_rect(hwnd)
+        ensure_visible(hwnd)
+        park_offscreen(hwnd, record=(PARK_RECT is None))
+
+    # ---- UIA 主路（2026-10-18）----
+    # 按控件名定位，不再依赖窗口比例/DPI；也不要求窗口在前台。
+    # 登录页在这里就是硬闸门：识别到扫码登录页立刻退出，绝不在上面点击。
+    # 只有探针不可用（PowerShell/UIA 异常、脚本缺失）才回落到下面的像素路径。
+    if not args.explore:
+        uia_outcome = uia_claim_flow(hwnd, offscreen=offscreen)
+        if uia_outcome is not None:
+            uia_status, uia_detail = uia_outcome
+            if uia_status in ("already", "claimed", "clicked"):
+                # 界面证据只进 detail；是否入账仍以接口为准（项目硬规则）。
+                try:
+                    api_ok = api_checked_in(jar)
+                except Exception as e:  # noqa: BLE001
+                    api_ok = False
+                    uia_detail += f"；接口复核失败: {e}"
+                if api_ok:
+                    status = "already" if uia_status == "already" else "ok"
+                    detail = f"{uia_detail}；接口确认 checked_in=true"
+                else:
+                    status = "pending"
+                    detail = f"{uia_detail}；接口未确认，不入账"
+            else:
+                status, detail = "pending", uia_detail
+            _cleanup(launched_by_us, prev_foreground)
+            write_result(status, detail)
+            log(f"result status={status} detail={detail}")
+            return 0 if status in ("ok", "already") else 2
+        if offscreen:
+            log("uia unavailable; offscreen mode refuses visible pixel fallback")
+            _cleanup(launched_by_us, prev_foreground)
+            write_result("pending",
+                         "UIA 不可用；屏外模式不回退到可见像素路径（可用 --no-offscreen 强制旧路径）")
+            return 2
+
     if not ensure_foreground(hwnd):
         # ⚠️ 硬闸门：这个脚本用**屏幕捕获**取图，客户端不在前台时抓到的是
         # 别人窗口（2026-10-11 实测抓到了 WorkBuddy），继续跑就等于在别人的
@@ -631,7 +1165,7 @@ def main() -> int:
         write_result("pending",
                      "MonkeyCode 未能置于前台或仍不可见，无法确认截图来自本客户端；"
                      "为避免在别的窗口上盲点，未做任何点击，不入账")
-        return 1
+        return 2
     time.sleep(0.6)
     r = win_rect(hwnd)
     X, Y, W, H = r.left, r.top, r.right - r.left, r.bottom - r.top
@@ -646,7 +1180,7 @@ def main() -> int:
         write_result("pending",
                      "MonkeyCode 窗口中心被其它窗口覆盖（或窗口仍不可见），"
                      "截图不可信；为避免盲点未做任何点击，不入账")
-        return 1
+        return 2
 
     # 路径：左下「设置」-> 弹层（默认/记忆落在「账号」页）-> 「签到 +100」。
     # lx/ly 是 Read 展示的缩略图(1088宽)坐标系下的坐标，由 content_click 换算。
@@ -699,7 +1233,7 @@ def main() -> int:
                          f"webview 等待 {waited:.0f}s 仍未渲染（ink={ink} < {ink_min}），"
                          "未做任何点击，不入账")
             log(f"result status=pending detail=webview not rendered (ink={ink})")
-            return 1
+            return 2
         # 窗口刚画完时 rect 可能仍在变（冷启动实测 495,344 2728x1816 vs
         # 稳态 294,294 2426x1615）。重取一次 rect 并重截，避免坐标基于旧 rect。
         new_rect = win_rect_tuple(hwnd)
@@ -719,7 +1253,7 @@ def main() -> int:
             write_result("pending",
                          "MonkeyCode 在前台确认环节失去焦点或被遮挡；为避免在别的窗口上盲点，"
                          "未做任何点击，不入账")
-            return 1
+            return 2
 
         def count_green(img) -> int:
             """积分卡片的绿色特征（「695」数字 + 「签到 +100」链接）。
@@ -785,7 +1319,16 @@ def main() -> int:
             write_result("pending",
                          "未能确认账号页弹层已打开（积分卡片绿色特征缺失），未点签到，不入账")
             log("result status=pending detail=账号页未确认打开")
-            return 1
+            return 2
+
+        # 登录页闸门（像素兜底）：登录页也带绿色分隔条/绿点，green 判据会误判成
+        # 账号页。这里再找二维码的大块深色连通区；命中就绝不点签到。
+        if looks_like_login_page((px, w, h)):
+            write_png(LOGDIR / "_monkey_account.png", px, w, h)
+            write_result("pending",
+                         "检测到二维码登录页（登录态已失效），未点击签到，不入账")
+            log("result status=pending detail=login page detected")
+            return 2
 
         # 步骤2：点「签到 +100」（弹层内固定相对位，content_click 负责坐标换算）
         cx, cy = content_click(px, w, h, steps[1][0], steps[1][1], X, Y)
@@ -825,7 +1368,7 @@ def main() -> int:
         _cleanup(launched_by_us, prev_foreground)
 
     write_result(status, detail)
-    return 0 if status == "ok" else 1
+    return 0 if status in ("ok", "already") else (2 if status == "pending" else 1)
 
 
 if __name__ == "__main__":

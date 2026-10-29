@@ -1,6 +1,6 @@
 version: 1
 claim_threshold_ratio: 0.3
-notes: "P1 登录即领且当日过期的软件不自动唤醒。每日必签走本机 UI（不解密登录态）。AutoClaw 每日签到 200，无明确过期。"
+notes: "P1 登录即领且当日过期的软件不自动唤醒。每日必签走本机 UI（不解密登录态）。AutoClaw 每日签到 200；积分分 daily/monthly/longTerm/campaign 四类，有效期不统一，台账按「过期未知」处理（不是永不过期）。【2026-10-23 UI 共享空闲闸门】checkin 在第一个待签 UI 账户前只等一次用户空闲（最多 300s、阈值 60s）；通过后 Qoder/MonkeyCode 跳过各自等待，仍活跃则整个 UI 组留 pending。"
 # ⚠️ 探索本文件描述的任何客户端之前，先读 research/SAFETY.md。
 # 账号承载真实付费订阅，被判定为自动化攻击会直接封号、囤的积分归零，
 # 代价远高于多领 100 积分。禁止解密登录态 / 开调试口 / 篡改客户端 /
@@ -30,11 +30,11 @@ validity_audit_2026_10_04:
   lobsterai:
     days: 30
     confidence: measured
-    evidence: "asar i18n dailyCheckInValidityDays = 「有效期{days}天」，days 是**服务端变量**不是硬编码；字段结构为 context.state.rewardValidityDays + result.expiresAt。实测 UI 显示 30 天。服务端 slot 现返回 slotState=empty，拿不到 context，故 30 只能从 UI OCR 读"
+    evidence: "asar i18n dailyCheckInValidityDays = 「有效期{days}天」，days 是**服务端变量**不是硬编码；字段结构为 context.state.rewardValidityDays + result.expiresAt。实测 UI 显示 30 天。2026-10-25 修正：slot 现返回 available（旧脚本参数过期），context 给出 rewardCredits=100 但不含有效期字段，故 30 仍以 UI OCR + asar i18n 变量为准"
   monkeycode_credit:
     days: null
     confidence: unknown
-    evidence: "【2026-10-04 两轮核查后仍为 unknown，但已排除更多可能】① 接口层：GET /api/v1/users/wallet 只返回{id, balance, daily_token_balance, daily_token_limit}，**无任何有效期字段**；二进制（monkeycode-desktop.exe，Go 编译）里与积分相关的 API 路径只有/api/v1/users/wallet 和 /api/v1/users/wallet/checkin 两个，另探 records / transactions / detail / points 四个候选明细端点全 404；exe 里 validity 仅 3 处命中且全为无关（Go 运行时 / 证书吊销 / 打包的垃圾数据）。② UI 层：2026-10-04 实测走过「设置 → 账号」，页面只有三栏（今日额度 / 积分 / 已邀请），**没有积分明细或有效期入口**，「签到 +100」也没有附带任何期限说明。结论：这个字段既不在接口返回里，界面上也不展示，本地无从查证。维持 unknown 的理由不是「没找接口」，而是「客户端与 API 两侧都确认没有」。⚠️ 不要为此解密登录态去调captcha 链路（见 research/SAFETY.md 规则 1）。"
+    evidence: "【2026-10-20 复扫仍 unknown】GET /users/wallet 仍只返回 id/balance/daily_token_*，无 expire/grants；exe 51MB 复扫仍只有 /users/wallet 与 /users/wallet/checkin；GET /users/subscription 只返回会员 plan=basic。总量可对账（毫积分÷1000），逐条过期仍无从查证。【2026-10-04 两轮核查后仍为 unknown，但已排除更多可能】① 接口层：GET /api/v1/users/wallet 只返回{id, balance, daily_token_balance, daily_token_limit}，**无任何有效期字段**；二进制（monkeycode-desktop.exe，Go 编译）里与积分相关的 API 路径只有/api/v1/users/wallet 和 /api/v1/users/wallet/checkin 两个，另探 records / transactions / detail / points 四个候选明细端点全 404；exe 里 validity 仅 3 处命中且全为无关（Go 运行时 / 证书吊销 / 打包的垃圾数据）。② UI 层：2026-10-04 实测走过「设置 → 账号」，页面只有三栏（今日额度 / 积分 / 已邀请），**没有积分明细或有效期入口**，「签到 +100」也没有附带任何期限说明。结论：这个字段既不在接口返回里，界面上也不展示，本地无从查证。维持 unknown 的理由不是「没找接口」，而是「客户端与 API 两侧都确认没有」。⚠️ 不要为此解密登录态去调captcha 链路（见 research/SAFETY.md 规则 1）。"
 calendar:
   - id: lobster_gift
     account: lobsterai
@@ -71,15 +71,15 @@ accounts:
       mode: extra
     capabilities: [coding, office, docs]
     open_when_needed: false
-    notes: "API 直签（vendor/workbuddy-auto-signin，MIT），稳定可靠。早期记录称「客户端模拟点击被 isTrusted 过滤」，该结论只适用于 UIA InvokePattern 路线，未经 OS 级注入复测；既然 external 可用，不做 UI 路线。auto 附带成长中心（派 Buddy/盲盒/任务）。【2026-10-19 增加积分明细查询，只读】credit credits workbuddy [--all|--json|--line]，或 python -m agent_credit.wb_credits。端点 /billing/meter/get-user-resource-{summary,free-packages,paid-packages}，⚠️ 资源类端点不带 /v2（签到端点才带，带错 404 Route Not Found）；free/paid 的 PackageCodes 不能为空数组（400 PackageCodes required），按客户端分组下发。每条 grant 带 CapacityRemainPrecise + DeductionEndTime(epoch ms)，过期优先级 DeductionEndTime→ExpiredTime→CycleEndTime（与客户端 toExpiredCreditPackage 一致）；余量优先级对齐客户端 resolveResourceCapacity：CapacityType=4 套餐配额的真余量在 CycleCapacityRemainPrecise（包级 CapacityRemainPrecise 是未扣减的包总量，曾据此把 500 当成余量，实测对账破等式后已修）。失效条件：端点改名 / sym-v1 信封升级（vendor 签到脚本会先炸）。【2026-10-19 签到后自动对账】checkin 末尾自动跑 credits_command（逐条明细，source=sync 重建账本条目、保留每条过期时间；`credit due` 的临期视图直接受益）；status_command 是总量快照兜底契约。开关 AGENT_CREDIT_SKIP_SYNC=1。详情 research/answers/workbuddy_credit_detail.md"
-    models_note: "混元、DeepSeek、GLM、Kimi、MiniMax"
+    notes: "【2026-10-25 登录态失效】00:02 外部直签与 credits 查询同时返回 HTTP 401（AUTH_REJECTED），凭据文件本身可解密（doctor=AUTH_READY），但服务端拒绝。为验证是否只是 token 过期，用 explorer 拉起客户端一次：客户端随即把 workbuddy-desktop.info 删掉并写下 workbuddy-desktop.info.logged-out，即**登录会话已被服务端注销**，不是脚本/端点问题，只能人工重新登录。结论：WorkBuddy 的 access token 寿命约 3 天（上次登录 10-22 21:09，10-25 失效），客户端不常驻时没有刷新机会；以后遇到 401 先开客户端确认登录态，再手动补签。checkin 已把 AUTH_REJECTED 明确标注为「需重新登录」，不再混在普通 external 失败里。API 直签（vendor/workbuddy-auto-signin，MIT），稳定可靠。早期记录称「客户端模拟点击被 isTrusted 过滤」，该结论只适用于 UIA InvokePattern 路线，未经 OS 级注入复测；既然 external 可用，不做 UI 路线。auto 附带成长中心（派 Buddy/盲盒/任务）。【2026-10-19 增加积分明细查询，只读】credit credits workbuddy [--all|--json|--line]，或 python -m agent_credit.wb_credits。端点 /billing/meter/get-user-resource-{summary,free-packages,paid-packages}，⚠️ 资源类端点不带 /v2（签到端点才带，带错 404 Route Not Found）；free/paid 的 PackageCodes 不能为空数组（400 PackageCodes required），按客户端分组下发。每条 grant 带 CapacityRemainPrecise + DeductionEndTime(epoch ms)，过期优先级 DeductionEndTime→ExpiredTime→CycleEndTime（与客户端 toExpiredCreditPackage 一致）；余量优先级对齐客户端 resolveResourceCapacity：CapacityType=4 套餐配额的真余量在 CycleCapacityRemainPrecise（包级 CapacityRemainPrecise 是未扣减的包总量，曾据此把 500 当成余量，实测对账破等式后已修）。失效条件：端点改名 / sym-v1 信封升级（vendor 签到脚本会先炸）。【2026-10-19 签到后自动对账】checkin 末尾自动跑 credits_command（逐条明细，source=sync 重建账本条目、保留每条过期时间；`credit due` 的临期视图直接受益）；status_command 是总量快照兜底契约。开关 AGENT_CREDIT_SKIP_SYNC=1。详情 research/answers/workbuddy_credit_detail.md"
+    models_note: "混元 Hy3/Hy4 + MiniMax-M3、GLM-5.2/5.1/5V-Turbo、Kimi-K3/K2.7-Code、DeepSeek-V4-Pro/Flash【2026-10-22 官方文档：已全面换代到 V4/K3/GLM-5 这一代】"
     rating:
       value: 4
-      capability: 4
+      capability: 5
       automation: 5
-      review: "额度不算最高但最省心：external 直签零交互，30 天有效期够攒，7 天连签再加 1000。混元/DeepSeek/GLM/Kimi/MiniMax 多模型可选，办公文档链路完整。"
+      review: "额度不算最高但最省心：external 直签零交互，30 天有效期够攒，7 天连签再加 1000。2026-10 官方文档确认已换代到混元 Hy4 + Kimi-K3/GLM-5.2/DeepSeek-V4/MiniMax-M3 这一代，多模型池是台账里最全的一档，办公文档链路完整。"
       best_for: "日常编码主力 + 腾讯文档/办公场景"
-      owner_note: ""
+      owner_note: "不能调用内置浏览器去调试网页——没有 Playwright，浏览器操控能力缺失。"
 
 
   - id: minimax
@@ -88,23 +88,28 @@ accounts:
     vendor: MiniMax
     unit: credit
     grant_type: accumulating
-    # 【2026-10-11 第二次按服务端实测修正】10-04 记的「1200/天、第4/7天3000、
-    # 整周期 12000」已作废——服务端在 10-07 前后下调了额度，且不再每天给连签加成。
-    # 2026-10-11 实测 GET /signin/status 的 days[]（is_today 落在 day5，全周期可读）：
-    #   day1 = 800+400 = 1200（唯一有 bonus 的一天）
-    #   day2 = 400+0   day3 = 400+0
-    #   day4 = 1000+0  day5 = 400+0
-    #   day6 = 400+0   day7 = 1000+0
-    # 即**平时 400/天**，仅 day1 给 1200、day4/day7 给 1000，**整周期 4800**。
-    # 与 10-04 那版差 2.5 倍。账本佐证：10-07=1200、10-08=400、10-09=400、
-    # 10-10=1000、10-11=400，与上表逐日吻合，周期起点 10-07（day1）。
-    # ⚠️ 这是服务端可变的活动规则，不是稳定承诺。改额度前先重新读 status，
+    # 【2026-10-24 第三次修正·补正 bonus_points 语义】前两版（10-04 的
+    # 「1200/天、第4/7天3000、整周期12000」与 10-11 的「平时400/天、day1=1200、
+    # 整周期4800」）都把服务端的 bonus_points 当成**额外再加一份**，其实是重复计账。
+    # 权威依据在客户端自带的类型定义里（app.asar @mavis/shared/src/daily-signin.ts）：
+    #   /** Extra credits already included in points; absent on older responses. */
+    #   bonus_points?: number;
+    # 即 points 已包含 bonus；前端渲染同源（total_points = points，
+    # 签到按钮上的「签到得@N」用的也是 points）。
+    # 官方口径（agent.minimax.cn/docs/code/account/usage，2026-10-24 核对）：
+    #   每日 400；连续签到第 4、7 天单日加码至 1000；一周累计 4000；
+    #   签到积分可累计使用，自到账起 30 天有效。
+    # 2026-10-24 实测 GET /signin/status（is_today=day4，全周期可读）：
+    #   day1=400 day2=400 day3=400 day4=2024(1000基线+1024活动加成)
+    #   day5=400 day6=400 day7=1000 → 整周期 5024
+    # 活动期服务端会把当天额度翻倍，并把多出来的部分记在 bonus_points 里
+    # （国庆期 10-04..10-07：day1=800/bonus400、day4=2000/bonus1000）。
+    # ⚠️ 活动额度服务端可变，不是稳定承诺。改额度前先重新读 status，
     # 别拿本文件的数字当既成事实（external 脚本上报实发额，账本以实发为准，
     # 本文件只影响 `credit status` 的预估与 external 失败时的兜底）。
-    # daily_amount_by_day 是权威表：直接存服务端每天下发的**整档额度**，
-    # 不做「基础 + 加成」的拆分。理由：day1 的基础额度是 800、其他天是 400，
-    # 基础额度本身在周期内会变，两段式表达不了。
-    # daily_amount 保留 400 作为「典型日」兜底（yaml_lite 不支持嵌套 dict 时用）。
+    # daily_amount_by_day 存的是**官方基线整档额度**（不做「基础 + 加成」拆分，
+    # 活动期由服务端实发覆盖）。daily_amount 保留 400 作为「典型日」兜底
+    # （yaml_lite 不支持嵌套 dict 时用）。
     daily_amount: 400
     validity_days: 30
     cap: null
@@ -113,30 +118,38 @@ accounts:
     # 保留为 token 过期时的兜底（checkin.py 里 external 失败会回退 UI）。
     claim_mode: ui
     command: 'python "{REPO}\vendor\minimax-auto-signin\signin.py" auto'
+    # 2026-10-25：warmup 自己最多等 180s 让客户端续期，checkin 原先写死 60s，
+    # 正好把续期中的脚本杀掉（10-25 00:02 漏签）。按账户放宽到 240s。
+    command_timeout: 240
+    # 【2026-10-24 服务端真值通道】GET /minimax-cloud/api/v1/credit/details 逐笔返回
+    # 剩余与到期时间（credit_type 1=购买 2=签到赠予，include_expired=true 含历史），
+    # 对齐项目 credits_command 契约。接上之后 MiniMax 从「本地估算」升为「服务端真值」，
+    # 台账不再需要手算 bonus_points 口径；实测与服务端逐笔一致（10-24 那笔 = 2024）。
+    credits_command: 'python "{REPO}\vendor\minimax-auto-signin\credits.py"'
     streak:
       cycle_days: 7
-      # 2026-10-11 服务端实测整档：1200/400/400/1000/400/400/1000 = 4800。
-      # 加成不再是「每天 400」：仅 day1 有 +400 bonus，day4/day7 是 +600 档位。
+      # 官方基线：平时 400，第 4/7 天 1000（= 400 + 600 加成），整周期 4000。
+      # 活动期服务端会翻倍（10-24 实测 day4=2024），实际入账以服务端实发为准。
       daily_bonus: 0
-      bonus_on: [1, 4, 7]
-      bonus_amount: 400
-      bonus_amount_by_day: {1: 400, 4: 600, 7: 600}
-      daily_amount_by_day: {1: 1200, 2: 400, 3: 400, 4: 1000, 5: 400, 6: 400, 7: 1000}
-      cycle_total: 4800
+      bonus_on: [4, 7]
+      bonus_amount: 600
+      bonus_amount_by_day: {4: 600, 7: 600}
+      daily_amount_by_day: {1: 400, 2: 400, 3: 400, 4: 1000, 5: 400, 6: 400, 7: 1000}
+      cycle_total: 4000
       mode: set_daily
-    capabilities: [coding, multimodal]
+    capabilities: [coding, multimodal, office]
     mobile: true
     mobile_note: "能看到桌面端的项目并继续对话（比 AutoClaw 移动端强）；模型同样只有 MiniMax 自家"
     open_when_needed: false
-    notes: "签到卡在主页左下角。【2026-09-26 起改为 external 直签：全自动、不依赖客户端运行、不开窗口】端点 GET/POST /minimax-cloud/api/v1/signin/{status,claim}，host=https://agent.minimax.cn，鉴权 Authorization: Bearer（读本机明文凭据 %USERPROFILE%\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json；token 不进命令行、不进日志、不进输出）。**必须带 timezone_id=Asia/Shanghai**：缺失时 HTTP 仍 200 但业务返回 1406010011 invalid timezone_id；只有 IANA 名有效，8 / +8 / 28800 / Shanghai 全被拒。【2026-10-04 额度规则按服务端实测重写】GET /signin/status 返回的 days[] 直接下发真实额度，字段是 points(基础) + bonus_points(加成)，7 天实测：day1-3=800+400、day4=2000+1000、day5-6=800+400、day7=2000+1000→ **平时 1200/天、第4/7天 3000、整周期 12000**。旧记「400/天、第4/7天加1000」与真实值差 3 倍，已改。枚举 SigninDayStatus{Upcoming=1,Claimable=2,Claimed=3,Disabled=4}，已签判定用 status==3；**status==1(Upcoming) 表示当天额度还没到可领时间，此时 claim 会被拒**——10-04 凌晨 00:14 那轮就是 Upcoming，所以没领成，不是脚本坏了。已签判定以服务端为准不重复领取（2026-09-26 实测幂等）。**有效期 30天是官方口径**（asar 内 usage_resource_tooltip_rule1 原文：「赠予积分（如签到奖励，30天有效）仅限 MiniMax Code 使用」），但要注意**付费积分有效期 1 年**（同段 rule2），台账只跟签到赠予的 30 天。扣费顺序 Token Plan > 积分。【2026-09-27 修正·最终】弃用 UI 路线的旧理由「无法冷启动」已被实测推翻；真实约束是本自动化会话只能以 runas 拉起 GUI，非提权起不来。冷启动渲染延迟约 12s，过早 OCR 只能看到标题栏。【2026-09-30 · 国庆活动推广干扰 UI 路线】9.28-10.07 活动推广文案同时含「每日签到」「领取」，会劫持锚点/按钮识别并吞掉点击，已加固限定左侧栏 x<600 + 文本长度上限 12/16；该推广层当日 UI 路线实际不可用，故 external 为主路线。失效条件：token 过期（脚本打印剩余小时；沙箱内 Popen 拉不起 GUI，需用非提权计划任务 RunLevel=Limited+LogonType=Interactive 拉起）、端点改路径、timezone 校验变更、当天额度处于 Upcoming 状态。此前「isTrusted 过滤」只对 UIA InvokePattern 成立，不要再拿它当否决理由。"
-    models_note: "MiniMax-M3 / M2.7 / H3"
+    notes: "【2026-10-25 续期超时被误杀】00:02 外部直签发现 token 只剩 61s，自动按设计临时拉起客户端续期；warm_token 内部允许等 180s，但 checkin 的外部命令超时写死 60s，62s 把正在续期的脚本（很可能连着客户端）一起杀掉，随后 UI 兜底也因「90s 内未出现主窗口」pending。对照：00:10 同一轮 sync 阶段的 credits.py 用同样方式 5s 就续期成功（gen 94→95），说明续期本身没问题，纯粹是超时给得太短。已给 catalog 加 command_timeout: 240，checkin 支持按账户覆盖（默认仍 60s）。签到卡在主页左下角。【2026-10-24 修正·bonus_points 语义】服务端 days[] 的 points **已包含** bonus_points（客户端自带类型定义原文：/** Extra credits already included in points; absent on older responses. */，前端渲染同源 total_points = points）。此前 signin.py 按 points + bonus_points 入账，凡是 bonus>0 的日子都多记：09-30/10-01/10-04/10-05/10-07 各多记 400，10-03/10-06 各多记 1000，10-24 多记 1024，**合计多记 5024**，台账余额 27648 → **22624**（已修正，备份 data/_ledger_backup_20261024_before_mmbonus_fix.json）；signin.py 已改为只取 points。**官方额度口径**：每日 400，连续签到第 4/7 天单日加码至 1000，一周累计 4000，到账起 30 天有效且可累积（agent.minimax.cn/docs/code/account/usage）。【2026-09-26 起改为 external 直签：全自动、不依赖客户端运行、不开窗口】端点 GET/POST /minimax-cloud/api/v1/signin/{status,claim}，host=https://agent.minimax.cn，鉴权 Authorization: Bearer（读本机明文凭据 %USERPROFILE%\\.minimax\\auth\\prod\\cn\\mcode-public\\auth.json；token 不进命令行、不进日志、不进输出）。**必须带 timezone_id=Asia/Shanghai**：缺失时 HTTP 仍 200 但业务返回 1406010011 invalid timezone_id；只有 IANA 名有效，8 / +8 / 28800 / Shanghai 全被拒。【2026-10-04 额度规则按服务端实测重写（该条已作废，见文首 2026-10-24 修正）】GET /signin/status 返回的 days[] 直接下发真实额度，字段是 points(基础) + bonus_points(加成)，7 天实测：day1-3=800+400、day4=2000+1000、day5-6=800+400、day7=2000+1000→ 当时记成 **平时 1200/天、第4/7天 3000、整周期 12000**。作废原因：bonus_points 含在 points 内，实发是 800/2000；周期基线 4000。旧记「400/天、第4/7天加1000」与真实值差 3 倍，已改。枚举 SigninDayStatus{Upcoming=1,Claimable=2,Claimed=3,Disabled=4}，已签判定用 status==3；**status==1(Upcoming) 表示当天额度还没到可领时间，此时 claim 会被拒**——10-04 凌晨 00:14 那轮就是 Upcoming，所以没领成，不是脚本坏了。已签判定以服务端为准不重复领取（2026-09-26 实测幂等）。**有效期 30天是官方口径**（asar 内 usage_resource_tooltip_rule1 原文：「赠予积分（如签到奖励，30天有效）仅限 MiniMax Code 使用」），但要注意**付费积分有效期 1 年**（同段 rule2），台账只跟签到赠予的 30 天。扣费顺序 Token Plan > 积分。【2026-09-27 修正·最终】弃用 UI 路线的旧理由「无法冷启动」已被实测推翻；真实约束是本自动化会话只能以 runas 拉起 GUI，非提权起不来。冷启动渲染延迟约 12s，过早 OCR 只能看到标题栏。【2026-09-30 · 国庆活动推广干扰 UI 路线】9.28-10.07 活动推广文案同时含「每日签到」「领取」，会劫持锚点/按钮识别并吞掉点击，已加固限定左侧栏 x<600 + 文本长度上限 12/16；该推广层当日 UI 路线实际不可用，故 external 为主路线。失效条件：token 过期（脚本打印剩余小时；沙箱内 Popen 拉不起 GUI，需用非提权计划任务 RunLevel=Limited+LogonType=Interactive 拉起）、端点改路径、timezone 校验变更、当天额度处于 Upcoming 状态。此前「isTrusted 过滤」只对 UIA InvokePattern 成立，不要再拿它当否决理由。"
+    models_note: "文本 MiniMax-M3.1-Flash（官方 M Plan 文本模型，Preview 版已下线）+ M2.7；视频 H3 / H3 Max（仅 Explore/Build 档可用，Go 档不可用）；图像与音频模型全档可用；支持 BYOK 自定义供应商【官方 M Plan 概览 2026-10-24：https://platform.minimax.cn/docs/m-plan/intro】【2026-10-22 官网：Code 2.0 起扩为通用桌面 Agent（办公自动化/定时任务/电脑操控/视频生成）】"
     rating:
       value: 5
       capability: 4
       automation: 5
-      review: "可累积额度里的天花板：**1200/天、第 4/7 天 3000、7 天周期 12000**（2026-10-04 按服务端 days[] 实测修正，旧记 400/天差 3 倍），赠予积分 30 天有效。external 直签无GUI 无 UAC，不受客户端活动推广干扰，是当前唯一完全无感的路线。唯一软肋是 accessToken 有效期极短（客户端停跑就废），需靠计划任务在签到前先拉客户端续期。模型限于 MiniMax 自家（M3/M2.7/H3），多模态是加分项。"
+      review: "可累积额度里的天花板：**平时 400/天，第 4/7 天单日加码到 1000，7 天周期 4000**（2026-10-24 按官方口径 https://agent.minimax.cn/docs/code/account/usage 核对，赠予积分 30 天有效、可累积；活动期服务端会翻倍，10-24 实测 day4=2024）。external 直签无GUI 无 UAC，不受客户端活动推广干扰，是当前唯一完全无感的路线。唯一软肋是 accessToken 有效期极短（客户端停跑就废），需靠计划任务在签到前先拉客户端续期。模型限于 MiniMax 自家但已换代到 M3.1-Flash/M2.7 + H3/H3 Max 视频，多模态是加分项。"
       best_for: "高频重度使用、多模态任务；移动端可续桌面端的对话"
-      owner_note: "有移动端，能看到桌面端的项目并继续对话（这点比 AutoClaw 强，后者移动端是另一套环境、项目不同步）。模型两端都只有 MiniMax 自家（M3/M2.7/H3）。"
+      owner_note: "有移动端，能看到桌面端的项目并继续对话（这点比 AutoClaw 强，后者移动端是另一套环境、项目不同步）。模型两端都只有 MiniMax 自家（M3/M2.7/H3）。**手机端一次只能配对一台电脑**，换设备需要重新配对。"
 
 
   # 2026-10-09 字节官宣 TraeWork 与 TraeCode 合并为「TRAE」，两品牌不再并行
@@ -157,16 +170,24 @@ accounts:
     claim_policy: always
     claim_mode: ui
     command: ""
+    # 2026-10-20 接入通用对账契约：Trae 的余额与到期日来自客户端扩展导出的
+    # logs/trae_credit_detail.json（扩展只 executeCommand 客户端自己注册的
+    # getter，不碰凭据、不解密——research/SAFETY.md 允许路线）。
+    # 登记时带真实到期日，不再是一条无过期时间的快照——否则「快过期先烧」
+    # 这条规则对 Trae 是瞎的（台账里曾只有 25 条本地估算 + 4 条无到期日快照）。
+    # 载荷里的 granularity 标口径：per_pack=逐包明细；aggregate=客户端展示的
+    # 聚合到期日（免费单桶账号下即每笔的到期日）。
+    credits_command: set PYTHONPATH={REPO}&& python -m agent_credit.trae_credits --json
     extra_monthly: 500
     capabilities: [coding]
     open_when_needed: false
-    notes: "【2026-10-11 客户端合并 & 额度修正】TraeWork(TRAE SOLO CN) 已并入 TraeCode(Trae CN)：旧安装目录 %LOCALAPPDATA%\\Programs\\TRAE SOLO CN 现在只剩 debug.log，客户端只剩 Trae CN.exe（v3.4.2），主窗口标题变成 **Agent**（class 仍是 Chrome_WidgetWin_1；同 pid 另有 128x200 的小窗 title='Trae CN'，按「可见+有标题+面积最大」筛才选得对）。合并由 trae-cn://migration 触发，迁移发生在 2026-10-11 11:04~11:10。两个产品向来共用同一积分账户，台账继续只用 traework 一条，**不要新增账户**。本次同步改了默认进程名/可执行路径：scripts/ui_claim_traework.ps1（原默认是单引号字面量 '$env:APPDATA\\...\\TRAE SOLO CN.exe'，$ 不展开=恒假路径）、_task_traework.ps1、_task_traework_claim.ps1、run_traework_claim.py、agent_credit/ui_claim.py（TRAEWORK_PROCESS 显式透传 -ProcessName）。**额度：免费日额度已从 150 降为 100**（菜单文案「每日领100积分」，且 7 组「点击前/点击后」同分钟余额差实测均为 +100：10-06 2927→3027、10-07 3027→3127、10-08 3127→3227、10-09 3227→3327、10-10 3327→3427、10-11 3427→3527；对照 09-29 为 1677→1827 即 +150）。⚠️ 账本 09-30~10-11 共 12 天仍按 150 记账，合计虚记 600，待主人确认后回滚。【自动化路径，2026-09-28 起 claim_mode=ui】由每日计划任务跑 scripts/ui_claim_traework.ps1（OCR 定位+点击）；**非提权**——客户端由 RunLevel=Limited 计划任务拉起（中完整性），脚本同完整性即可驱动（UIPI 只拦 LOW→HIGH），2026-10-09 起不再 runas，别再弹 UAC。签完只关闭本次由脚本拉起的实例，主人已开着的保留。备用方案 run_traework_claim.py 仅作人工排查。共用端点 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}）。【规则 2026-09-26 双方自述 + 官方页确认】会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么 UI 而非 external】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按 research/SAFETY.md 禁止解密登录态 -> external 拿不到凭据；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且每次运行自身消耗积分，未必覆盖日收益，故未启用。入口：桌面端左下角账户条（新布局实测「用户71294228173免费」在 3868x2092 窗口下约 @58,1998）→ 点左侧头像/用户名开账户菜单（菜单向上展开，出口在窗口下方约 62% 高度处）。【OCR 脚本实测】scripts/ui_claim_traework.ps1（--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。四个实测坑：①入口文案不是「签到」，且 OCR 拆成单字（每/日/领/100/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③入口行是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏（偏移由菜单右边界推算，窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「升级会员」推广卡片，含「每日多领」字样，必须排除。已签态文案「今日已签」。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。【2026-10-13 合并后 UI 改版 & 判据换血】官宣合并后客户端 UI 大改，**账户条不再显示积分余额**（旧「用户71294228173 免费 3,527」-> 新「0用户71294228173免费」，且整行被 OCR 并成一条、words 是单字数组）-> 原「读账户条余额、看点击前后差额」的主判据整体失效，10-12/10-13 连续两天日志出现「复核余额 -1 -> -1」，成功判定退化成「今日已签」文案兜底。本次修复改用**卡片三态**（实测 OCR dump）：①未签：卡片常驻左侧栏底部，文案「每日领100积分」+「升级会员，每日多领100积分」，按钮 [签到][升级权益]；②刚领取：「今日签到，已获得100积分。下次可在头像菜单中签到。」，按钮 [今日已签(3s)]；③已签（稳定）：卡片整块换成会员推广「夺会员首月立减¥30 / 升级会员立即获得大额积分…」，按钮 [立即升级]，**页面上再无任何签到字样**。于是判据改为：主判据 = 正则抓「已获得N积分」取实发额度（比余额差更直接，且服务端调额时能自动跟上）；备用 = 余额差；兜底 = 文案（拿不到额度，退回 daily_amount）。幂等闸门 = 入口词「每日领」消失 + 会员推广态出现。按钮定位也从「像素扫药丸 + 4 个 offset 轮换」改为按 OCR 短文本在入口行下方定位（新布局里药丸扫描会扫到背景深色块，实测 x=664 len=235）。已用当日三态真实 OCR 文本做正则回归，无交叉误判（「升级会员立即获得大额积分」不会被误读成 granted）。【2026-10-15 两个误判实锤修复】① 三态结论③错了：**未签到时首页卡片同样可能是会员推广态**（签到入口只在头像菜单里，10-14 领取成功提示原文「下次可在头像菜单中签到」），首页见会员推广就判 already 会漏签——10-15 凌晨因此漏签（用户实机确认未到账）。已删该早退分支：首页无入口一律点头像菜单确认。② Find-AnyLine 已签词原是全窗口匹配，聊天面板里的 agent 对话文本含「今日已签」字样会造成**自指污染**误判 already（10-15 两次实锤，OCR dump 可见对话原文被当判据）。已给已签词判定加 x<30% 左侧栏限制（与入口词一致；「今日已签」按钮实测 @81,1622 在栏内）。补签实测：菜单路径点「签到」按钮，余额 3759→3859，[granted] 100。另注意：菜单里余额仍可读（菜单会话内 Find-Balance 有效，3759→3859 即菜单余额差），首页账户条才没有余额。【2026-10-19 积分明细查询通道打通：每包余额+过期时间可见】数据源实锤 = POST /trae/api/v2/pay/ide_user_ent_usage（body {require_usage:true, req_source}），响应 user_entitlement_pack_list[]，每包含 entitlement_base_info.{product_type, quota.credits_limit(-1=不限), end_time, status} + usage.credits_amount + 包级 expire_time/yearly_expire_time + display_desc —— 即「每条积分的剩余和过期时间」服务端本来就有，此前 validity 记 measured 31 天是因为没看过这个响应（audit 升级待首份真实 dump 复核）。调用方式 = 本地扩展 vendor/trae-credit-dump（装在 ~/.trae-cn/extensions/agent-credit.trae-credit-dump-0.0.1/，源码 vendor/trae-credit-dump/）：只 executeCommand 客户端自己注册的只读 getter（workbench.action.icubeGetCreditsUsageInfo[仅完整 IDE bundle] / icubeGetEntitlementInfo / icubeGetCheckinCreditsSnapshot / icubeGetFastRequestQuotaInfo / icubeGetIdeAccountManagementSnapshot），结果落 logs/trae_credit_detail.json；token 全程不落地、无解密、无注入、无额外服务端请求（getter 读客户端会话内缓存），符合 SAFETY 路线 2。客户端启动 15s 自动导一次，或命令面板「Agent Credit: 导出 Trae 积分明细」手动触发。解析登记：python scripts/trae_credit_detail.py（--record 走 credit.py set-balance trae <总剩余>）。已排除的旧判断要修正：①「余额只能靠 UI OCR」（SAFETY.md 5.1 表）对 Trae 不再成立——官方命令通道直接给结构化数据；②本地缓存确认无存档（state.vscdb/leveldb 仅 banner 标记），数据只在客户端内存，所以必须走扩展。失效条件：命令 id 改名/取消注册、ide_user_ent_usage 响应字段重命名、扩展目录扫描机制变化；UI 兜底 = 设置→用量管理页（icubeOpenUsageDetails 同一页）OCR。【2026-10-19 深夜跑通验证 + 重要修正】SOLO/Agent 窗口（windowType=Agent/Floating/TraeWork）**不加载用户扩展**：bundle 实锤 scanUserExtensions 在 mh(productService)=true 时直接 return []（日志原文 Skipping user extensions scan in solo-lite mode），extensions.json 即使扫出扩展也不激活。正路 = 开 IDE 窗口（windowType=IDE → 完整 workbench.desktop.main.js）：**实测入口 = SOLO 窗口右上角「IDE」按钮**（底层是 workbench.action.newIDEWindow / openIDEWindow；⚠️ SOLO-lite 无命令面板，Ctrl+Shift+P 无反应，文件菜单项未必露出，别走 palette/菜单），IDE 窗口启动 15s 扩展自动 dump。首份真实 dump（logs/trae_credit_detail.json）：creditsUsage 聚合 limit=3700 / used=133.66 / remaining=3566 / **expireTime=2026-10-31 23:59**；checkinSnapshot 当日已签(credits=100, extraCredits=100)。修正两点：①getEntitlementInfo() 不带参返回的是 pay status（commercial_activities/身份/开关），不含 user_entitlement_pack_list —— per-pack list 只在客户端拉 ide_user_ent_usage 后内存瞬时存在，getter 只暴露聚合；Free 单桶下聚合=每条，多包账号要 per-pack 需 UI 用量管理页兜底。②validity 由 measured 31 天升 **confirmed：客户端权威 expireTime=月底 23:59**（与 audit 行「无月度订阅费，只烧账上积分」一致）。当日验证流水：IDE 窗口 dump → python scripts/trae_credit_detail.py --record → set-balance trae 3566 已入账。【2026-10-19 深夜自动化】每日任务 action 改为 scripts/_daily_chain.ps1（checkin → trae_credit_sync.ps1）：sync 聚焦 Agent 窗发 Ctrl+Shift+N（newIDEWindow 内置快捷键 3116）开 IDE 窗 → 等 logs/trae_credit_detail.json 新鲜（扩展 v0.0.2 startup 15s/focus 5min 节流/30min 兜底）→ --record 登记 → WM_CLOSE 关 IDE 窗；一次性任务 scripts/_task_trae_credit_sync.ps1 实测 25s 全通（3541 入账）。⚠️ 本机任务计划怪癖新增两条：Register-ScheduledTask -Xml 静默丢第二个 Exec action（故用 chain 脚本包单 action）；非提权改任务静默 no-op/Access denied，换 action 必须提权跑一次 register-daily-task.ps1（2026-10-20 用户已提权跑通）。【2026-10-20 首夜实测 + 两处加固】凌晨 00:03 链路首跑：claim 成功（菜单 OCR 3532→3632 [granted] 100），但 sync 的 Ctrl+Shift+N 被吞（锁屏/焦点未到位）→ IDE 窗没开成，且旧逻辑拿昨天的 stale dump set-balance 3541 把真实余额覆盖成旧值。已修：①开 IDE 窗改为最多 3 轮重试（每轮重新聚焦 Agent 窗再发键，等 20s）；②**只有 dump 新鲜（mtime 晚于任务启动）才 --record**，否则 skip_record_stale 报错不碰台账。当日 00:12 手动补跑 25s 全绿，余额修正为 3629（=3632 扣当日 agent 消耗 3，与菜单 OCR 口径互洽）。残留风险：锁屏时 3 轮重试也可能全败，此时 sync 安全跳过，余额等次日凌晨或手动补跑刷新。"
-    models_note: "16+ 模型，CUE / MCP"
+    notes: "【2026-10-25 入口被聊天标题劫持（4 次点击全落空）】菜单明明已展开、也读到了「每日领100积分」，但 Find-EntryWord 先匹配到了左侧聊天侧栏的任务标题「检查今日签到情况」（x=663<30%W，菜单展开时「签到」needle 被采信），点击坐标变成 @850,167 等聊天区位置；随后药丸扫描又因 menuRight 被聊天区含「消息/每日领」的长行拉到窗口右侧，扫到的是对话内容。复核余额 877125 也不是 Trae 余额（真实余额在菜单里 3,450），而是从对话正文「877,125」抓的。修法：① 入口只认「每日领」行或**独立短词** 签到/Check in，长句一律不认；② menuRight 与 Find-Balance 都限制在左 35% 窗宽内；③ Find-EntryWord 先把候选限定在左 30% 再调 Find-WordHit（后者每个 needle 只返回第一条命中，聊天区顶部行会挡住菜单行）。【2026-10-25 账户条永远点不开】$userHit 算出的锚点从未进入候选列表——$accWords 依赖 StartsWith(用户)，而新版 OCR 的 words 是单字数组 {0,用,户,71294228173,免,费}，永远匹配不到，只剩兜底点 (2.8%W,97.2%H)=108,2031（头像右侧空白缝），连点 3 天都开不了菜单。已把锚点作为首选候选；账户条点击改 -SkipSynth 真实点击，BringBack 点击前 Ensure-Foreground（未激活窗口的第一次点击会被 Chromium/React 吞掉），点完 Restore-Foreground。01:03 实测：锚点 @77,2022 开菜单 → 入口「每日领100积分」→ 药丸 @497,1221 → 余额 3450→3550 [granted] 100。10-24 的「已签到」误判在 18:46 已修（有入口就必须点、无证据一律 pending），本次 00:07 也正确报了 pending 而不是假 already。【2026-10-11 客户端合并 & 额度修正】TraeWork(TRAE SOLO CN) 已并入 TraeCode(Trae CN)：旧安装目录 %LOCALAPPDATA%\\Programs\\TRAE SOLO CN 现在只剩 debug.log，客户端只剩 Trae CN.exe（v3.4.2），主窗口标题变成 **Agent**（class 仍是 Chrome_WidgetWin_1；同 pid 另有 128x200 的小窗 title='Trae CN'，按「可见+有标题+面积最大」筛才选得对）。合并由 trae-cn://migration 触发，迁移发生在 2026-10-11 11:04~11:10。两个产品向来共用同一积分账户，台账继续只用 traework 一条，**不要新增账户**。本次同步改了默认进程名/可执行路径：scripts/ui_claim_traework.ps1（原默认是单引号字面量 '$env:APPDATA\\...\\TRAE SOLO CN.exe'，$ 不展开=恒假路径）、_task_traework.ps1、_task_traework_claim.ps1、run_traework_claim.py、agent_credit/ui_claim.py（TRAEWORK_PROCESS 显式透传 -ProcessName）。**额度：免费日额度已从 150 降为 100**（菜单文案「每日领100积分」，且 7 组「点击前/点击后」同分钟余额差实测均为 +100：10-06 2927→3027、10-07 3027→3127、10-08 3127→3227、10-09 3227→3327、10-10 3327→3427、10-11 3427→3527；对照 09-29 为 1677→1827 即 +150）。⚠️ 账本 09-30~10-11 共 12 天仍按 150 记账，合计虚记 600，待主人确认后回滚。【自动化路径，2026-09-28 起 claim_mode=ui】由每日计划任务跑 scripts/ui_claim_traework.ps1（OCR 定位+点击）；**非提权**——客户端由 RunLevel=Limited 计划任务拉起（中完整性），脚本同完整性即可驱动（UIPI 只拦 LOW→HIGH），2026-10-09 起不再 runas，别再弹 UAC。签完只关闭本次由脚本拉起的实例，主人已开着的保留。备用方案 run_traework_claim.py 仅作人工排查。共用端点 POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}（body={req_source:1}）。【规则 2026-09-26 双方自述 + 官方页确认】会员 200/天，有效期 31 自然日（FIFO），每月登录赠 500 当月有效；**无连签周期、无连签加成**（官方「月最高 6200」= 200x31 纯线性，响应体无 streak 字段，只有 credits/extra_credits/beijingDayKey）。【为什么 UI 而非 external】鉴权头为 Authorization: Cloud-IDE-JWT <token>，token 只存在于 Electron 主进程内存（源自 %APPDATA%\\<产品>\\User\\globalStorage\\storage.json 里加密的 iCubeAuthInfo），按 research/SAFETY.md 禁止解密登录态 -> external 拿不到凭据；它自带定时任务（左栏「自动化」，须选本地环境）能定时唤起 agent，但 agent 在隔离 V8 无 fetch，只能靠电脑控制点击界面，且每次运行自身消耗积分，未必覆盖日收益，故未启用。入口：桌面端左下角账户条（新布局实测「用户71294228173免费」在 3868x2092 窗口下约 @58,1998）→ 点左侧头像/用户名开账户菜单（菜单向上展开，出口在窗口下方约 62% 高度处）。【OCR 脚本实测】scripts/ui_claim_traework.ps1（--explore 只抓布局 / --dry-run 只定位 / --shots 截图诊断）。四个实测坑：①入口文案不是「签到」，且 OCR 拆成单字（每/日/领/100/积/分）-> 必须连续词拼接匹配；②菜单是 toggle，多候选点轮流点击会互相关掉 -> 每点一次多轮检测，失败先 ESC 再换点；③入口行是说明文字，真按钮是右侧黑底白字「签到」（OCR 漏检黑底白字）-> 点文字行起点右偏（偏移由菜单右边界推算，窗口尺寸大变需重调，--shots 可快速重调）；④账户条上方有「升级会员」推广卡片，含「每日多领」字样，必须排除。已签态文案「今日已签」。失效条件：端点/鉴权变更、菜单文案服务端改版导致偏移失准、或客户端结构大改。【2026-10-13 合并后 UI 改版 & 判据换血】官宣合并后客户端 UI 大改，**账户条不再显示积分余额**（旧「用户71294228173 免费 3,527」-> 新「0用户71294228173免费」，且整行被 OCR 并成一条、words 是单字数组）-> 原「读账户条余额、看点击前后差额」的主判据整体失效，10-12/10-13 连续两天日志出现「复核余额 -1 -> -1」，成功判定退化成「今日已签」文案兜底。本次修复改用**卡片三态**（实测 OCR dump）：①未签：卡片常驻左侧栏底部，文案「每日领100积分」+「升级会员，每日多领100积分」，按钮 [签到][升级权益]；②刚领取：「今日签到，已获得100积分。下次可在头像菜单中签到。」，按钮 [今日已签(3s)]；③已签（稳定）：卡片整块换成会员推广「夺会员首月立减¥30 / 升级会员立即获得大额积分…」，按钮 [立即升级]，**页面上再无任何签到字样**。于是判据改为：主判据 = 正则抓「已获得N积分」取实发额度（比余额差更直接，且服务端调额时能自动跟上）；备用 = 余额差；兜底 = 文案（拿不到额度，退回 daily_amount）。幂等闸门 = 入口词「每日领」消失 + 会员推广态出现。按钮定位也从「像素扫药丸 + 4 个 offset 轮换」改为按 OCR 短文本在入口行下方定位（新布局里药丸扫描会扫到背景深色块，实测 x=664 len=235）。已用当日三态真实 OCR 文本做正则回归，无交叉误判（「升级会员立即获得大额积分」不会被误读成 granted）。【2026-10-15 两个误判实锤修复】① 三态结论③错了：**未签到时首页卡片同样可能是会员推广态**（签到入口只在头像菜单里，10-14 领取成功提示原文「下次可在头像菜单中签到」），首页见会员推广就判 already 会漏签——10-15 凌晨因此漏签（用户实机确认未到账）。已删该早退分支：首页无入口一律点头像菜单确认。② Find-AnyLine 已签词原是全窗口匹配，聊天面板里的 agent 对话文本含「今日已签」字样会造成**自指污染**误判 already（10-15 两次实锤，OCR dump 可见对话原文被当判据）。已给已签词判定加 x<30% 左侧栏限制（与入口词一致；「今日已签」按钮实测 @81,1622 在栏内）。补签实测：菜单路径点「签到」按钮，余额 3759→3859，[granted] 100。另注意：菜单里余额仍可读（菜单会话内 Find-Balance 有效，3759→3859 即菜单余额差），首页账户条才没有余额。【2026-10-19 积分明细查询通道打通：每包余额+过期时间可见】数据源实锤 = POST /trae/api/v2/pay/ide_user_ent_usage（body {require_usage:true, req_source}），响应 user_entitlement_pack_list[]，每包含 entitlement_base_info.{product_type, quota.credits_limit(-1=不限), end_time, status} + usage.credits_amount + 包级 expire_time/yearly_expire_time + display_desc —— 即「每条积分的剩余和过期时间」服务端本来就有，此前 validity 记 measured 31 天是因为没看过这个响应（audit 升级待首份真实 dump 复核）。调用方式 = 本地扩展 vendor/trae-credit-dump（装在 ~/.trae-cn/extensions/agent-credit.trae-credit-dump-0.0.1/，源码 vendor/trae-credit-dump/）：只 executeCommand 客户端自己注册的只读 getter（workbench.action.icubeGetCreditsUsageInfo[仅完整 IDE bundle] / icubeGetEntitlementInfo / icubeGetCheckinCreditsSnapshot / icubeGetFastRequestQuotaInfo / icubeGetIdeAccountManagementSnapshot），结果落 logs/trae_credit_detail.json；token 全程不落地、无解密、无注入、无额外服务端请求（getter 读客户端会话内缓存），符合 SAFETY 路线 2。客户端启动 15s 自动导一次，或命令面板「Agent Credit: 导出 Trae 积分明细」手动触发。解析登记：python scripts/trae_credit_detail.py（--record 走 credit.py set-balance trae <总剩余>）。已排除的旧判断要修正：①「余额只能靠 UI OCR」（SAFETY.md 5.1 表）对 Trae 不再成立——官方命令通道直接给结构化数据；②本地缓存确认无存档（state.vscdb/leveldb 仅 banner 标记），数据只在客户端内存，所以必须走扩展。失效条件：命令 id 改名/取消注册、ide_user_ent_usage 响应字段重命名、扩展目录扫描机制变化；UI 兜底 = 设置→用量管理页（icubeOpenUsageDetails 同一页）OCR。【2026-10-19 深夜跑通验证 + 重要修正】SOLO/Agent 窗口（windowType=Agent/Floating/TraeWork）**不加载用户扩展**：bundle 实锤 scanUserExtensions 在 mh(productService)=true 时直接 return []（日志原文 Skipping user extensions scan in solo-lite mode），extensions.json 即使扫出扩展也不激活。正路 = 开 IDE 窗口（windowType=IDE → 完整 workbench.desktop.main.js）：**实测入口 = SOLO 窗口右上角「IDE」按钮**（底层是 workbench.action.newIDEWindow / openIDEWindow；⚠️ SOLO-lite 无命令面板，Ctrl+Shift+P 无反应，文件菜单项未必露出，别走 palette/菜单），IDE 窗口启动 15s 扩展自动 dump。首份真实 dump（logs/trae_credit_detail.json）：creditsUsage 聚合 limit=3700 / used=133.66 / remaining=3566 / **expireTime=2026-10-31 23:59**；checkinSnapshot 当日已签(credits=100, extraCredits=100)。修正两点：①getEntitlementInfo() 不带参返回的是 pay status（commercial_activities/身份/开关），不含 user_entitlement_pack_list —— per-pack list 只在客户端拉 ide_user_ent_usage 后内存瞬时存在，getter 只暴露聚合；Free 单桶下聚合=每条，多包账号要 per-pack 需 UI 用量管理页兜底。②validity 由 measured 31 天升 **confirmed：客户端权威 expireTime=月底 23:59**（与 audit 行「无月度订阅费，只烧账上积分」一致）。当日验证流水：IDE 窗口 dump → python scripts/trae_credit_detail.py --record → set-balance trae 3566 已入账。【2026-10-19 深夜自动化】每日任务 action 改为 scripts/_daily_chain.ps1（checkin → trae_credit_sync.ps1）：sync 聚焦 Agent 窗发 Ctrl+Shift+N（newIDEWindow 内置快捷键 3116）开 IDE 窗 → 等 logs/trae_credit_detail.json 新鲜（扩展 v0.0.2 startup 15s/focus 5min 节流/30min 兜底）→ --record 登记 → WM_CLOSE 关 IDE 窗；一次性任务 scripts/_task_trae_credit_sync.ps1 实测 25s 全通（3541 入账）。⚠️ 本机任务计划怪癖新增两条：Register-ScheduledTask -Xml 静默丢第二个 Exec action（故用 chain 脚本包单 action）；非提权改任务静默 no-op/Access denied，换 action 必须提权跑一次 register-daily-task.ps1（2026-10-20 用户已提权跑通）。【2026-10-20 首夜实测 + 两处加固】凌晨 00:03 链路首跑：claim 成功（菜单 OCR 3532→3632 [granted] 100），但 sync 的 Ctrl+Shift+N 被吞（锁屏/焦点未到位）→ IDE 窗没开成，且旧逻辑拿昨天的 stale dump set-balance 3541 把真实余额覆盖成旧值。已修：①开 IDE 窗改为最多 3 轮重试（每轮重新聚焦 Agent 窗再发键，等 20s）；②**只有 dump 新鲜（mtime 晚于任务启动）才 --record**，否则 skip_record_stale 报错不碰台账。当日 00:12 手动补跑 25s 全绿，余额修正为 3629（=3632 扣当日 agent 消耗 3，与菜单 OCR 口径互洽）。残留风险：锁屏时 3 轮重试也可能全败，此时 sync 安全跳过，余额等次日凌晨或手动补跑刷新。【2026-10-20 接入通用对账契约 + 积分看板】Trae 现有 credits_command=python -m agent_credit.trae_credits --json，与 WorkBuddy 走同一条登记通道：台账里 Trae 从此有**真实到期日**（客户端展示的聚合到期日，实测 2026-10-31 23:59），不再是 25 条本地估算 + 4 条无到期日快照——没有到期日，「快过期先烧」这条规则对 Trae 是瞎的。新鲜度闸门按 beijingDayKey 判定：不是今天的 dump 一律拒绝登记（stale dump 会把签到后的真实余额覆盖成旧值，2026-10-20 踩过）。口径：结构化通道只给聚合 expireTime（客户端展示的最高优包到期日），免费单桶账号下即每笔到期日；逐包清单 user_entitlement_pack_list 只在「设置→用量管理」页渲染(icubeOpenUsageDetails)，结构化通道里没有，dump 里若出现就按包逐条登记(granularity=per_pack)，否则 aggregate。失效条件：扩展改名/改导出路径、checkinSnapshot.beijingDayKey 或 creditsUsage.expireTime 字段改名。【2026-10-23 凌晨跨夜漏签】客户端跨夜常驻时，头像菜单会残留上一日的「今日已签/本账号今日已签到，明日再来」，脚本据此误判 already，台账虚记 +100；同一时刻扩展 checkinSnapshot 仍为 checkedIn=false。补签：冷启动客户端后跑 scripts/_task_trae_claim.ps1 -Foreground（屏外模式的真实点击会被前台窗口遮挡），再跑 _task_trae_credit_sync.ps1 用新鲜 dump 对账。前台补签现有空闲闸门：-Foreground 默认最多等 300s、要求空闲 60s，用户活跃则返回 pending，不移动/点击窗口。"
+    models_note: "国内版 14 款：Doubao-Seed-2.0-Code、MiniMax-M2.7/M2.5、GLM-5.1/5V-Turbo/5、DeepSeek-V4-Pro/Flash、Kimi-K2.6/K2.5、Qwen3.6/3.5-Plus；国际版 19 款另含 GPT-6 系、Gemini-3.1、Kimi-K3【2026-10-22 官方文档】，CUE / MCP"
     rating:
       value: 3
       capability: 4
       automation: 3
-      review: "额度中等（100/天，2026-10-11 实测修正）但 31 天有效期 + 每月登录赠 500，16+ 模型与 MCP 支持是优势。领取靠 UI + OCR 点击，窗口改版即失效，是五家里最脆的一环。2026-10-11 客户端从 TRAE SOLO CN 合并为 Trae CN（主窗口标题 'Agent'），脚本已同步适配。与 TraeCode 共用同一积分账户，别重复计数。"
+      review: "额度中等（100/天，2026-10-11 实测修正）但 31 天有效期 + 每月登录赠 500。国内版 14 款模型（DeepSeek-V4/GLM-5.1/Kimi-K2.6/Qwen3.6，比国际版慢半代，国际版已上 GPT-6 系/Kimi-K3）与 MCP 支持是优势。领取靠 UI + OCR 点击，窗口改版即失效，是五家里最脆的一环。2026-10-11 客户端从 TRAE SOLO CN 合并为 Trae CN（主窗口标题 'Agent'），脚本已同步适配。与 TraeCode 共用同一积分账户，别重复计数。"
       best_for: "需要多模型切换、MCP 工具链的编码任务"
       owner_note: ""
 
@@ -179,23 +200,25 @@ accounts:
     grant_type: accumulating
     daily_amount: 200
     validity_days: null
+    validity_note: "分类（4 类）"
+    extra_note: "另有不定期大额积分活动"
     cap: null
     claim_policy: always
     claim_mode: ui
     command: ""
-    capabilities: [coding, local]
+    capabilities: [coding, office, docs, search, multimodal, local]
     mobile: true
-    mobile_note: "与桌面端项目不同步，是独立的云端 claw 环境；模型与桌面端一致，同为智谱 GLM 系列"
+    mobile_note: "与桌面端项目不同步，是独立的云端 claw 环境；移动端模型未实测。桌面端 1.20.0 已确认 Auto 路由 metadata 指向 DeepSeek-V4-Pro + GLM-5.3/5.3-Flash，不能再说『同为 GLM』"
     open_when_needed: false
-    notes: "2026-09-24 自述调研（v1.19.0，端点自 resources/app.asar 反编译，已本机复核命中）：签到是任务体系，task_id='daily_signin'，端点 /autoclaw-proxy/proxy/autoclaw-task-{list,complete}，host=autoglm-acceleration-api.zhipuai.cn，鉴权 X-Auth-Appid/TimeStamp/Sign + Bearer。token 在 %USERPROFILE%\\AppData\\Roaming\\autoclaw\\auth.json 为 safeStorage 加密（enc: 前缀），external 直调需解密登录态 -> 按 research/SAFETY.md 否决。首页「每日签到」横幅受实验开关 show_checkin_banner 控制（defaultValue off，生产默认不展示），点击只打开「灵感中心」视图，签到动作在灵感中心任务卡片里（i18n：标题「每日签到」/ 副「赚 {{points}} 分/天」/ 已完成「已完成」）。横幅 onClick 是普通 React 事件，无 isTrusted 校验 -> OCR 点击路线可行，此前长期 pending 是入口定位与加载等待问题，不是被过滤。失效条件：v1.19.0 改版、端点改路径、或横幅开关改为默认 on。额度/连签/有效期由服务端下发，代码无硬编码（reliability: 未实测）。2026-09-24 提权实测跑通：入口 = 侧边栏「灵感与活动」→ 赚积分任务首卡「每日签到」→ 卡片内黑色「签到」按钮；已签态 OCR 文案为「已完成 / 已签到N天」，幂等判定靠它；脚本在 ok/already 分支会 taskkill 客户端。日额度 200 主人已确认（卡片副标题「签到得@20 积分」是显示/OCR 误差）。积分并非永久：客户端曾提示「152 积分将于 3 天内到期」，与 points/expiring 端点吻合，但整体有效期天数仍由服务端下发，validity_days 保持 null。"
-    models_note: "GLM 系列（智谱）【2026-10-03 主人更正：桌面端与移动端都只有 GLM，旧记录 Pony-Alpha-2/DeepSeek/Kimi/MiniMax 有误】"
+    notes: "【2026-10-25 双击签到】首击问题修好后仍有 2 次「坐标对、窗口前台、按钮没反应」：11:08/12:36 点击前卡片是「签到 + 已签到17天」，首击 @1160,1046 后 7.5s 仍是原样；12:40 同一坐标首击后 2s 补第二击，立刻变「已完成已签到18天」。判断是 CEF/React 首击只完成焦点切换、onClick 未触发（10-24 首击能成是因为窗口已被任务拉起且主人空闲，焦点没被抢）。最终改为「短间隔双击 + 多轮」：每轮连点 2 下（180ms），最多 3 轮（共 6 击），每轮 OCR 复核；成功判据增加「已签到N天」数值上涨（17→18）和「按钮连续两帧消失」；已领取后按钮禁用，重复点击幂等。12:40 实跑：首击无效 → 2s 后第二击 → 已签到18天 +200。失效条件：按钮点击区域改成弹窗确认、或连签文案不再含「已签到N天」。【2026-10-25 真实点击被前台窗口挡住】00:08 进入灵感中心后签到按钮的 BringBack 报「spot 520,132 被遮挡」「spot 0,0 被遮挡」，两个落点都被 R3 拦下，真实点击根本没发出去，结果却仍写「已点击签到位置」。根因与 Trae 10-24 相同：移回屏内用 0x0015（含 NOZORDER），窗口没被抬到最上层，主人当前前台窗口盖住了点击位。修法：BringBack 移回时用 HWND_TOPMOST + SWP_NOACTIVATE（0x0011，不抢焦点，曝光约 0.5s），点完/放弃路径都立刻 HWND_NOTOPMOST 再回屏外。2026-09-24 自述调研（当时 v1.19.0，端点自 resources/app.asar 反编译，已本机复核命中；2026-10-25 复核当前版本 1.20.0，asar 310,216,022 字节）：签到是任务体系，task_id='daily_signin'，端点 /autoclaw-proxy/proxy/autoclaw-task-{list,complete}，host=autoglm-acceleration-api.zhipuai.cn，鉴权 X-Auth-Appid/TimeStamp/Sign + Bearer。token 在 %USERPROFILE%\\AppData\\Roaming\\autoclaw\\auth.json 为 safeStorage 加密（enc: 前缀），external 直调需解密登录态 -> 按 research/SAFETY.md 否决。首页「每日签到」横幅受实验开关 show_checkin_banner 控制（defaultValue off，生产默认不展示），点击只打开「灵感中心」视图，签到动作在灵感中心任务卡片里（i18n：标题「每日签到」/ 副「赚 {{points}} 分/天」/ 已完成「已完成」）。横幅 onClick 是普通 React 事件，无 isTrusted 校验 -> OCR 点击路线可行，此前长期 pending 是入口定位与加载等待问题，不是被过滤。失效条件：v1.20.0 改版、端点改路径、或横幅开关改为默认 on。额度/连签/有效期由服务端下发，代码无硬编码（reliability: 已实测；09-24 起 UI 链路跑通，10-25 复核 31/32 天有记录）。2026-09-24 提权实测跑通：入口 = 侧边栏「灵感与活动」→ 赚积分任务首卡「每日签到」→ 卡片内黑色「签到」按钮；已签态 OCR 文案为「已完成 / 已签到N天」，幂等判定靠它；脚本在 ok/already 分支会 taskkill 客户端。日额度 200 主人已确认（卡片副标题「签到得@20 积分」是显示/OCR 误差）。积分并非永久：客户端曾提示「152 积分将于 3 天内到期」，与 points/expiring 端点吻合，但整体有效期天数仍由服务端下发，validity_days 保持 null。【2026-10-25 复核】当前 1.20.0；settings.json models.catalog = Auto/Auto-Fast（metadata.auto_model_name=deepseek-v4-pro）+ GLM-5.3 + GLM-5.3-Flash + 自定义 API；旧记录「桌面端只有 GLM」不成立。积分有效期分 daily/monthly/longTerm/campaign 四类，逐条到期日服务端不下发，台账按「过期未知」处理，不能写「无过期」。"
+    models_note: "【2026-10-25 本机 1.20.0 settings.json 实测】Auto（zai_auto，metadata.auto_model_name=deepseek-v4-pro，1M context/393k output，低消耗）+ Auto-Fast（zai_auto-fast，1M/131k，支持图片，中消耗）+ GLM-5.3（zaicoding_glm-5.3，1M/307k，高消耗）+ GLM-5.3-Flash（zai_glm-5.3-flash，1M/131k，支持图片，低消耗）+ 自定义 API（本机 Ollama qwen3:14b）。不是『只有 GLM』，也不是旧记录的多厂商大池；官方 2026-10-22 页面另列 GLM-5-Turbo/GLM-5V-Turbo，未在本机目录出现。"
     rating:
       value: 4
-      capability: 2
+      capability: 4
       automation: 2
-      review: "200/天可累积，本地执行能力全，有思考过程。但模型只有智谱 GLM 一家（旧记的五模型池是错的），场景覆盖窄；签到藏在灵感中心任务卡里靠 OCR 定位，首页横幅还受服务端开关控制，随时可能定位不到；实测资源时常紧张。有效期由服务端下发、台账无法确定。"
-      best_for: "只用 GLM 就够、需要本地执行能力的场景；资源紧张时段别指望它"
-      owner_note: "有思考过程（早先记的『不输出思考情况』是误记，已更正）。但资源容易紧张，实际用起来不太好用。**桌面端和移动端都只有 GLM 模型**——旧记录写的 Pony-Alpha-2/DeepSeek/Kimi/MiniMax 多模型池是错的。移动端还不与桌面端项目同步，给的是独立的云端 claw 环境。"
+      review: "200/天，有效期分类（daily/monthly/longTerm/campaign，非统一天数），本地执行能力全，有思考过程。模型不是只有 GLM：1.20.0 的 Auto/Auto-Fast metadata 指向 DeepSeek-V4-Pro，另有 GLM-5.3/5.3-Flash，且支持自定义 API；但内置目录只有 4 个，场景覆盖仍不如多厂商大池。签到藏在灵感中心任务卡里靠 OCR 定位，首页横幅还受服务端开关控制，随时可能定位不到；实测经常容易资源紧张，任务会停止执行；时不时有送大额积分的活动（非固定周期，不能当稳定日额度）。有效期逐条到期日服务端不下发，台账按『过期未知』处理。"
+      best_for: "需要本地执行 + Auto/GLM 多模型路由的场景；资源紧张时会停止执行，别当稳定主力"
+      owner_note: "有思考过程（早先记的『不输出思考情况』是误记，已更正）。但经常容易资源紧张，任务会停止执行；时不时有送大额积分的活动（非固定周期，不能当稳定日额度），实际用起来不太好用。**桌面端 1.20.0 模型目录不是只有 GLM**：settings.json 的 models.catalog = Auto/Auto-Fast（metadata.auto_model_name=deepseek-v4-pro）+ GLM-5.3 + GLM-5.3-Flash + 自定义 API（本机 Ollama qwen3:14b）。旧记录『只有 GLM』与更早的『Pony-Alpha-2/DeepSeek/Kimi/MiniMax 多模型池』都不准确。移动端与桌面端项目不同步，是独立的云端 claw 环境；移动端模型未实测。"
 
 
   - id: lobsterai
@@ -210,17 +233,17 @@ accounts:
     claim_policy: always
     claim_mode: ui
     command: ""
-    capabilities: [office, coding, local]
+    capabilities: [office, coding, local, multimodal]
     open_when_needed: false
-    notes: "【2026-09-27 UI 路线打通，claim_mode 改 ui】入口=主窗口右上角「每日积分礼」卡（2316x1442 窗口内 x≈2056,y≈109）。流程：runas 拉起 → 等窗口出现 → 轮询 OCR 直到无『启动中/％』（AI 引擎冷启动约 20s）→ 点卡片 → 多帧捕获（1.5/2/2.5s，期间禁止 SetForegroundWindow，会把弹层关掉）→ 点「立即领取/领取/签到」→ 验证「今日已领/已领/成功」。实测关键结论（2026-09-28 修正）：①【签到反馈信号】此 UI 没有「今日已领」文字——成功=用户面板里「立即领取」按钮消失+积分额度上涨（实测 00:25→00:27：1000→1100，正好 +100）；②【首选路径】点左下角「我的」(约 3%宽,95%高) 展开用户面板 → 点面板内「立即领取」（限 x<35% 窗宽，避免误匹配广告）→ 复查按钮消失；右上角卡片时有时无，只作兜底、不能当已领依据（此前「卡片点击后跨重启消失=已领取」的推断是错的，卡片会再出现）；③【广告弹窗】冷启动后可能弹「新用户专享¥0.01 解锁 1000积分」全屏遮罩（即 desktop_startup_modal placement），必须先关——先 ESC，无效则点窗口 (69%宽,27%高) 处的圆形×；④.ps1 必须 UTF-8 带 BOM，否则 PS5.1 按 GBK 读中文正则直接语法错误且零输出——正文含中文就要 BOM，首行 ASCII 注释救不了；⑤【三段式】launch_lobsterai.py（runas 一次 UAC，经 explorer 降权拉起 → app 以普通权限常驻、不随脚本退出而被终止）→ run_lobsterai_claim.py 默认非提权 + -NoLaunch 反复跑 explore/claim/verify → 最后才退出 app。原 external 路线保留备用：2026-09-26 逆向 + 实测：签到是 client-activities 活动体系。host=https://lobsterai-server.youdao.com；槽位 GET /api/client-activities/slot?placement=desktop_sidebar|desktop_startup_modal&clientVersion=1.0.0&containerApiVersion=1&platform=win32；签到 POST /api/client-activities/daily_check_in/actions/check_in；鉴权 Authorization: Bearer，token 在本机明文 %APPDATA%\\LobsterAI\\lobsterai.sqlite 的 kv 表 auth_tokens（脚本内读取，不入命令行与日志）。**当前服务端未下发任何签到活动**：实测 slot 返回 code 0 但 slotState=empty、activity=null（两个 placement 都一样），context 返回 51100 活动不存在——脚本因此报 [no-activity] 并退出码 2，属正常现象不是故障。活动一旦下发即可自动签到，无需改代码。失效条件：host 变更、活动体系改版、sqlite 里 auth_tokens 结构变化。另有一条 /api/credits-reset-campaign/free-credits/claim（需 campaignCode），对应日历里 9-29 到期的 300 赠送，campaignCode 来源尚未找到。"
-    models_note: "GPT-4o / Claude / Gemini / DeepSeek 等 10+"
+    notes: "【2026-10-25 修正：签到活动可用，旧探测参数过期】用当前客户端版本重测：slot?placement=desktop_sidebar&clientVersion=2026.10.16&containerApiVersion=2 → 200 slotState=available，activityCode=daily-check-in-evergreen-prod-20260814；context?configRevision=1 → state.rewardCredits=100、claimedDays=34、claimedCredits=3400、claimedToday=true。旧脚本写死 clientVersion=1.0.0 + containerApiVersion=1，才一直返回 empty；不是服务端没活动。external 直签已具备条件（status 只读实测通过），但主路线仍保持 UI，未擅自切换。【2026-10-25 chip 合成消息假成功】10-24/10-25 连续两天在右上角「每日积分礼」card 上执行 Click-At，合成消息只要投递成功就记 msg-ok 并 return，但 chip1..3 三帧 OCR 完全没变化（没有「立即领取」/「今日已领」），说明这次点击根本没进 React。10-23 同一条路曾经成功，属偶发/版本差异，不能继续依赖合成消息。修法：chip、左下「我的」用户栏、Path B 兜底卡统一改为真实点击（屏外直接 BringBack-Click，非屏外 -SkipSynth）；BringBack 同时补上 HWND_TOPMOST（0x0011）与事后 NOTOPMOST，避免 10-25 另一个坑「前台窗口盖住点击位 → 两个落点都被 R3 拒绝」。【2026-09-27 UI 路线打通，claim_mode 改 ui】入口=主窗口右上角「每日积分礼」卡（2316x1442 窗口内 x≈2056,y≈109）。流程：runas 拉起 → 等窗口出现 → 轮询 OCR 直到无『启动中/％』（AI 引擎冷启动约 20s）→ 点卡片 → 多帧捕获（1.5/2/2.5s，期间禁止 SetForegroundWindow，会把弹层关掉）→ 点「立即领取/领取/签到」→ 验证「今日已领/已领/成功」。实测关键结论（2026-09-28 修正）：①【签到反馈信号】2026.10.16 版 UI 已能直接看到「今日已领」与「奖励到账 +100积分」（2026-10-25 11:09 实测）；旧版（2026-09-28）确实没有「今日已领」文字，当时只能靠「立即领取」按钮消失+积分额度上涨判定（00:25→00:27：1000→1100，+100）。两种信号都保留，优先文案、兜底额度差；②【首选路径】点左下角「我的」(约 3%宽,95%高) 展开用户面板 → 点面板内「立即领取」（限 x<35% 窗宽，避免误匹配广告）→ 复查按钮消失；右上角卡片时有时无，只作兜底、不能当已领依据（此前「卡片点击后跨重启消失=已领取」的推断是错的，卡片会再出现）；③【广告弹窗】冷启动后可能弹「新用户专享¥0.01 解锁 1000积分」全屏遮罩（即 desktop_startup_modal placement），必须先关——先 ESC，无效则点窗口 (69%宽,27%高) 处的圆形×；④.ps1 必须 UTF-8 带 BOM，否则 PS5.1 按 GBK 读中文正则直接语法错误且零输出——正文含中文就要 BOM，首行 ASCII 注释救不了；⑤【三段式】launch_lobsterai.py（runas 一次 UAC，经 explorer 降权拉起 → app 以普通权限常驻、不随脚本退出而被终止）→ run_lobsterai_claim.py 默认非提权 + -NoLaunch 反复跑 explore/claim/verify → 最后才退出 app。原 external 路线保留备用：2026-09-26 逆向 + 实测：签到是 client-activities 活动体系。host=https://lobsterai-server.youdao.com；槽位 GET /api/client-activities/slot?placement=desktop_sidebar|desktop_startup_modal&clientVersion=<app version>&containerApiVersion=2|3&platform=win32；签到 POST /api/client-activities/{activityCode}/actions/check_in（activityCode 由 slot 下发，当前为 daily-check-in-evergreen-prod-20260814）；鉴权 Authorization: Bearer，token 在本机明文 %APPDATA%\\LobsterAI\\lobsterai.sqlite 的 kv 表 auth_tokens（脚本内读取，不入命令行与日志）。【2026-10-25 修正】旧结论「服务端未下发活动」是探测参数过期导致的误判：写死 clientVersion=1.0.0 + containerApiVersion=1 时两个 placement 都返回 empty；改用客户端实际版本 2026.10.16 与 placement 对应的 containerApiVersion（sidebar=2 / startup=3）后，slot 返回 available，activityCode=daily-check-in-evergreen-prod-20260814，context 返回 rewardCredits=100、claimedDays=34、claimedCredits=3400、claimedToday=true。external 脚本已按此修复（动态读 app.asar/package.json 版本 + activityType 判定 + idempotencyKey），但仍保留 UI 为主路线。失效条件：host 变更、活动体系改版、sqlite 里 auth_tokens 结构变化。另有一条 /api/credits-reset-campaign/free-credits/claim（需 campaignCode），对应日历里 9-29 到期的 300 赠送，campaignCode 来源尚未找到。"
+    models_note: "BYOK 多提供商（2026.10.16 客户端 provider 表）：内置免费 DeepSeek-V4.1-Flash（lobsterai-server/yd-fast，本会话 model=lobsterai-server/deepseek-flash）；BYOK 可接 OpenAI GPT-5.6 Sol/Terra/Luna、GPT-5.5/5.4，Anthropic Claude Opus 4.7/4.6、Sonnet 4.6，Gemini 3.1 Pro/3 Flash，xAI Grok 4.5/4.3，DeepSeek V4 Flash/Pro，Kimi K3/K2.6/K2.5，GLM 5.1/5/4.7，MiniMax M3/M2.7/M2.5，Qwen3.6/3.5 Plus，Doubao-Seed-2.0，另含 Ollama/LM Studio/GitHub Copilot/OpenRouter/自定义【2026-10-25 本机 app_config + dist-electron/shared/providers/constants.js；官网 2026.10.16】"
     rating:
       value: 2
       capability: 4
-      automation: 1
-      review: "纸面 100/天、10+ 模型（GPT-4o/Claude/Gemini/DeepSeek）看着香，但服务端当前根本没下发签到活动（slot 返回 empty），external 脚本只能报 no-activity。UI 路线已打通，冷启动 20s + 广告遮罩，实测收益仅 +100。属于占着坑不产粮。"
-      best_for: "活动下发后再评估；当前只作备用"
-      owner_note: ""
+      automation: 3
+      review: "100/天、30 天可累积、无连签加成，额度本身不大；但每日「每日积分礼」UI 路线已连续实测入账（09-28..10-25 共 28 天，服务端 context claimedDays=34 / claimedCredits=3400），不再是「占着坑不产粮」。模型侧 2026.10.16 客户端已换到 DeepSeek V4 Flash/Pro、Kimi K3、GLM 5.1、MiniMax M3、Qwen3.6、Doubao 2.0，BYOK 还能接 GPT-5.6 / Claude Opus 4.7 / Gemini 3.1 Pro；浏览器自动化可调试，办公文档链路完整。短板：UI 签到依赖窗口锚点/OCR，近一个月多次因合成点击与前台遮挡失效；无原生 Computer Use；无手机客户端（仅 IM 远控）。"
+      best_for: "日常办公/编码副手；每日顺手领，UI 自动签到已跑通"
+      owner_note: "2026-10-27 主人反馈：总是要等网关启动；不知道为什么不能「不设工作空间」直接用；切换工作空间时也要重启/启动网关，体感很慢。"
 
 
   - id: qodercn
@@ -235,17 +258,19 @@ accounts:
     claim_policy: always
     claim_mode: ui
     command: ""
+    status_command: set PYTHONPATH={REPO}&& python -m agent_credit.qodercn_credits --line
+    credits_command: set PYTHONPATH={REPO}&& python -m agent_credit.qodercn_credits --ledger
     capabilities: [coding]
     open_when_needed: false
-    notes: "Qoder CN 桌面端（Electron，进程名 'Qoder CN'，exe 在 %LOCALAPPDATA%\\Programs\\Qoder CN\\Qoder CN.exe，数据目录 ~/.qoder-cn）。【2026-10-13 主人确认 + 本机实测】有每日签到活动：弹窗「专属活动权益 / 立即查收」里的「每天领 100 Credits」，**每日 10:00 (UTC+8) 刷新，领取后 30 天有效，+100**。两种触发路径：①客户端启动时自动弹窗；②左下角用户名右侧的「用量」仪表图标 → 弹出「我的用量」小窗 → 点小窗里的礼盒图标 → 出现该活动弹窗 → 点「领取」。【机制来源，resources/app.asar 只读反编译】活动内容是服务端下发进 webview 的，bundle 里搜不到「专属活动权益/每天领」等文案（命中 0），且「签到」二字在 bundle 里也命中 0——早期据此误判为「无签到」，已由主人纠正。客户端有 ICampaignService，轮询 GET /sash/api/v1/me/campaigns/{id}/limited-number 取 {showCampaign, claimable}，CAMPAIGN_REFRESH_INTERVAL_MS≈1h，claimable 时左下角礼盒图标带 halo（campaign-claimable-indicator-halo）；领取动作在 webview 内点「领取」触发。【为什么 UI 而非 external】~/.qoder-cn/.auth 下无明文凭据（只有 machine_id 与 dynamic-texts 缓存），登录态不在明文里；按 research/SAFETY.md 不解密登录态 → external 拿不到凭据，故走客户端自身界面的 OCR + OS 级点击（与 AutoClaw/TraeWork/LobsterAI 同路）。【UIA 不可达】主窗口 UIA 树仅 13 个元素、无任何领取相关 Name（实测），活动层是 webview，UIA 看不见 → 必须 OCR。【实跑打通，2026-10-13 经每日计划任务(InteractiveToken+Highest)多轮验证，已实测领到】scripts/ui_claim_qodercn.ps1 全程**锚点定位、不写死坐标**（本机 200% 缩放且窗口在最大化/还原间变）：抓图用 CopyFromScreen(窗口矩形)；每条路径都现找目标。关键结论与踩坑：① **点击必须用 SendInput**，`mouse_event` 对 Qoder 的 webview 点不动（窗口纹丝不动）；且点击只在**真实交互桌面**（计划任务/用户终端）生效，agent 子进程里点不动。② 两条领取路径都跑通：**启动弹窗**（情况一，直接找领取）；**已打开时**点底栏「用量仪表」→「我的用量」小窗→「礼盒」→ 应用内活动弹窗（不是 Edge，之前误判是点到了「查看详情」）。③ 底栏图标/礼盒/领取全是无文字或黑底白字，OCR 读不出：用量仪表以**用户名文字为锚向右找图标像素簇**；礼盒以**「查看详情」文字左缘为锚、往左跨最大空白找窄图标簇**（按钮填充是宽簇、礼盒是窄簇）；**领取按钮用「中央区高密度中性黑块」定位**（黑底白字，OCR 读不出；要求中性黑以排除深绿「查看详情」）。④ 领取成功后按钮变灰「不可领取」——幂等判定认「不可领取/已领取」文案，不依赖黑药丸（否则领取后会误点到底部「查看详情」拉 Edge）。⑤ 致命 PowerShell 坑：`Log()` 用 `Write-Output` 会污染函数返回值（Find-BlackPill 里 Log 后返回，导致返回值变成日志字符串、被当成命中的按钮，算出 sx=-13 乱点）；Log 必须写 stderr/文件，不能用 Write-Output。⑥ 聊天面板满是「领取/礼盒/签到」关键词（脚本跑在 IDE 内）→ 领取只认黑药丸、不信 OCR 词。实测：10:08 点领取后按钮 领取→不可领取，已 `credit record qodercn claimed 100` 落账（连签1、剩余100）。失效条件：活动服务端下线/改额度/改刷新时间、弹窗文案或布局改版、账户条/用量小窗布局变化。⚠️ 待主人核对：Qoder 里 +100 Credits 是否确实到账（「不可领取」副文案是「活动已结束或不符合领取条件」的兜底语，需确认是「已领」而非「未领成」）。【2026-10-14 实测纠正】弹窗上的倒计时与「每日 10:00 (UTC+8) 刷新」**不是领取窗口限制**：当天 00:53 主人手动点「领取」立即成功（按钮 领取→领取中→已领取），凌晨即可领，10:00 前不存在服务端拒发。10-14 凌晨自动漏签的真实根因是编排层冷启动后只等 3s 就跑 ps1（主窗口 ~4s 后才出现 → notfound），已修为 Python 侧 + ps1 侧各 90s 轮询等窗口、成功后关闭本次冷启动实例；继续由**唯一的统一计划任务 agent-credit-checkin（00:05 全量 checkin）**领取，不为 Qoder 单独建任务。另再次确认：agent 子进程里的 SendInput 点击对该 webview 不生效（坐标/前台均正确但弹窗纹丝不动），真实交互桌面（计划任务/人点）才生效。【2026-10-16 主人报告 UI 改版】①启动时自动弹窗仍在；②新路径：点左下角用户名 → 展开菜单有「权益中心」→ 点击后仍弹出同一活动浮窗；③旧路径失效：左下角「用量」icon 下的礼品 icon 已移除（「我的用量」小窗不再有礼盒入口）。→ ui_claim_qodercn.ps1 的 path② 锚点（用户名右侧仪表 → 小窗礼盒）已废，需改为「用户名 → 权益中心」；当日 00:08 自动跑 pending（窗口最小化 rect=-32000 且底栏锚点未命中），待主人手签后 record。【2026-10-16 当日修复完成】ui_claim_qodercn.ps1 已重写：path② 改为「Esc 关浮层 → 点用户名文字中心 → 左侧菜单『权益中心』（OCR 跨字短语；限定左 1/3 区且在用户名上方，防聊天面板同名词误命中，最多两次重试）→ 同一活动浮窗 → 黑药丸领取」；删除旧礼盒/绿块路径（旧 Find-Gift 在新小窗里把暗簇误判成礼盒乱点）；幂等判定加弹窗标记门控（必须先命中『专属活动权益/立即查收/每天领』才认『已领取/不可领取』，因主人常在 Qoder 里聊签到脚本，聊天区常年有这些词）；Find-QoderWindow 过滤最小化位置(-32000)与 <600x400 的辅助窗口（00:08 pending 的另一根因：选中了 314x50 辅助窗）。交互桌面计划任务实测两轮全通过：08:48 情况一（启动弹窗）领取成功，按钮变灰『已领取』、文案『领取成功，Credits 已到账』；08:56 关掉弹窗后情况二（用户名→权益中心）走查成功，再次运行正确返回 already 不重复领。已 record qodercn claimed 100（连签4、余400，与客户端资源包余额一致）。【2026-10-20 修：情况二锚点静默失效一整天，根因是 PS 5.1 的 Sort-Object 字符串属性名对哈希表数组不生效】10-20 00:02 定时轮情况二 pending：点用户名后找不到「权益中心」。深挖发现旧 Find-Username 按 cy 降序取「最靠下的词」，而 PS 5.1 下 `Sort-Object @{Expression='cy';Descending=$true}` 对哈希表数组的属性查找全失败（键全等→退化成不稳定排序，实测输出=输入序的任意置换）——锚点选择从来不是按 cy 排的，只是多数天的词表下偶然选中 warpeas；当天 2 元素词表下选中 agent-c..（工作区名，点它不开账户菜单）→ pending → 按设计保留窗口 → 主人重开客户端后启动弹窗路线补领成功（00:04，该轮不拥有客户端故不关窗，即主人问的「签完没自动关」的真相）。修法：锚点改「底栏行内最左多字词」（max cy ±12px 定底栏行，行内 cx 升序，warpeas cx≈161 对 agent-c.. cx≈653 稳赢），每轮重抓帧重解析、最多 2 个候选逐点击（候选间 Esc 清场）；排序必须用脚本块表达式 @{Expression={$_.cx}}。回归测试 scripts/test_username_anchor.py 从 ps1 的 ANCHOR-REGION 抠判据跑 5 个真实 OCR 词框样本（含 cy 抖动翻转、漏检用户名降级、最大化态左侧栏排除）。同款坑在 scripts/ui_claim_minimax.ps1 Find-AppWindow 也存在并已修（输入序 [好,坏] 时会选出 score=0 诱饵窗→UI 路线熄火）。21:48 实测（完整 checkin 轮）：锚点 (161,1089) 一轮命中→权益中心→黑药丸→领取成功，驱动正常入账 +100（连签8）并关闭本次冷启动的客户端。教训：PS 5.1 里对哈希表数组做排序/度量，字符串属性名一律不可靠（Sort-Object/Measure-Object -Property 均实测踩雷），必须脚本块表达式或显式循环。"
-    models_note: "多模型（界面见 Qwen3.8-Flash 等）"
+    notes: "Qoder CN 桌面端（Electron，进程名 'Qoder CN'，exe 在 %LOCALAPPDATA%\\Programs\\Qoder CN\\Qoder CN.exe，数据目录 ~/.qoder-cn）。【2026-10-13 主人确认 + 本机实测】有每日签到活动：弹窗「专属活动权益 / 立即查收」里的「每天领 100 Credits」，**每日 10:00 (UTC+8) 刷新，领取后 30 天有效，+100**。两种触发路径：①客户端启动时自动弹窗；②左下角用户名右侧的「用量」仪表图标 → 弹出「我的用量」小窗 → 点小窗里的礼盒图标 → 出现该活动弹窗 → 点「领取」。【机制来源，resources/app.asar 只读反编译】活动内容是服务端下发进 webview 的，bundle 里搜不到「专属活动权益/每天领」等文案（命中 0），且「签到」二字在 bundle 里也命中 0——早期据此误判为「无签到」，已由主人纠正。客户端有 ICampaignService，轮询 GET /sash/api/v1/me/campaigns/{id}/limited-number 取 {showCampaign, claimable}，CAMPAIGN_REFRESH_INTERVAL_MS≈1h，claimable 时左下角礼盒图标带 halo（campaign-claimable-indicator-halo）；领取动作在 webview 内点「领取」触发。【为什么 UI 而非 external】~/.qoder-cn/.auth 下无明文凭据（只有 machine_id 与 dynamic-texts 缓存），登录态不在明文里；按 research/SAFETY.md 不解密登录态 → external 拿不到凭据，故走客户端自身界面的 OCR + OS 级点击（与 AutoClaw/TraeWork/LobsterAI 同路）。【UIA 不可达】主窗口 UIA 树仅 13 个元素、无任何领取相关 Name（实测），活动层是 webview，UIA 看不见 → 必须 OCR。【实跑打通，2026-10-13 经每日计划任务(InteractiveToken+Highest)多轮验证，已实测领到】scripts/ui_claim_qodercn.ps1 全程**锚点定位、不写死坐标**（本机 200% 缩放且窗口在最大化/还原间变）：抓图用 CopyFromScreen(窗口矩形)；每条路径都现找目标。关键结论与踩坑：① **点击必须用 SendInput**，`mouse_event` 对 Qoder 的 webview 点不动（窗口纹丝不动）；且点击只在**真实交互桌面**（计划任务/用户终端）生效，agent 子进程里点不动。② 两条领取路径都跑通：**启动弹窗**（情况一，直接找领取）；**已打开时**点底栏「用量仪表」→「我的用量」小窗→「礼盒」→ 应用内活动弹窗（不是 Edge，之前误判是点到了「查看详情」）。③ 底栏图标/礼盒/领取全是无文字或黑底白字，OCR 读不出：用量仪表以**用户名文字为锚向右找图标像素簇**；礼盒以**「查看详情」文字左缘为锚、往左跨最大空白找窄图标簇**（按钮填充是宽簇、礼盒是窄簇）；**领取按钮用「中央区高密度中性黑块」定位**（黑底白字，OCR 读不出；要求中性黑以排除深绿「查看详情」）。④ 领取成功后按钮变灰「不可领取」——幂等判定认「不可领取/已领取」文案，不依赖黑药丸（否则领取后会误点到底部「查看详情」拉 Edge）。⑤ 致命 PowerShell 坑：`Log()` 用 `Write-Output` 会污染函数返回值（Find-BlackPill 里 Log 后返回，导致返回值变成日志字符串、被当成命中的按钮，算出 sx=-13 乱点）；Log 必须写 stderr/文件，不能用 Write-Output。⑥ 聊天面板满是「领取/礼盒/签到」关键词（脚本跑在 IDE 内）→ 领取只认黑药丸、不信 OCR 词。实测：10:08 点领取后按钮 领取→不可领取，已 `credit record qodercn claimed 100` 落账（连签1、剩余100）。失效条件：活动服务端下线/改额度/改刷新时间、弹窗文案或布局改版、账户条/用量小窗布局变化。⚠️ 待主人核对：Qoder 里 +100 Credits 是否确实到账（「不可领取」副文案是「活动已结束或不符合领取条件」的兜底语，需确认是「已领」而非「未领成」）。【2026-10-14 实测纠正】弹窗上的倒计时与「每日 10:00 (UTC+8) 刷新」**不是领取窗口限制**：当天 00:53 主人手动点「领取」立即成功（按钮 领取→领取中→已领取），凌晨即可领，10:00 前不存在服务端拒发。10-14 凌晨自动漏签的真实根因是编排层冷启动后只等 3s 就跑 ps1（主窗口 ~4s 后才出现 → notfound），已修为 Python 侧 + ps1 侧各 90s 轮询等窗口、成功后关闭本次冷启动实例；继续由**唯一的统一计划任务 agent-credit-checkin（00:05 全量 checkin）**领取，不为 Qoder 单独建任务。另再次确认：agent 子进程里的 SendInput 点击对该 webview 不生效（坐标/前台均正确但弹窗纹丝不动），真实交互桌面（计划任务/人点）才生效。【2026-10-16 主人报告 UI 改版】①启动时自动弹窗仍在；②新路径：点左下角用户名 → 展开菜单有「权益中心」→ 点击后仍弹出同一活动浮窗；③旧路径失效：左下角「用量」icon 下的礼品 icon 已移除（「我的用量」小窗不再有礼盒入口）。→ ui_claim_qodercn.ps1 的 path② 锚点（用户名右侧仪表 → 小窗礼盒）已废，需改为「用户名 → 权益中心」；当日 00:08 自动跑 pending（窗口最小化 rect=-32000 且底栏锚点未命中），待主人手签后 record。【2026-10-16 当日修复完成】ui_claim_qodercn.ps1 已重写：path② 改为「Esc 关浮层 → 点用户名文字中心 → 左侧菜单『权益中心』（OCR 跨字短语；限定左 1/3 区且在用户名上方，防聊天面板同名词误命中，最多两次重试）→ 同一活动浮窗 → 黑药丸领取」；删除旧礼盒/绿块路径（旧 Find-Gift 在新小窗里把暗簇误判成礼盒乱点）；幂等判定加弹窗标记门控（必须先命中『专属活动权益/立即查收/每天领』才认『已领取/不可领取』，因主人常在 Qoder 里聊签到脚本，聊天区常年有这些词）；Find-QoderWindow 过滤最小化位置(-32000)与 <600x400 的辅助窗口（00:08 pending 的另一根因：选中了 314x50 辅助窗）。交互桌面计划任务实测两轮全通过：08:48 情况一（启动弹窗）领取成功，按钮变灰『已领取』、文案『领取成功，Credits 已到账』；08:56 关掉弹窗后情况二（用户名→权益中心）走查成功，再次运行正确返回 already 不重复领。已 record qodercn claimed 100（连签4、余400，与客户端资源包余额一致）。【2026-10-20 修：情况二锚点静默失效一整天，根因是 PS 5.1 的 Sort-Object 字符串属性名对哈希表数组不生效】10-20 00:02 定时轮情况二 pending：点用户名后找不到「权益中心」。深挖发现旧 Find-Username 按 cy 降序取「最靠下的词」，而 PS 5.1 下 `Sort-Object @{Expression='cy';Descending=$true}` 对哈希表数组的属性查找全失败（键全等→退化成不稳定排序，实测输出=输入序的任意置换）——锚点选择从来不是按 cy 排的，只是多数天的词表下偶然选中 warpeas；当天 2 元素词表下选中 agent-c..（工作区名，点它不开账户菜单）→ pending → 按设计保留窗口 → 主人重开客户端后启动弹窗路线补领成功（00:04，该轮不拥有客户端故不关窗，即主人问的「签完没自动关」的真相）。修法：锚点改「底栏行内最左多字词」（max cy ±12px 定底栏行，行内 cx 升序，warpeas cx≈161 对 agent-c.. cx≈653 稳赢），每轮重抓帧重解析、最多 2 个候选逐点击（候选间 Esc 清场）；排序必须用脚本块表达式 @{Expression={$_.cx}}。回归测试 scripts/test_username_anchor.py 从 ps1 的 ANCHOR-REGION 抠判据跑 5 个真实 OCR 词框样本（含 cy 抖动翻转、漏检用户名降级、最大化态左侧栏排除）。同款坑在 scripts/ui_claim_minimax.ps1 Find-AppWindow 也存在并已修（输入序 [好,坏] 时会选出 score=0 诱饵窗→UI 路线熄火）。21:48 实测（完整 checkin 轮）：锚点 (161,1089) 一轮命中→权益中心→黑药丸→领取成功，驱动正常入账 +100（连签8）并关闭本次冷启动的客户端。教训：PS 5.1 里对哈希表数组做排序/度量，字符串属性名一律不可靠（Sort-Object/Measure-Object -Property 均实测踩雷），必须脚本块表达式或显式循环。【2026-10-20 积分查询通道打通：读客户端自己落的用量日志】① 数据源 = `%APPDATA%\\com.qodercn.app.stable\\logs\\<session>\\main.log` 里的 `[Auth] [AccountUsage] 用量响应摘要 {json}`，它就是 `GET https://openapi.qoder.com.cn/sash/api/v2/me/usage` 的响应摘要——属 SAFETY 路线 2「让客户端自己说话」：不解密、不联网、不碰凭据。模块 agent_credit/qodercn_credits.py（`credit credits qodercn`）。② **能查到（服务端真值，桶级）**：userQuota(套餐内 Credits)/addOnQuota(资源包 Add-on) 的 total/used/remaining + expiresAt + totalUsagePercentage + isQuotaExceeded；另有签到态 `[Campaign] {showCampaign, claimable}`（每会话必有，claimable=false 即今日已领，比「不可领取」文案可靠）。③ **查不到（已定案，别再找）**：逐条积分的剩余与过期时间。me/usage 响应只有上述几个桶，没有任何批次数组；orgResourcePackage / dedicatedResourcePackageCount 在个人号恒为 「missing」；本账号实测 expiresAt=253402214400000（年 9999 哨兵=无到期，不当日期登记）。i18n 的「还有 N 个资源包」是组织/专属资源包场景，个人号用不上。→ 2026-10-20 定案：对账走**第三种登记语义 reconcile**（ledger.reconcile_total，载荷形如 {total: N, reconcile: fifo}）——服务端总数用来校正台账总量（多则按先到期先扣、少则补一条），逐日领取的每条到期日按「领取日+30 天」保留，看板把余额标成服务端真值、把过期标成「按领取日推导」（board 新增条目级 expiry_basis 字段区分这两个口径）。⚠️ 反面教材：当天先用 grants/快照登记过一次，把 8 条 ×100 压成 1 条无过期条目，临期队列与优先级当场失明；已恢复并重跑测试。④ **external 直连为何排除**：token 在 `%APPDATA%\\com.qodercn.app.stable\\auth.v1.dat`，头三字节 `v10` = Chromium safeStorage(DPAPI) 密文 → SAFETY 第 1 节「解密加密存储的登录态」绝对禁止（与 Trae 的 iCubeAuthInfo、AutoClaw 的 enc: 同类）。此前 notes 说「~/.qoder-cn/.auth 无明文凭据」结论对，但凭据真正位置在 Roaming 的 auth.v1.dat，别再翻 .auth。网页版 `https://qoder.com.cn/account/usage` 存在（未登录会弹回 /users/sign-in），要走这条路得用主人已登录的浏览器，属另一条待批路线。⑤ **刷新触发（关键限制）**：用量请求**只在打开「我的用量」面板/小窗时发出**（13 个历史会话仅 2 个有记录；10-16 08:45:37 那条正是 ps1 点开小窗的瞬间）。故 --ledger/--line 带**新鲜度闸门**：非当天记录一律拒绝登记（旧值会把签到后的真实余额覆盖成旧值，Trae 踩过）。现版领取路径走「用户名→权益中心」不点仪表，所以 2026-10-20 给 ui_claim_qodercn.ps1 加了 **-Usage 模式**：以用户名文字右缘为锚、在 +6..+280px 带内按**相对色差**（先取用户名左侧的底栏背景亮度做基准）扫紧凑图标簇，逐个点一次并只认「点击后新出现的文字」（我的用量/套餐内/资源包/查看详情）——用新词判开窗是防自指污染：主人常在 Qoder 里聊这些词，全屏匹配会假阳性。点歪只 Esc 复位，绝不连点（底栏曾有误点拉 Edge 的先例）。扫不到簇时用实测相对偏移 +204 兜底一次。成败仍由 Python 侧闸门裁定。已接进 scripts/_daily_chain.ps1（checkin → trae sync → **qoder -Usage → credit.py sync --only qodercn** → board）。-Usage -DryRun 只报候选坐标不点击，可安全预演。⑥ 交叉佐证：10-16 08:45:37 记录 addOnQuota remaining=300（当时连领 3 天），08:48 领取后台账记 400，与桶值 +100 吻合 → 该桶就是客户端「资源包」余额本体。⑦ 2026-10-20 端到端实测：23:31 主人手动开面板 → 资源包 remaining=800 / total=800 / used=0，与台账连签 8 天 ×100 分毫不差；同会话 [Campaign] showCampaign=true, claimable=false 认定今日已领 —— 旧疑问「+100 到底到账没有」就此闭环。⚠️ 但 used=0 意味着**用量消耗没有记进这两个桶**，这条更像「累计领取额」而不是「可烧余额」；要在真用掉一批后再取一次才能定口径（若恒为 0，优先级里就该按「只增不减的领取额」看待）。23:57 自动链实测：-Usage 点 screen(400,2023) 开窗，同一秒 main.log 落下新的「用量响应摘要」，credit sync --only qodercn 报 800 → 800（reconcile，8 条）。失效条件：日志不再落「用量响应摘要」、qoderUsage 字段改名、userData 目录名 com.qodercn.app.stable（product.json 的 dataDirectoryName）变更、或 openapi 响应结构漂移。【2026-10-22 方案甲：条带后台签到】Qoder 的 Chromium 在整窗屏外/最大化屏外时 PrintWindow 全空白，旧「CopyFromScreen 才能抓叠加层」结论需修正：还原态留 48px 边 + HWND_TOPMOST 置顶（SWP_NOACTIVATE，绝不激活；收尾 HWND_NOTOPMOST 并恢复 z-order）后，PrintWindow(PW_RENDERFULLCONTENT) 能完整抓到窗口与活动弹窗叠加层。账户菜单/权益中心的合成鼠标消息可用（零暴露），「领取」仍需 BringBack：移回原位 → SendInput → 光标/前台保存恢复 → 回条带。空闲闸门：Python 先等用户空闲 60s（最多 300s），ps1 -IdleWaitSec 兜底（-Usage 默认 120s）；收尾恢复原 rect/最大化，并按启动前前台窗口恢复 z-order。2026-10-22 实测：menu synth、BringBack 关闭 X、-Usage 面板均通过；-Offscreen:$false 可回退。【2026-10-30 最小化窗口补缺】客户端一直开着、窗口最小化在任务栏时，00:03 定时轮白等 90s 报 notfound（logs/ps1_qodercn.log 只有一句 RESULT，没有 window hwnd 行）。实测最小化窗口形态：MainWindowHandle 仍非 0、IsWindowVisible=true，但 GetWindowRect 是 -16000,-16000 157x25（200% DPI），还原尺寸要读 GetWindowPlacement 的 rcNormalPosition（实测 1800x1045、showCmd=2、flags=2 即恢复回最大化）。旧 Find-QoderWindow 按 rect(−10000 外) 与面积(≥600x400) 两刀都把它切掉，Restore-HiddenQoderWindow 又只认 WS_VISIBLE=off 的托盘隐藏窗 → 两头漏，被当成「客户端没开」。现 Find-QoderWindow 加 IsIconic 分支：GetWindowPlacement 判主窗口（排除 314x50 辅助窗）→ SW_RESTORE → 干活，收尾 Restore-OriginalRect 按 WasMinimized 再 SW_MINIMIZE 放回主人原状态；notfound 时 Log-WindowProbe 把同进程顶层窗口的 class/vis/iconic/rect/normal/title 全部落日志，下次不用再猜。2026-10-30 01:24 用最小化态跑 -DryRun 验证：认出 iconic → 还原 → 用户名/权益中心 → RESULT already → 恢复 rect → 再最小化。"
+    models_note: "分级池 Auto/Ultimate/Performance/Efficient：Qwen3.8-Max、Kimi-K3/K2.7-Code、GLM-5.3/5.2、DeepSeek-V4-Pro/Flash、MiniMax-M3；可接百炼/智谱/Kimi/MiniMax 等自定义【2026-10-22 官方文档】"
     rating:
       value: 3
-      capability: 4
+      capability: 5
       automation: 2
-      review: "100/天、领取后 30 天有效、每日 10:00 (UTC+8) 刷新，可累积。Qoder 本身是能打的 agentic IDE（多模型、仓库级理解）。签到藏在服务端下发的活动 webview 里，UIA 看不见只能靠 OCR 点击；脚本全程锚点定位不写死坐标（应对本机 200% 缩放与窗口态变化）。但点击需在真实交互桌面里才落地（agent 子进程受 Windows foreground-lock 限制点不进去），要挂到每日计划任务或用户终端跑；启动自动弹窗那条判据最稳。"
+      review: "100/天、领取后 30 天有效、每日 10:00 (UTC+8) 刷新，可累积。Qoder 本身是能打的 agentic IDE，2026-10 官方文档模型池已换代到 Qwen3.8-Max + Kimi-K3/GLM-5.3/DeepSeek-V4/MiniMax-M3 这一代并带分级路由，是台账里与 WorkBuddy 并列最全的一档。签到藏在服务端下发的活动 webview 里，UIA 看不见只能靠 OCR 点击；脚本全程锚点定位不写死坐标（应对本机 200% 缩放与窗口态变化）。但点击需在真实交互桌面里才落地（agent 子进程受 Windows foreground-lock 限制点不进去），要挂到每日计划任务或用户终端跑；启动自动弹窗那条判据最稳。"
       best_for: "作为编码主力顺手领；签到走启动弹窗最稳"
-      owner_note: ""
+      owner_note: "有操纵电脑的能力（Computer Use），目前有 Qwen Flash 和 DeepSeek Flash 免费用，每天刷新限额。"
 
 
   - id: dumate
@@ -263,11 +288,12 @@ accounts:
     capabilities: [search, office, docs]
     open_when_needed: false
     notes: "有领取上限。cap=0 表示尚未测出上限，一期默认不自动领。"
+    models_note: "未公开型号（Turbo/Ultra 双模式，多模型混合架构 + 自研 Harness 引擎）【2026-10-22 公开渠道查不到具体清单】"
     rating:
       value: 4
       capability: 3
       automation: 1
-      review: "500/天是全场第二高，但领取上限（cap）始终没测出来，一期不敢自动领。百度系搜索/办公/文档能力，适合资料型任务。只要把 cap 摸清就能进自动盘。"
+      review: "500/天是全场第二高，但领取上限（cap）始终没测出来，一期不敢自动领。百度系执行式智能体（型号未公开，Turbo/Ultra 双模式 + 行业套件），适合资料型任务。只要把 cap 摸清就能进自动盘。"
       best_for: "搜索资料、文档处理；待摸清上限后启用"
       owner_note: ""
 
@@ -289,14 +315,15 @@ accounts:
       bonus_on: [7]
       bonus_amount: 600
       mode: extra
-    capabilities: [remote]
+    capabilities: [remote, coding, office]
     open_when_needed: false
     notes: "有领取上限。cap 未测出前不自动领。"
+    models_note: "GLM-5V-Turbo / Qwen3.5-Plus / Kimi-K2.5 / 豆包 / DeepSeek / MiniMax / Step 约 7 款可切换 + 自定义 API【2026-10-22 官网+社区实测，具体型号以客户端为准】"
     rating:
       value: 2
-      capability: 2
+      capability: 3
       automation: 1
-      review: "100/天 + 7 天连签 600，额度一般且同样卡在 cap 未测出。能力集中在远控，和编码/办公场景几乎不重叠。优先级低。"
+      review: "100/天 + 7 天连签 600，额度一般且同样卡在 cap 未测出。2026 已升级为独立桌面 Agent（V3.0）：7 款三方模型可切（GLM-5V-Turbo/Kimi-K2.5 等）+ 键鼠执行 + 定时任务，不再只是远控附加，但和编码主力场景重叠度仍低。"
       best_for: "远程协助场景，顺手领"
       owner_note: ""
 
@@ -316,11 +343,12 @@ accounts:
     command: ""
     capabilities: [coding]
     open_when_needed: true
+    models_note: "JoyAI-Code / Kimi-K2（6 月起 K2.6）/ DeepSeek-V3.1 / Doubao-Seed-1.6（5 月起 Seed-2.0 多模态）+ Auto 路由；可自定义接入 OpenAI/Anthropic/Gemini 等【2026-10-22 官方文档】"
     rating:
       value: 4
       capability: 3
       automation: 1
-      review: "一次性 10000 积分，量很大但 10-16 到期，属于有死期的存量。京东云系，编码能力。当前策略是永不自动、用时再开。"
+      review: "一次性 10000 积分，量很大但 10-16 到期，属于有死期的存量。京东云系编码平台（JoyAI-Code/Kimi-K2.6/DeepSeek-V3.1/Doubao-Seed + Auto 路由）。当前策略是永不自动、用时再开。"
       best_for: "到期前集中消耗，别放着烂掉"
       owner_note: ""
 
@@ -340,12 +368,12 @@ accounts:
     command: ""
     capabilities: [office, docs]
     open_when_needed: true
-    models_note: "Kimi K3 / 100万上下文"
+    models_note: "Kimi K3（2.8T MoE、1M 上下文、原生视觉，单模型无选择器）【2026-10-22 官网复核：旧记仍然准确】"
     rating:
       value: 3
       capability: 4
       automation: 1
-      review: "周期制额度（下次重置 10-14），Kimi K3 + 100 万上下文是长文档场景的独门优势。不自动领，按周期重置。"
+      review: "周期制额度（下次重置 10-14），Kimi K3（2.8T MoE）+ 100 万上下文是长文档场景的独门优势，2026-10 官网复核 K3 仍是当前驱动模型。不自动领，按周期重置。"
       best_for: "超长文档阅读、办公写作"
       owner_note: ""
 
@@ -362,14 +390,15 @@ accounts:
     claim_policy: never_auto
     claim_mode: never
     command: ""
-    capabilities: [coding]
+    capabilities: [coding, office]
     open_when_needed: true
     notes: "新用户 1000，无每日签到。"
+    models_note: "自研 LongCat 2.0（1.6T 总参、1M 原生上下文，2026-07 开源）+ 多模型混合可配【2026-10-22 官方博客：已升级为全场景 Agent 平台】"
     rating:
       value: 2
-      capability: 3
+      capability: 4
       automation: 1
-      review: "新用户 1000 一次性，365 天有效期，美团系编码产品。没有每日签到，领完就没有后续产出。"
+      review: "新用户 1000 一次性，365 天有效期。2026-07 起升级为搭载自研 LongCat 2.0（1M 上下文）的全场景 Agent 平台（工作台 + Managed Agents），不再只是编码 IDE。没有每日签到，领完就没有后续产出。"
       best_for: "一次性消耗完即可"
       owner_note: ""
 
@@ -388,14 +417,15 @@ accounts:
     command: ""
     capabilities: [coding, office, local, remote]
     open_when_needed: true
-    notes: "登录即领 1000 万 Token，当日清零。用时再开。"
+    notes: "登录即领 1000 万 Token，当日清零。用时再开。官方名 Marvis 马维斯，腾讯应用宝团队出品（接入电脑管家安全引擎）。"
+    models_note: "Hy4 + DeepSeek-V4-Flash 双模型按任务难度自动切换 + 端侧本地模型（本地模式文件 0 上传），支持自定义接入【2026-10-22 官网】"
     rating:
       value: 4
       capability: 2
       automation: 1
-      review: "额度是全场最猛的 10M token/天，能力标签也写得最全（coding/office/local/remote）。但纸面参数与实测体感差距最大：免费的省心组合模型更新慢、能力弱，且当日清零决定它进不了自动签到。真正值得期待的只有腾讯电脑管家团队在电脑管理方向的潜在优势。"
+      review: "额度是全场最猛的 10M token/天，能力标签也写得最全（coding/office/local/remote）。但纸面参数与实测体感差距最大：模型侧为 Hy4 + DeepSeek-V4-Flash 双模型自动切换（无 K3/GLM-5 等新模型），且当日清零决定它进不了自动签到。2026-09 起定位 24 小时 AI 管家（电脑/文件/软件/浏览器 4 个子 Agent + 手机远控 PC + 端侧本地模型），是腾讯应用宝团队出品（官方名 Marvis 马维斯），电脑管理方向的差异化值得观察。"
       best_for: "电脑管理/系统运维方向值得一试；不适合项目编码与 vibe coding"
-      owner_note: "10M token 看着多，实际不好用。「省心组合」模型更新慢、能力弱、响应也慢（当前是 hy4preview + deepseek v4pro）。不知道是上下文管理还是提示词的问题：做项目推进很慢，输入抓不到重点，输出倒是全面细致但没重点。没有工作空间设计，不适合 vibe coding。多 agent 的设计也没看出明显优势。唯一可能的价值点在于是腾讯电脑管家团队出品，电脑管理方面或许有点用。"
+      owner_note: "10M token 看着多，实际不好用。「省心组合」模型更新慢、能力弱、响应也慢（当前是 hy4preview + deepseek v4pro）。不知道是上下文管理还是提示词的问题：做项目推进很慢，输入抓不到重点，输出倒是全面细致但没重点。没有工作空间设计，不适合 vibe coding。多 agent 的设计也没看出明显优势。唯一可能的价值点在于是腾讯电脑管家团队出品，电脑管理方面或许有点用。【2026-10-22 公开渠道更正：实为应用宝团队出品，官方名 Marvis 马维斯；模型现为 Hy4 + DeepSeek-V4-Flash】"
 
 
   - id: monkeycode_token
@@ -413,11 +443,12 @@ accounts:
     capabilities: [coding]
     open_when_needed: true
     notes: "10M Token 登录即领、当日清零。用时再开。"
+    models_note: "模型无关（BYOK）：GPT / Claude / DeepSeek / GLM / Kimi / Qwen / 豆包 / 本地模型；Code Agent 层支持 Codex/Claude Code/OpenCode【2026-10-22 官网】"
     rating:
       value: 4
       capability: 3
       automation: 1
-      review: "同样是 10M Token/天当日清零，长亭百川系，编码向，确认可用 GPT 模型。逻辑同 Mavis：额度巨大但必须当天用掉。亮点是开发时能调思考强度、能看到推理过程；缺 auto 模式，手机端登录体验差。风险点：额度补充规则不明（当日清零后如何续、是否有其他补充途径均未确认）。"
+      review: "同样是 10M Token/天当日清零，长亭百川系，编码向，模型无关可自接（GPT/Claude/DeepSeek/GLM/Kimi 等，主人确认 GPT 可用）。逻辑同 Mavis：额度巨大但必须当天用掉。亮点是开发时能调思考强度、能看到推理过程；缺 auto 模式，手机端登录体验差。风险点：额度补充规则不明（当日清零后如何续、是否有其他补充途径均未确认）。"
       best_for: "当天集中编码任务，需要亲自控制推理强度时"
       owner_note: "手机端登录很奇怪：要扫微信码，且不能跳转。确认能用 GPT 模型；开发时可以调思考强度、也能看到推理过程，但没有提供 auto 模式。额度怎么补充目前不清楚。"
 
@@ -433,10 +464,13 @@ accounts:
     cap: null
     claim_policy: always
     claim_mode: ui
-    command: "python {REPO}\\scripts\\ui_claim_monkeycode.py"
+    command: "python {REPO}\\scripts\\ui_claim_monkeycode.py --idle-wait 0 --no-idle-gate"
+    status_command: set PYTHONPATH={REPO}&& python -m agent_credit.mc_credits --line
+    credits_command: set PYTHONPATH={REPO}&& python -m agent_credit.mc_credits --ledger
     capabilities: [coding]
     open_when_needed: false
-    notes: "【2026-10-10 恢复自动，claim_mode=ui】根因是掉登录不是改版：主人点「连接 MonkeyCode 云端」重连后，① 积分卡片原位回归（入口没挪，「签到 +100」仍在积分卡片下方，坐标与 10-04 一致）；② cookies.json 被客户端回写（重连动作才回写，平时确实不回写），external 幂等闸门与复核通道随之恢复（GET wallet/checkin 200）。脚本升级为状态驱动导航：点「设置」前先检测账号页绿色特征（x∈[0.48,0.70]W、y∈[0.40,0.70]H 区域绿像素>15，实测弹层开=111~120、主界面=0），弹层残留开着时不再点设置——「设置」是 toggle，10-10 凌晨实测弹层开着时点它会关掉弹层、后续点击全部落空（toggle 类教训第二次出现，另见 LobsterAI 用户栏）。结果判定以接口为准，复核失败报 pending 不入账。历史存档：【2026-10-10 早】00:05 轮按旧坐标点击落在空白处报 ok 虚记 100（已回滚，备份 data/_ledger_backup_20261010_monkey_rollback.json）。【2026-10-04 balance 定案】/api/v1/users/wallet 的 balance 就是签到积分（+100 与界面严格同步）。【external 直签不可行】POST checkin → 10701 需验证码；captcha 链路 c/s/d 恒 50/32/3 固定规格图形码，成本远高于 UI。【坐标体系】Tauri(webview2)，截图 PNG 真实像素==窗口 rect，lx/ly 用 1088 宽缩略图坐标、scale=w/1088 换算加窗口原点。同 pid 有 tray_icon_app 与桌宠分层窗口，find_main 按 class+标题双重排除。PrintWindow 抓不到 webview 内容，必须屏幕捕获。"
+    notes: "【2026-10-26 会话过期→面板卡 other】本地唯一 cookie monkeycode_ai_session 于 10-25 11:33（北京）过期：00:04 签到 pre-check 与对账都 401，客户端启动时没有续期，点开设置后 UIA 停在 other（有「账号」导航、无签到按钮），旧逻辑连点 10 次「账号」空转 40s 报 pending。当天 22:29 主人在账号页点绿色「连接」后客户端回写 cookies.json、API 立刻恢复 200，22:46 补签成功（576→676）。修法：probe 识别 ^(重新)?连接$ 按钮（排除「断开连接」），uia_claim_flow 在 other 态先点一次「连接」再试账号页，失败文案改为「登录态失效，请在客户端点绿色连接授权」，不再空转。⚠️ 连接后若仍无签到入口，说明需要人工完成浏览器授权，不要继续盲点。【2026-10-25 空闲闸门自杀】catalog 命令带 --idle-wait 0（意图是「共享闸门已等过，不再重复等」），但脚本的 --idle-wait 0 仍会做一次 idle 检查，活跃就 pending。10-24/10-25 都是共享闸门通过后，脚本自己读到 idle=4s（其中一部分还是前面 Trae/BringBack 的合成鼠标把 GetLastInputInfo 归零）→ 未启动客户端直接中止，却被 checkin 报成「外部命令失败且无 UI 路径可回落」。修法：checkin 已统一等过一次空闲，单账户命令加 --no-idle-gate，把闸门只留给手动单跑；--no-idle-gate 同时关掉 uia_click 里的「点击前再查空闲」——实测 MonkeyCode 客户端一启动就会自己注入一次输入事件（Popen 后 idle 立即归零），per-click 闸门 100% 拒绝点击，10-24/10-25 的「UIA 找到设置按钮但点击被遮挡或用户活跃」就是这么来的。【2026-10-25 最大化窗口坐标漂移】客户端被主人最大化过（rect -13,-13 3866x2090）；屏外停放后 SetForegroundWindow 会触发 Windows/Electron 还原成 normal rect（2426x1615 @294,294），UIA 探针按最大化布局给的坐标立刻失效（按钮 y=2038 → 实际点 y=2332，屏幕外）。修法：park 前先 SW_RESTORE 并把正常态 rect 存进 PARK_RECT（重复 park 不覆盖），bringback 用 PARK_RECT；点击点按工作区钳制（允许标题栏暂时移出屏幕上缘）；点击前临时 TOPMOST（SWP_NOACTIVATE），不再用 ensure_foreground 的 Alt 技巧（本机实测会拉起 Windows 壳层 Shell_SystemDim 遮罩，导致反遮挡检查永远失败）。【环境坑】Windows 安全中心 PickerHost 残留的 Shell_SystemDim 会盖住所有窗口；同日验证时杀 PickerHost 后立刻恢复，属系统弹窗不是脚本问题。claim_mode=ui 但实际走的是这个 Python UI 脚本（不在 ui_claim.py 的 UI_ROUTE_IDS 里），所以 external 失败时不会二次回落——这是报错文案误导，不是第二条路。【2026-10-10 恢复自动，claim_mode=ui】根因是掉登录不是改版：主人点「连接 MonkeyCode 云端」重连后，① 积分卡片原位回归（入口没挪，「签到 +100」仍在积分卡片下方，坐标与 10-04 一致）；② cookies.json 被客户端回写（重连动作才回写，平时确实不回写），external 幂等闸门与复核通道随之恢复（GET wallet/checkin 200）。脚本升级为状态驱动导航：点「设置」前先检测账号页绿色特征（x∈[0.48,0.70]W、y∈[0.40,0.70]H 区域绿像素>15，实测弹层开=111~120、主界面=0），弹层残留开着时不再点设置——「设置」是 toggle，10-10 凌晨实测弹层开着时点它会关掉弹层、后续点击全部落空（toggle 类教训第二次出现，另见 LobsterAI 用户栏）。结果判定以接口为准，复核失败报 pending 不入账。历史存档：【2026-10-10 早】00:05 轮按旧坐标点击落在空白处报 ok 虚记 100（已回滚，备份 data/_ledger_backup_20261010_monkey_rollback.json）。【2026-10-04 balance 定案，2026-10-20 校正】/api/v1/users/wallet 的 balance 与签到积分同步，但是毫积分（界面积分=balance//1000；10-04 界面 195 vs API 195267，领+100 后界面 295 vs API 295267）。不要把 raw balance 直接 set-balance。【2026-10-20 对账】只读 GET /users/wallet + /wallet/checkin。无逐条 grant、无过期字段；subscription 只返回会员 plan=basic。credits_command 同步一条总量（expires=null），checkin 末尾自动跑并刷新看板。【external 直签不可行】POST checkin → 10701 需验证码；captcha 链路 c/s/d 恒 50/32/3 固定规格图形码，成本远高于 UI。【坐标体系】Tauri(webview2)，截图 PNG 真实像素==窗口 rect，lx/ly 用 1088 宽缩略图坐标、scale=w/1088 换算加窗口原点。同 pid 有 tray_icon_app 与桌宠分层窗口，find_main 按 class+标题双重排除。PrintWindow 抓不到 webview 内容，必须屏幕捕获。【2026-10-23 屏外模式】claim 默认先把窗口停到屏外条带（留 48px），UIA 探针用 -AllowOffscreen；只有真正点击时短暂 bringback，结束恢复原 rect/前台。checkin 的 UI 共享闸门通过后脚本内部闸门默认 0 等待（活跃就 pending），不再单独等 120s。"
+    models_note: "与 monkeycode_token 同一产品：模型无关（BYOK），GPT / Claude / DeepSeek / GLM / Kimi / Qwen / 豆包 / 本地模型【2026-10-22 官网】"
     rating:
       value: 1
       capability: 3
@@ -460,15 +494,17 @@ accounts:
     command: ""
     capabilities: [office, search, docs]
     open_when_needed: true
-    notes: "每日 5000 当日清零；另有永久 6500。用时再开。无手机客户端（主人 2026-10-02 确认）。"
-    mobile: false
+    notes: "每日 5000 当日清零；另有永久 6500。用时再开。有手机客户端，但似乎不能同步任务（主人 2026-10-23 更新）。"
+    mobile: true
+    mobile_note: "有手机客户端，但似乎不能同步任务"
+    models_note: "DeepSeek / MiniMax / 豆包 / 千问可切换 + 讯飞星火 X2.5/X2.6（API Key）；端侧星火 X2.5-4B【2026-10-22 官网+媒体：已扩为通用桌面 Agent，接入飞书/企微/钉钉】"
     rating:
       value: 3
-      capability: 3
+      capability: 4
       automation: 1
-      review: "5000/天当日清零，另有永久 6500 托底，讯飞系办公/搜索/文档。清零额度里算厚道的，但同样要当天开。没有手机客户端，意味着离开电脑就消耗不掉，进一步压低了它的实际价值。"
+      review: "5000/天当日清零，另有永久 6500 托底。讯飞系已从办公/搜索/文档扩为通用桌面 Agent（文件整理/数据分析/网页操作/IM 远控，模型可切 DeepSeek/MiniMax/豆包/千问 + 星火 X2.5）。清零额度里算厚道的，但同样要当天开。没有手机客户端，意味着离开电脑就消耗不掉，进一步压低了它的实际价值。"
       best_for: "办公文档批处理，且必须在电脑前当天做掉"
-      owner_note: "没有手机客户端。"
+      owner_note: "有手机客户端，但似乎不能同步任务。"
 
 
   - id: coze
@@ -483,14 +519,15 @@ accounts:
     claim_policy: never_auto
     claim_mode: never
     command: ""
-    capabilities: [multimodal, search, office]
+    capabilities: [multimodal, search, office, coding]
     open_when_needed: true
     notes: "每日 1500 当日清零。用时再开。"
+    models_note: "DeepSeek-V4-Pro / GLM-5.3 / Doubao-Seed-2.1-pro / Kimi K3 + Seedream 5.0/Seedance 2.5 多模态；扣子编程另有 MiniMax M2.5/GLM-5/Seed-2.0-Code【2026-10-22 官方文档：已扩为多模型货架 + AI 编程】"
     rating:
       value: 2
-      capability: 3
+      capability: 4
       automation: 1
-      review: "1500/天当日清零，字节系多模态 + 搜索。额度中等，清零机制决定它只能当临时补充。"
+      review: "1500/天当日清零。字节系多模型货架（DeepSeek-V4-Pro/GLM-5.3/豆包 2.1/Kimi K3）+ Seedream/Seedance 多模态生成 + 扣子编程，模型新鲜度是清零档里最高的。清零机制决定它只能当临时补充。"
       best_for: "多模态/搜索类临时任务"
       owner_note: ""
 
@@ -511,11 +548,12 @@ accounts:
     open_when_needed: true
     notes: "【2026-10-02 更新】每日积分改为**网页登录即领**（不是客户端），有效期为若干天（具体天数待主人确认，故 validity_days 置空）——原记「当日清零」可能有误。无手机客户端。"
     mobile: false
+    models_note: "日日新 SenseNova U1 / U1.5（原生统一多模态）【2026-10-22 官网：办公/代码小浣熊已合并为统一品牌】"
     rating:
       value: 1
-      capability: 2
+      capability: 3
       automation: 1
-      review: "300/天，商汤系办公文档向，额度在这个量级很难支撑一次像样的任务。2026-10-02 更新：改为网页登录即领、有效期多天（待确认）——若确为多天有效，它比同类当日清零产品更值得定期去领。无手机客户端。"
+      review: "300/天，商汤系办公文档向（已接入 SenseNova U1，9 月起办公/代码小浣熊合并为统一品牌并出行业版），额度在这个量级很难支撑一次像样的任务。2026-10-02 更新：改为网页登录即领、有效期多天（待确认）——若确为多天有效，它比同类当日清零产品更值得定期去领。无手机客户端。"
       best_for: "低频办公辅助；网页端顺手领"
       owner_note: "每日积分是网页登录即领，不是客户端；有效期若干天（天数待确认）。没有手机客户端。"
 
@@ -535,11 +573,12 @@ accounts:
     capabilities: [office, docs]
     open_when_needed: true
     notes: "每日 100 当日过期。用时再开。"
+    models_note: "官方未公开具体型号，旗舰 Qwen3.8-Max 驱动（2.4T MoE、1M 上下文）【2026-10-22 官方文档：2026-08 新上线的一站式办公智能体】"
     rating:
       value: 1
-      capability: 2
+      capability: 3
       automation: 1
-      review: "100/天当日过期，阿里系办公文档。额度太小，属于聊胜于无。"
+      review: "100/天当日过期。阿里系一站式办公智能体（Qwen3.8-Max 驱动，2026-08 上线，覆盖文档/PPT/网页/视频剪辑/浏览器自动化），但额度太小，属于聊胜于无。"
       best_for: "几乎不值得专门启动"
       owner_note: ""
 
@@ -559,11 +598,12 @@ accounts:
     capabilities: [ecommerce]
     open_when_needed: true
     notes: "每日 200 当日清零。用时再开。"
+    models_note: "Gemini / GPT-4o / Claude / Qwen 经自家网关路由，可按 Agent 分配【2026-10-22 官网 FAQ】"
     rating:
       value: 1
       capability: 2
       automation: 1
-      review: "200/天当日清零，阿里国际电商向。场景窄 + 额度小，优先级垫底。"
+      review: "200/天当日清零，阿里国际电商向（Gemini/GPT-4o/Claude/Qwen 网关路由，型号偏旧）。场景窄 + 额度小，优先级垫底。"
       best_for: "跨境电商相关任务才考虑"
       owner_note: ""
 
@@ -583,11 +623,38 @@ accounts:
     capabilities: [coding]
     open_when_needed: true
     notes: "每日 20 当日过期。用时再开。"
+    models_note: "Step 3.5 Flash / Step 3.7 Flash / Step 5 Preview（Agentic 旗舰，权重已开放）【2026-10-22 官方平台】"
     rating:
       value: 1
-      capability: 2
+      capability: 3
       automation: 1
-      review: "20/天当日过期，阶跃星辰编码向。全场最低额度，基本可以忽略。"
+      review: "20/天当日过期。阶跃星辰已上 Step 5 Preview（Agentic 旗舰）与 Step 3.7 Flash 多模态推理，模型本身不弱，但全场最低额度，基本可以忽略。"
       best_for: "基本忽略"
       owner_note: ""
 
+
+  # 2026-10-30 新增：ZCode 是智谱官方编程客户端（GLM-5.3 官方 Harness），订阅制无签到，
+  # 与 Kimi Work 同归订阅型，不进自动签到盘。能力自评见 prompts/answers/zcode.md。
+  - id: zcode
+    name: ZCode 智谱
+    aliases: [zcode, z.ai]
+    vendor: 智谱 AI
+    unit: credit
+    grant_type: monthly
+    daily_amount: 0
+    validity_days: null
+    cap: null
+    claim_policy: never_auto
+    claim_mode: never
+    command: ""
+    capabilities: [coding, multimodal, local]
+    open_when_needed: true
+    notes: "订阅制（GLM Coding Plan / BigModel），无每日签到：额度为 5 小时段 + 周双窗口（Lite 2000 积分/5h、10000/周；Pro 12000/60000；Max 28000/140000），5 小时段在请求消耗 5 小时后动态刷新，周额度自下单日起 7 天一周期，均不结转【docs.bigmodel.cn/cn/coding-plan/overview，2026-10-30 核对】。积分按 token 计价：模型积分 =（输入×Input + 缓存命中×Cached + 输出×Output）/10000，GLM-5.3 系数 6.9/1.7/24、GLM-5.3-Flash 2.3/0.56/8；非高峰（14:00–18:00 UTC+8 之外）按 50% 抵扣。本会话模型 GLM-5.3-Flash，账号计划标识 bigmodel-start-plan，对应档位与实际积分未确认。无签到动作 → claim_policy=never_auto / claim_mode=never；额度用尽等下一个 5 小时周期恢复，系统不会继续扣其他资源包/账户余额。失效/注意：本条目不参与 checkin 与 sync，额度看需求在 ZCode 客户端用量统计（应用用量 + 编程套餐两栏）里查。"
+    models_note: "GLM-5.3（1M 上下文）/ GLM-5.3-Flash / GLM-5-turbo；ZCode 为 GLM-5.3 官方 Harness，绑定 BigModel/Z.ai 账号直用套餐【zcode.z.ai/cn/docs，2026-10-30】；本机版本 3.16.3.8992"
+    rating:
+      value: 3
+      capability: 5
+      automation: 1
+      review: "订阅制订额，无每日签到、不进自动盘（同 Kimi Work 的订阅型分组）；额度机制是 5 小时段 + 周双窗口、不结转，量级不小但不可攒。能力是台账天花板级：GLM-5.3 官方 Harness，agentic 编码全流程 + computer-use 原生桌面操控 + browser-use 浏览器自动化 + MCP/插件/技能生态 + 子智能体/定时/闲时任务，本仓库日常维护即由 ZCode 会话完成。短板：内置仅 GLM 系、无生图/生视频输出、无独立官方移动客户端（Remote/Bot 远控）。"
+      best_for: "日常编码主力与长任务自动化；非高峰跑省额度"
+      owner_note: ""

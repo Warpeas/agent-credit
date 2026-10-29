@@ -8,8 +8,13 @@ from typing import Any
 
 from . import checkin as checkin_mod
 from . import ledger
+from . import lock as lock_mod
 from . import trace
+from . import mc_credits
 from . import wb_credits
+from . import board as board_mod
+from . import trae_credits
+from . import qodercn_credits
 from .apps import launch
 from .catalog import accounts, find_account
 from .doctor import format_report, report
@@ -41,8 +46,35 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
 
 def cmd_checkin(args: argparse.Namespace) -> int:
+    # 防撞锁：每日链路用 PowerShell 端 FileShare.None 持有同名的 logs\checkin.lock，
+    # 这里抢不到就说明另一条链路正在跑，别再开第二个客户端。链路自己调用时
+    # （AGENT_CREDIT_LOCK_HELD=1）直接放行，不再重复抢。
+    lock = None
+    locked_out = False
+    try:
+        lock = lock_mod.acquire_for_checkin()
+        locked_out = lock is None and not lock_mod.held_by_parent()
+    except OSError as exc:
+        # 锁自身坏了（权限/路径）不该让当天的签到整轮失败：提示后照常跑。
+        print(f"签到锁不可用（{exc}），本次跳过防撞检查", file=sys.stderr)
+    if locked_out:
+        print("另一个签到正在运行（logs/checkin.lock）；等它结束再试，"
+              "或设 AGENT_CREDIT_LOCK_WAIT=秒数 等待", file=sys.stderr)
+        return 4
+    try:
+        return _run_checkin(args)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _run_checkin(args: argparse.Namespace) -> int:
     trace.init()
-    results, _ = checkin_mod.checkin(only=args.only)
+    results, _ = checkin_mod.checkin(
+        only=args.only,
+        gate_sec=args.gate_sec,
+        gate_enabled=not args.no_gate,
+    )
     pending = failed = ok = skipped = 0
     for r in results:
         if r.status == "skipped":
@@ -71,6 +103,7 @@ def cmd_checkin(args: argparse.Namespace) -> int:
             except FileNotFoundError:
                 trace.note(f"未安装或未知路径：{r.name}，请手动打开")
     trace.note(f"汇总：ok {ok} / skipped {skipped} / pending {pending} / failed {failed}")
+    trace.note(f"总耗时 {trace.elapsed_at(time.time())}s")
     if pending or failed:
         trace.note(f"明细日志：{trace.init()}")
     if args.hold > 0:
@@ -166,22 +199,98 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 
 def cmd_credits(args: argparse.Namespace) -> int:
-    if args.account != "workbuddy":
-        print("积分明细查询目前只支持 workbuddy（其余家见 research/answers/ 的登记进度）",
-              file=sys.stderr)
-        return 1
-    if args.line:
-        # status_command 约定：一行 JSON。claimed_today 失败不炸主流程（返回 null）。
+    account = (args.account or "workbuddy").lower()
+    try:
+        account = find_account(account)["id"]
+    except KeyError:
+        pass
+    if account == "workbuddy":
+        if args.line:
+            # status_command 约定：一行 JSON。claimed_today 失败不炸主流程（返回 null）。
+            result = wb_credits.fetch_credits()
+            print(json.dumps({"balance": result["summary"]["total_credits"],
+                              "claimed_today": wb_credits.claimed_today()},
+                             ensure_ascii=False))
+            return 0
         result = wb_credits.fetch_credits()
-        print(json.dumps({"balance": result["summary"]["total_credits"],
-                          "claimed_today": wb_credits.claimed_today()},
-                         ensure_ascii=False))
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
+        else:
+            print(wb_credits.format_text(result, show_all=args.all))
         return 0
-    result = wb_credits.fetch_credits()
+    if account == "trae":
+        try:
+            parsed = trae_credits.parse_dump(trae_credits.load_dump())
+        except trae_credits.CreditQueryError as exc:
+            print(f"查询失败：{exc}", file=sys.stderr)
+            return 1
+        if args.line:
+            p = trae_credits.payload(parsed)
+            print(json.dumps({"balance": p["total"],
+                              "claimed_today": parsed.get("claimed_today")},
+                             ensure_ascii=False))
+            return 0
+        if args.json:
+            print(json.dumps(trae_credits.payload(parsed), ensure_ascii=False,
+                             indent=1, default=str))
+        else:
+            print(trae_credits.format_text(parsed))
+        return 0
+    if account in ("monkeycode_credit", "mc积分"):
+        try:
+            result = mc_credits.fetch_credits()
+        except mc_credits.CreditQueryError as exc:
+            print(f"查询失败：{exc}", file=sys.stderr)
+            return 1
+        if args.line:
+            print(json.dumps({"balance": result["balance"],
+                              "claimed_today": result["claimed_today"]},
+                             ensure_ascii=False))
+            return 0
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
+        else:
+            print(mc_credits.format_text(result))
+        return 0
+    if account in ("qodercn", "qoder"):
+        try:
+            record = qodercn_credits.find_usage_record()
+        except qodercn_credits.CreditQueryError as exc:
+            print(f"查询失败：{exc}", file=sys.stderr)
+            return 1
+        campaign = qodercn_credits.find_campaign_state()
+        if args.line:
+            # --line 是给 status_command 用的：非当天的记录一律不报（闸门同 --ledger）
+            if not qodercn_credits.is_fresh(record):
+                print(f"记录不是今天的（{record.get('recorded_date') or '未知'}），"
+                      "拒绝输出：请在 Qoder 打开一次「我的用量」面板", file=sys.stderr)
+                return 1
+            print(json.dumps({"balance": qodercn_credits.total_remaining(record),
+                              "claimed_today": qodercn_credits.claimed_today(campaign)},
+                             ensure_ascii=False))
+            return 0
+        if args.json:
+            print(json.dumps(qodercn_credits.ledger_payload(record), ensure_ascii=False,
+                             indent=1, default=str))
+        else:
+            print(qodercn_credits.format_text(record, campaign))
+        return 0
+    print("积分明细查询目前支持 workbuddy / trae / monkeycode_credit / qodercn"
+          "（其余家见 research/answers/ 的登记进度）",
+          file=sys.stderr)
+    return 1
+
+
+def cmd_board(args: argparse.Namespace) -> int:
+    """积分余额看板：余额 + 每条积分的剩余与过期时间 + 烧卡优先级。"""
+    board = board_mod.build(account=args.account)
     if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
+        print(json.dumps(board, ensure_ascii=False, indent=1, default=str))
     else:
-        print(wb_credits.format_text(result, show_all=args.all))
+        print(board_mod.format_text(board))
+    if not args.no_write:
+        paths = board_mod.write(board, args.out)
+        print(f"看板已写入 {paths['markdown']}", file=sys.stderr)
     return 0
 
 
@@ -240,6 +349,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--only", help="只处理一个账户 id/别名")
     s.add_argument("--open", action="store_true", help="打开待手签且已安装的客户端（不含当日清零）")
     s.add_argument("--hold", type=int, default=0, help="结束后停留 N 秒再关窗口（手动跑时用来看清结果）")
+    s.add_argument("--gate-sec", type=int, default=None,
+                   help="启动提示的倒计时秒数（默认 15；超时自动开始）")
+    s.add_argument("--no-gate", action="store_true",
+                   help="不弹启动提示、不等空闲，直接开始（无人值守/排查时用）")
     s.set_defaults(func=cmd_checkin)
 
     s = sub.add_parser("recommend", help="根据任务推荐用哪家")
@@ -261,13 +374,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--only", help="只处理一个账户 id/别名")
     s.set_defaults(func=cmd_sync)
 
-    s = sub.add_parser("credits", help="查询积分明细（每条剩余+过期时间）；目前支持 workbuddy")
+    s = sub.add_parser("credits", help="查询积分明细（余额+过期时间）；支持 workbuddy / trae / monkeycode_credit / qodercn")
     s.add_argument("account", nargs="?", default="workbuddy", help="账户 id，默认 workbuddy")
     s.add_argument("--all", action="store_true", help="包含已用完/已过期的条目")
     s.add_argument("--json", action="store_true", help="输出全量 JSON")
     s.add_argument("--line", action="store_true",
                    help='输出一行 JSON：{"balance": N, "claimed_today": bool}')
     s.set_defaults(func=cmd_credits)
+
+    s = sub.add_parser("board", help="积分余额看板：各家余额 + 每条积分的剩余与过期时间 + 烧卡优先级")
+    s.add_argument("--account", help="只看一个账户")
+    s.add_argument("--json", action="store_true", help="输出 JSON")
+    s.add_argument("--out", default=None, help="Markdown 输出路径（默认 logs/board/board-日期.md）")
+    s.add_argument("--no-write", action="store_true", help="只打印，不落盘")
+    s.set_defaults(func=cmd_board)
 
     s = sub.add_parser("doctor", help="探测本机安装与适配器")
     s.set_defaults(func=cmd_doctor)

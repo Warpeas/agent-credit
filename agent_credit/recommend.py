@@ -5,6 +5,7 @@ from datetime import date
 from typing import Any
 
 from . import ledger
+from . import priority
 from .catalog import accounts, threshold_ratio
 
 CAP_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -33,20 +34,9 @@ def detect_caps(task: str) -> list[str]:
 
 
 def _burn_tuple(acc: dict[str, Any], data: dict[str, Any], on: date) -> tuple:
-    remaining = ledger.remaining(data, acc["id"], on)
-    expiry = ledger.soonest_expiry(data, acc["id"], on)
-    days_left = (expiry - on).days if expiry else None
-    cap = acc.get("cap")
-    daily = -(acc.get("daily_amount") or 0)
-    if acc.get("grant_type") == "daily_expire":
-        return (0, daily, acc["id"])
-    if days_left is not None and days_left <= 7:
-        return (1, days_left, daily, acc["id"])
-    if isinstance(cap, int) and cap > 0:
-        return (3, remaining, daily, acc["id"])
-    if acc.get("validity_days") is None and acc.get("grant_type") == "accumulating":
-        return (4, daily, acc["id"])
-    return (2, days_left if days_left is not None else 999, daily, acc["id"])
+    """账户排序键。口径在 priority.account_sort_key——看板与推荐共用同一份，
+    免得「看板说先烧 A、推荐却说先烧 B」。"""
+    return priority.account_sort_key(acc, data, on)
 
 
 def recommend(task: str, data: dict[str, Any] | None = None, on: date | None = None) -> dict[str, Any]:
@@ -113,6 +103,8 @@ def recommend(task: str, data: dict[str, Any] | None = None, on: date | None = N
         "suggest_open": suggest_open,
         "avoid_for_light": avoid,
         "claim_if_low": below,
+        # 临期积分：7 天内到期的每一笔（看板的临期队列同源）
+        "expiring": ledger.expiring_within(data, priority.EXPIRY_WINDOW_DAYS, on),
     }
 
 
@@ -143,6 +135,13 @@ def format_recommend(result: dict[str, Any]) -> str:
         lines.append("可攒/在账软件顺序（快过期先烧）：")
         for i, it in enumerate(result["pool"][:8], 1):
             lines.append(f"  {i}. {it['name']}  余额 {it['remaining']} {it['unit']}  [{it['grant_type']}]")
+    expiring = result.get("expiring") or []
+    if expiring:
+        total = sum(int(e.get("remaining") or 0) for e in expiring)
+        lines.append(f"临期积分（{priority.EXPIRY_WINDOW_DAYS} 天内到期，优先烧掉）："
+                     f"{len(expiring)} 笔共 {total}")
+        for e in expiring[:6]:
+            lines.append(f"  - {e['name']}  剩余 {e['remaining']}  {e['expires_at']} 还有 {e['days_left']} 天")
     if result["light"] and result["avoid_for_light"]:
         names = "、".join(it["name"] for it in result["avoid_for_light"][:5])
         lines.append(f"轻活尽量别动囤积分：{names}")
@@ -150,5 +149,5 @@ def format_recommend(result: dict[str, Any]) -> str:
         lines.append("有上限且余额偏低，可以领：")
         for it in result["claim_if_low"]:
             lines.append(f"  - {it['name']}  {it['remaining']}/{it['cap']}")
-    lines.append("规则：当日清零先烧（需你先打开）> 7 天内到期 > 长期 FIFO > 有上限 > 无过期（AutoClaw）。")
+    lines.append("规则：当日清零先烧（需你先打开）> 7 天内到期 > 长期 FIFO > 有上限 > 过期未知（AutoClaw）。")
     return "\n".join(lines)

@@ -11,8 +11,10 @@ from typing import Any
 
 from . import ledger
 from . import trace
+from . import board
 from .catalog import accounts, find_account, threshold_ratio
-from .ui_claim import claim as ui_claim, has_ui_route, skip_ui
+from .gate import Decision, run_gate
+from .ui_claim import claim as ui_claim, has_ui_route, skip_ui, _wait_for_user_idle
 
 # Repo root, so catalog.yaml never has to hardcode a checkout path.
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -20,6 +22,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # 对账开关：SKIP_SYNC 只关对账；SKIP_EXTERNAL（测试用）连带关——
 # 对账命令同样是 external 命令，测试里不该真联网。
 SYNC_SKIP_ENV = "AGENT_CREDIT_SKIP_SYNC"
+# UI 签到组只共享一次用户空闲闸门：通过后 Qoder/MonkeyCode 的内部等待跳过。
+# Trae/AutoClaw/LobsterAI 本来没有重复等待，但同属这组，活跃时一起留 pending。
+UI_IDLE_ACCOUNTS = {"trae", "autoclaw", "lobsterai", "qodercn", "monkeycode_credit"}
+SHARED_UI_IDLE_WAIT_SEC = 300
+SHARED_UI_IDLE_THRESHOLD_SEC = 60
+SHARED_IDLE_DONE_ENV = "AGENT_CREDIT_SHARED_IDLE_DONE"
+
+# 本次进程最近一次启动闸门结论（CLI 汇总/测试用；没跑到闸门时为 None）。
+last_gate: Decision | None = None
 
 
 @dataclass
@@ -67,9 +78,16 @@ def _run_external(acc: dict[str, Any]) -> tuple[bool, str, str]:
         return False, "外部命令已跳过（AGENT_CREDIT_SKIP_EXTERNAL）", ""
     # 实时转发：以前是 capture_output，黑框里几十秒没有任何动静，
     # 看不出是卡住还是在跑（monkeycode 的 UI 签到尤其慢）。
-    rc, out = trace.stream(command, shell=True, label=acc["id"], timeout=60)
+    # 2026-10-25：超时改为按账户可配（catalog 的 command_timeout，默认 60s）。
+    # MiniMax 的 token 续期 warmup 内部上限就是 180s，写死 60s 会把正在续期的
+    # 客户端连同脚本一起杀掉——10-25 00:02 那轮就是这么漏签的。
+    try:
+        timeout = int(acc.get("command_timeout") or 60)
+    except (TypeError, ValueError):
+        timeout = 60
+    rc, out = trace.stream(command, shell=True, label=acc["id"], timeout=timeout)
     if rc is None:
-        return False, "外部命令超时", out
+        return False, f"外部命令超时（{timeout}s）", out
     if rc != 0:
         # 把脚本最后一行输出带出来，否则只看得到退出码，没法判断是没活动还是真失败
         tail = out.strip().splitlines()
@@ -77,6 +95,11 @@ def _run_external(acc: dict[str, Any]) -> tuple[bool, str, str]:
         detail = f"外部命令失败 exit={rc}"
         if last:
             detail += f" | {last}"
+        # 401 是登录态问题，不是脚本/选择器问题：把动作写清楚，
+        # 免得下次又去翻 vendor 代码。WorkBuddy 10-25 就是这种情况。
+        if "AUTH_REJECTED" in (out or ""):
+            detail = ("登录态被服务端拒绝（HTTP 401）：请在客户端重新登录后重试；"
+                      "本次未签到 | " + detail)
         return False, detail, out
     return True, "外部命令成功", out
 
@@ -99,13 +122,34 @@ def checkin(
     only: str | None = None,
     data: dict[str, Any] | None = None,
     on: date | None = None,
+    *,
+    gate_sec: int | None = None,
+    gate_enabled: bool = True,
 ) -> tuple[list[CheckinResult], dict[str, Any]]:
+    global last_gate
+
+    last_gate = None
     on = on or ledger.today()
     data = data or ledger.load()
     targets = [find_account(only)] if only else accounts()
     results: list[CheckinResult] = []
     trace.init()
     trace.note(f"开始签到 {on.isoformat()}，共 {len(targets)} 个账户")
+
+    shared_ui_idle: bool | None = None
+    os.environ.pop(SHARED_IDLE_DONE_ENV, None)
+
+    # 启动闸门只问一次，且只在今天确实有 UI 账户要签时才问。
+    # 无人值守（计划任务隐藏窗口）直接放行，不再等主人空闲 5 分钟。
+    ui_due = [
+        acc for acc in targets
+        if acc["id"] in UI_IDLE_ACCOUNTS and _should_claim(acc, data, on)[0]
+    ]
+    gate: Decision | None = None
+    if ui_due:
+        gate = run_gate(gate_sec, enabled=gate_enabled,
+                        ui_names=[acc["name"] for acc in ui_due])
+        last_gate = gate
 
     for i, acc in enumerate(targets, 1):
         tag = f"{i}/{len(targets)} {acc['id']}"
@@ -114,6 +158,32 @@ def checkin(
             results.append(CheckinResult(acc["id"], acc["name"], "skipped", reason))
             trace.note(f"{acc['name']} 跳过：{reason}", label=tag)
             continue
+
+        # UI 签到组只等一次：启动闸门已给出结论时按它走（Y/超时=直接开始，
+        # N=今天整组跳过）；只有 legacy 模式（AGENT_CREDIT_GATE=legacy）才回到
+        # 「等主人空闲」的老路。仍活跃就把本组全部留 pending，避免逐个客户端重试。
+        if acc["id"] in UI_IDLE_ACCOUNTS:
+            if shared_ui_idle is None:
+                if gate is not None and gate.start_now:
+                    shared_ui_idle = True
+                    os.environ[SHARED_IDLE_DONE_ENV] = "1"
+                    trace.note("UI 空闲闸门：启动闸门已放行，不再等待")
+                elif gate is not None and gate.skip_ui:
+                    shared_ui_idle = False
+                else:
+                    shared_ui_idle = _wait_for_user_idle(
+                        SHARED_UI_IDLE_WAIT_SEC, SHARED_UI_IDLE_THRESHOLD_SEC, "UI 签到")
+                    if shared_ui_idle:
+                        os.environ[SHARED_IDLE_DONE_ENV] = "1"
+            if not shared_ui_idle:
+                if gate is not None and gate.skip_ui:
+                    pending_reason = "主人按 N/Esc 跳过今天的 UI 签到；本次未启动客户端、未点击"
+                else:
+                    pending_reason = "用户活跃，UI 签到已推迟；本次未启动客户端、未点击"
+                results.append(CheckinResult(
+                    acc["id"], acc["name"], "pending", pending_reason))
+                trace.note(f"{acc['name']} 跳过：{pending_reason}", label=tag)
+                continue
 
         mode = acc.get("claim_mode") or "manual"
         trace.note(f"{acc['name']} 开始（{reason}，mode={mode}）", label=tag)
@@ -161,6 +231,14 @@ def checkin(
                     CheckinResult(acc["id"], acc["name"], "pending", "已跳过 UI 签到（AGENT_CREDIT_SKIP_UI）")
                 )
                 continue
+            # 主人按 N 后，外部直签失败也别回落到 UI：那同样会开客户端/搬窗口。
+            # MiniMax 这类「external 为主、UI 兜底」的账户只有走到这里才会被拦住。
+            if gate is not None and gate.skip_ui:
+                results.append(CheckinResult(
+                    acc["id"], acc["name"], "pending",
+                    "主人按 N/Esc 跳过今天的 UI 签到；外部直签未成功，本次未启动客户端、未点击"))
+                trace.note(f"{acc['name']} 跳过：主人按 N/Esc，UI 兜底也不走", label=tag)
+                continue
             ok, detail = ui_claim(acc["id"])
             if ok:
                 # UI 脚本也可以用 detail 里的 `[granted] N` 上报实发额
@@ -191,7 +269,23 @@ def checkin(
 
     ledger.save(data)
     trace.note("台账已写回 " + str(ledger.LEDGER_PATH))
+    _refresh_board(data, on)
     return results, data
+
+
+def _refresh_board(data: dict[str, Any], on: date) -> None:
+    """签到后刷一份积分余额看板（签到 → 对账 → 看板，一条链走完）。
+
+    看板是副产物：失败只记一行日志，绝不能把签到搞挂。
+    开关与对账一致（测试里不该往真目录写产物）。
+    """
+    if _env_flag(SYNC_SKIP_ENV) or _env_flag("AGENT_CREDIT_SKIP_EXTERNAL"):
+        return
+    try:
+        paths = board.write(board.build(data=data, on=on))
+        trace.note(f"积分看板已刷新 {paths['markdown']}")
+    except Exception as exc:  # 看板失败不牵连签到
+        trace.note(f"看板刷新失败：{exc}")
 
 
 def _grant_success(acc: dict[str, Any], data: dict[str, Any], on: date, detail: str,
@@ -340,10 +434,13 @@ def _apply_sync_payload(
     data: dict[str, Any],
     on: date,
 ) -> dict[str, Any]:
-    """把对账输出落进账本。两种 catalog 契约：
+    """把对账输出落进账本。三种 catalog 契约：
 
     credits_command: {"grants": [{"remain": N, "expires": "YYYY-MM-DD"}],
                      "total": N} → 逐条写入（ledger.sync_grants），保留每条过期时间
+    credits_command: {"total": N, "reconcile": "fifo"} → 服务端只给总量时用它
+                     （ledger.reconcile_total）：拿真值校正总数，但**不抹掉**台账里
+                     逐日领取的批次与各自过期时间
     status_command:  {"balance": N, "claimed_today": bool} → 总量快照（单条 snapshot 条目）
     """
     if not isinstance(payload, dict):
@@ -351,6 +448,10 @@ def _apply_sync_payload(
     if isinstance(payload.get("grants"), list):
         result = ledger.sync_grants(data, acc["id"], payload["grants"], on)
         return {**result, "mode": "grants"}
+    if payload.get("reconcile") and isinstance(payload.get("total"), (int, float)) \
+            and not isinstance(payload.get("total"), bool):
+        result = ledger.reconcile_total(data, acc["id"], int(round(payload["total"])), on)
+        return {**result, "mode": "reconcile"}
     balance = payload.get("balance")
     if isinstance(balance, (int, float)) and not isinstance(balance, bool):
         before = ledger.remaining(data, acc["id"], on)
@@ -405,6 +506,7 @@ def sync(
         except ValueError as exc:
             results.append({**item, "ok": False, "detail": str(exc)})
             continue
+        ledger.mark_synced(data, acc["id"])
         results.append({**item, "ok": True, **applied})
         trace.note(f"{acc['name']} 对账：{applied['before']} → {applied['after']} "
                    f"（{applied['mode']}，{applied['entries']} 条）", label=acc["id"])

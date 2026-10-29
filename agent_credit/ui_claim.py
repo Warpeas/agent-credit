@@ -169,11 +169,13 @@ def _read_result(result_path: Path) -> tuple[bool, str]:
 
 
 def _run_ps1(script: Path, result_path: Path, timeout: int = 240,
-             process_name: str = "", exe_path: str = "") -> tuple[bool, str]:
+             process_name: str = "", exe_path: str = "",
+             extra_args: list[str] | None = None) -> tuple[bool, str]:
     """Run a claim ps1 at the CURRENT integrity level and read its JSON result.
 
     `process_name` is forwarded as -ProcessName; without it the script falls back
     to its own default, which is how a renamed client silently breaks the route.
+    `extra_args` are appended verbatim (e.g. Trae's -CloseAfter).
     """
     if not script.is_file():
         return False, f"缺少 {script}"
@@ -187,6 +189,8 @@ def _run_ps1(script: Path, result_path: Path, timeout: int = 240,
         cmd += ["-ProcessName", process_name]
     if exe_path:
         cmd += ["-ExePath", exe_path]
+    if extra_args:
+        cmd += extra_args
     rc, _ = trace.stream(cmd, label=script.stem, timeout=timeout, cwd=str(ROOT))
     if rc is None:
         return False, f"签到脚本超时（{timeout}s）"
@@ -254,11 +258,100 @@ def _claim_trae() -> tuple[bool, str]:
                                         process_name=TRAE_PROCESS, exe_path=exe_path)
     if not ok:
         return False, note
+    # 2026-10-14：客户端由计划任务在 ps1 之外冷启动时，ps1 自己的
+    # $LaunchedByUs 检测会把它当成「用户预先开着」而拒绝关窗（凌晨签完窗口
+    # 一直挂桌面的根因）。launcher 仅在 preexisting procs=0 时真正启动，
+    # 此时显式传 -CloseAfter，让 ps1 结束时统一清理。
+    cold_started = "preexisting procs=0" in note and "started " in note
+    # 2026-10-29：启动闸门已经拿到主人授权（Y/超时）或明确无人值守，Python 侧
+    # 不再等空闲；不传 -IdleWaitSec 0 的话 ps1 自己的 5 分钟空闲闸门会再等一遍，
+    # 用户一直活跃时还会直接返回 pending，闸门等于白问。
+    # 也不再传 -CloseAfter：领取成功后要先在同一个客户端里拉明细（见下），
+    # 拉完再由 Python 关掉本次冷启动的实例。
+    extra = ["-IdleWaitSec", "0"]
     ok, detail = _run_ps1(SCRIPT_TRAE_OCR, LOG_DIR / "trae_claim.json",
-                          timeout=200, process_name=TRAE_PROCESS, exe_path=exe_path)
+                          timeout=300, process_name=TRAE_PROCESS, exe_path=exe_path,
+                          extra_args=extra)
+    # 2026-10-29：合并「签到 + 积分明细」。以前每日链路签完要再开一次 IDE 窗
+    # （Ctrl+Shift+N）才能拿到逐条过期，多一轮开关窗口、多一次前台争抢。
+    # 现在领取成功后趁同一个客户端还在，直接把 IDE 窗开出来、等 dump、登记、关窗。
+    # 失败只记一笔，不改领取结果；链路的 sync 兜底会再试。
+    if ok:
+        sync_ok, sync_detail = _sync_trae_credits()
+        detail += ("；积分明细已拉取（随本次对账登记）" if sync_ok
+                   else f"；积分明细未拉取（{sync_detail}）")
+    if cold_started:
+        try:
+            subprocess.run(["taskkill", "/IM", TRAE_PROCESS + ".exe", "/F"],
+                           capture_output=True, timeout=20)
+            detail += "；已关闭本次启动的客户端"
+        except (subprocess.SubprocessError, OSError):
+            pass
     if not ok:
         return False, f"{detail}（启动日志: {note}）"
     return True, detail
+
+
+def _sync_trae_credits() -> tuple[bool, str]:
+    """在 Trae 已打开的前提下把积分明细拉新鲜（不写账），返回 (ok, 说明)。
+
+    登记交给 checkin 末尾的 sync：那边用的是同一份内存账本，最后统一落盘；
+    这里若另起 `credit.py sync`，写进去的条目会被随后的整体保存覆盖。
+    """
+    script = ROOT / "scripts" / "trae_credit_sync.ps1"
+    if not script.is_file():
+        return False, f"缺少 {script}"
+    rc, out = trace.stream(PS + ["-File", str(script), "-NoRecord"],
+                           label="trae_credit_sync", timeout=240)
+    if rc is None:
+        return False, "同步脚本超时（240s）"
+    try:
+        payload = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return False, "同步脚本没有返回结果"
+    return bool(payload.get("ok")), str(payload.get("error") or payload.get("steps"))
+
+
+class _LastInputInfo(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+def _user_idle_seconds() -> float:
+    """Seconds since the last keyboard/mouse input on this desktop."""
+    info = _LastInputInfo()
+    info.cbSize = ctypes.sizeof(_LastInputInfo)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        return 1e9
+    tick = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+    return ((tick - info.dwTime) & 0xFFFFFFFF) / 1000.0
+
+
+def _wait_for_user_idle(timeout: int, threshold: int, label: str) -> bool:
+    """Wait until the user has been idle for `threshold` seconds, at most `timeout`.
+
+    2026-10-22: Qoder's off-screen check-in briefly brings the window back for a
+    real SendInput click (the campaign webview ignores synthetic mouse messages).
+    Moving it while the owner is actively using the machine is exactly the
+    interference this gate exists to avoid. Timeout proceeds anyway -- a missed
+    sign-in is worse than a short flash -- but the ps1 then uses minimal exposure.
+    """
+    idle = _user_idle_seconds()
+    if idle >= threshold:
+        return True
+    trace.note(f"{label} 空闲闸门：用户活跃（空闲 {idle:.0f}s），最多等 {timeout}s")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(10)
+        idle = _user_idle_seconds()
+        if idle >= threshold:
+            trace.note(f"{label} 空闲闸门：已空闲 {idle:.0f}s，继续")
+            return True
+    trace.note(f"{label} 空闲闸门：等待超时（{timeout}s），按最小暴露模式继续")
+    return False
+
+
+QODER_IDLE_WAIT_SEC = 300
+QODER_IDLE_THRESHOLD_SEC = 60
 
 
 def _claim_qodercn() -> tuple[bool, str]:
@@ -279,17 +372,57 @@ def _claim_qodercn() -> tuple[bool, str]:
     exe_path = str(exe) if exe else ""
     if exe is None:
         return False, "未找到 Qoder CN 客户端，请手动打开后签到"
+    # 2026-10-22：先等用户空闲，再拉起/搬动 Qoder。窗口没开时这一步避免冷启动
+    # 的窗口打断主人；已经在用时避免把窗口搬到屏外。ps1 侧还有一层兜底，
+    # 但这里先等可以覆盖「冷启动」这一段，ps1 调用时传 -IdleWaitSec 0。
+    # 2026-10-23：checkin 的 UI 共享闸门只等一次；它通过后这里不再重复等。
+    if os.environ.get("AGENT_CREDIT_SHARED_IDLE_DONE", "").strip().lower() in ("1", "true", "yes"):
+        trace.note("Qoder CN 空闲闸门：由 UI 共享闸门完成，跳过")
+    else:
+        _wait_for_user_idle(QODER_IDLE_WAIT_SEC, QODER_IDLE_THRESHOLD_SEC, "Qoder CN")
     # 客户端没在跑就先拉起（os.startfile 尽力而为；计划任务上下文里若起不来，
     # ps1 会以 notfound 退出，checkin 退化为 pending，不会误记账）。
+    launched_by_us = False
     if not _has_main_window([QODERCN_PROCESS]):
         try:
             launch("qodercn")
         except FileNotFoundError:
             return False, "未找到 Qoder CN 客户端，请手动打开后签到"
-        time.sleep(3)
+        launched_by_us = True
+        # 2026-10-14：原来 launch 后只 sleep(3)，实测冷启动主窗口在进程起来后
+        # 还要数秒才出现（当日 00:04:08 进程起，1s 后 ps1 一次性枚举直接
+        # notfound，当天漏签）。改为轮询等主窗口，上限 90s；ps1 内还有一层
+        # 同等等待兜底。
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            if _has_main_window([QODERCN_PROCESS]):
+                break
+            time.sleep(3)
 
-    return _run_ps1(SCRIPT_QODERCN_OCR, LOG_DIR / "qodercn_claim.json",
-                    timeout=180, process_name=QODERCN_PROCESS, exe_path=exe_path)
+    # 2026-10-22 方案甲：窗口停屏外 + PrintWindow + BringBack 点击，链路比旧版长；
+    # 空闲等待已在上面做过，ps1 不再等（-IdleWaitSec 0），超时放宽到 300s。
+    ok, detail = _run_ps1(SCRIPT_QODERCN_OCR, LOG_DIR / "qodercn_claim.json",
+                          timeout=300, process_name=QODERCN_PROCESS, exe_path=exe_path,
+                          extra_args=["-IdleWaitSec", "0"])
+    # 2026-10-29：领取成功后趁窗口还开着，立刻点开一次「我的用量」，让客户端把当天
+    # 用量写进自己的日志。以前这一步由每日链路单独再开一次 Qoder 来做（实测多花
+    # 2–4 分钟：冷启动 + 120s 空闲闸门）。失败只记一笔，不改领取结果；链路兜底会再点。
+    if ok:
+        usage_ok, usage_detail = _run_ps1(
+            SCRIPT_QODERCN_OCR, LOG_DIR / "qodercn_usage.json",
+            timeout=150, process_name=QODERCN_PROCESS, exe_path=exe_path,
+            extra_args=["-Usage", "-IdleWaitSec", "0"])
+        detail += "；已点开「我的用量」" if usage_ok else f"；用量面板未打开（{usage_detail}）"
+    # 本次冷启动的实例签成功就关掉（与 Trae/LobsterAI/MonkeyCode 一致）；
+    # pending/failed 时保留窗口，方便主人接手手动点启动弹窗。
+    if ok and launched_by_us:
+        try:
+            subprocess.run(["taskkill", "/IM", QODERCN_PROCESS + ".exe", "/F"],
+                           capture_output=True, timeout=20)
+            detail += "；已关闭本次启动的客户端"
+        except (subprocess.SubprocessError, OSError):
+            pass
+    return ok, detail
 
 
 def _claim_lobsterai() -> tuple[bool, str]:

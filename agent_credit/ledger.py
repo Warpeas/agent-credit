@@ -105,6 +105,18 @@ def claimed_on(data: dict[str, Any], account_id: str, on: date | None = None) ->
     return last == on
 
 
+def mark_synced(data: dict[str, Any], account_id: str,
+                at: datetime | None = None) -> str:
+    """记一次成功对账的时刻（看板用它显示新鲜度）。
+
+    只在对账成功后调用。放在账本里而不是日志里，是因为「这个数字是什么时候
+    从服务端拉到的」决定了它有多可信——昨天同步的余额和今天的不是一个量级。
+    """
+    stamp = (at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    state(data, account_id)["last_sync"] = stamp
+    return stamp
+
+
 def grant(
     data: dict[str, Any],
     account_id: str,
@@ -229,3 +241,47 @@ def sync_grants(
         })
         written += 1
     return {"before": before, "after": remaining(data, account_id, on), "entries": written}
+
+
+def reconcile_total(
+    data: dict[str, Any],
+    account_id: str,
+    total: int,
+    on: date | None = None,
+) -> dict[str, Any]:
+    """服务端只给**总量**（没有逐条明细）时用它校正台账，保留每条的过期时间。
+
+    为什么需要第三种登记语义：`sync_grants` 是「按服务端逐条重建」，而
+    `set_balance` 式的单条快照会把逐日领取攒出来的一堆批次压成一条无过期条目——
+    临期队列与烧卡优先级当场失明（2026-10-20 在 qodercn 上真踩过：
+    8 条 ×100（各 30 天有效期）被对账成 1 条 800、expires=null）。
+    服务端既然只下发一个桶总数，就该拿它去**校正总量**，而不是替换结构。
+
+    规则（扣减顺序与 consume 一致 = 先到期先烧）：
+      总量 < 台账有效合计 → 逐条扣到相等（扣到 0 的条目留在账本里留痕）
+      总量 > 台账有效合计 → 补一条：发放日=今天，有效期按 catalog 的 validity_days
+      相等            → 一条不动，只由调用方记 last_sync
+    """
+    on = on or today()
+    before = remaining(data, account_id, on)
+    target = int(total)
+    if target < 0:
+        raise ValueError("total must be >= 0")
+    if target < before:
+        left = before - target
+        for entry in active_entries(data, account_id, on):
+            take = min(left, int(entry["remaining"]))
+            entry["remaining"] -= take
+            left -= take
+            if left == 0:
+                break
+    elif target > before:
+        grant(data, account_id, target - before, "sync", on)
+    # 存活条目统一标成「总量经服务端校正」；过期日是我们按领取日推出来的，
+    # 所以另外带上 expiry_basis=derived，让看板能把两种口径分开写（否则
+    # 单一 source 字段会把「余额真值」和「过期也是真值」混成一谈）
+    for entry in active_entries(data, account_id, on):
+        entry["source"] = "sync"
+        entry["expiry_basis"] = "derived"
+    return {"before": before, "after": remaining(data, account_id, on),
+            "entries": len(active_entries(data, account_id, on))}

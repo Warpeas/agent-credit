@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""credit sync 对账回归：ledger.sync_grants + _apply_sync_payload + sync 开关。
+"""credit sync 对账回归：ledger.sync_grants / reconcile_total + _apply_sync_payload + sync 开关。
 
 覆盖三类静默失败：字段漂移（payload 契约变了不报错）、
 对账写错条目（过期日期/余量优先级）、开关失效（测试里真联网）。
@@ -83,6 +83,55 @@ r = ledger.sync_grants(data, "workbuddy", [
 ], on=ON)
 check("脏数据只收有效值", (r["entries"], r["after"]), (1, 30))
 
+# ---------- ledger.reconcile_total（服务端只给总量的账户，如 Qoder CN）----------
+# 立这条语义的原因：2026-10-20 用 grants/快照给 qodercn 对账，把逐日领取的
+# 8 条 ×100（各带 30 天有效期）压成 1 条无过期条目，临期队列当场失明。
+def batches(data: dict, account: str) -> list[str]:
+    return sorted(e["expires_at"] for e in ledger.active_entries(data, account, ON))
+
+
+def four_batches(account: str = "qodercn") -> dict:
+    data = fresh(account)
+    for day in (15, 16, 17, 18):
+        ledger.grant(data, account, 100, "daily", date(2026, 10, day))
+    return data
+
+
+data = four_batches()
+r = ledger.reconcile_total(data, "qodercn", 400, on=ON)
+check("reconcile 相等时不动结构", (r["before"], r["after"], r["entries"]), (400, 400, 4))
+check("相等时逐条过期日全留", batches(data, "qodercn"),
+      ["2026-11-14", "2026-11-15", "2026-11-16", "2026-11-17"])
+check("存活条目记为服务端校正过",
+      {e["source"] for e in ledger.active_entries(data, "qodercn", ON)}, {"sync"})
+check("过期日仍标成推导值（不是服务端下发）",
+      {e.get("expiry_basis") for e in ledger.active_entries(data, "qodercn", ON)}, {"derived"})
+
+# 服务端更少 -> 先到期先烧，逐条日期不能被抹掉
+data = four_batches()
+r = ledger.reconcile_total(data, "qodercn", 250, on=ON)
+check("reconcile 扣减后总量", r["after"], 250)
+check("扣减按先到期烧掉整条", batches(data, "qodercn"),
+      ["2026-11-15", "2026-11-16", "2026-11-17"])
+check("最早一条烧光、次条削到 50",
+      sorted(e["remaining"] for e in ledger.state(data, "qodercn")["entries"]),
+      [0, 50, 100, 100])
+
+# 服务端更多 -> 补一条（发放日=今天，有效期按 catalog）
+data = four_batches()
+r = ledger.reconcile_total(data, "qodercn", 500, on=ON)
+check("reconcile 补差额", (r["after"], r["entries"]), (500, 5))
+check("补的条目按 catalog 有效期算到期", batches(data, "qodercn")[-1], "2026-11-18")
+
+# 清零 + 非整数/负数入参
+data = four_batches()
+check("总量 0 全部扣光", ledger.reconcile_total(data, "qodercn", 0, on=ON)["entries"], 0)
+try:
+    ledger.reconcile_total(four_batches(), "qodercn", -1, on=ON)
+    check("负总量报错", "no raise", "ValueError")
+except ValueError:
+    check("负总量报错", "ValueError", "ValueError")
+
 # ---------- _parse_sync_output ----------
 check("纯 JSON 输出", checkin._parse_sync_output('{"balance": 100}'), {"balance": 100})
 check("前置告警+末行 JSON",
@@ -108,12 +157,27 @@ check("balance 契约走总量快照", (r["mode"], r["entries"]), ("snapshot", 1
 check("快照小数四舍五入", r["after"], 2717)
 check("快照替换旧余额", ledger.remaining(data, "workbuddy", ON), 2717)
 
-for bad_payload in ({}, [1, 2], {"grunds": []}, {"balance": "x"}, {"balance": None}):
+for bad_payload in ({}, [1, 2], {"grunds": []}, {"balance": "x"}, {"balance": None},
+                    {"reconcile": "fifo"}):
     try:
         checkin._apply_sync_payload(acc, bad_payload, fresh(), ON)
         check(f"坏载荷 {bad_payload!r:.30} 报错", "no raise", "ValueError")
     except ValueError:
         check(f"坏载荷 {bad_payload!r:.30} 报错", "ValueError", "ValueError")
+
+# ---------- reconcile 契约（第三种登记语义）----------
+acc_q = {"id": "qodercn", "name": "Qoder CN"}
+data = four_batches()
+r = checkin._apply_sync_payload(acc_q, {"total": 400, "reconcile": "fifo"}, data, ON)
+check("reconcile 契约被识别", (r["mode"], r["entries"], r["after"]), ("reconcile", 4, 400))
+check("reconcile 保留逐条过期日", batches(data, "qodercn"),
+      ["2026-11-14", "2026-11-15", "2026-11-16", "2026-11-17"])
+
+# 同时带 grants 与 reconcile 时以逐条明细为准（WorkBuddy 那种真逐条的优先）
+data = fresh("workbuddy")
+r = checkin._apply_sync_payload(acc, {"grants": [{"remain": 70}], "total": 70,
+                                      "reconcile": "fifo"}, data, ON)
+check("grants 契约优先于 reconcile", r["mode"], "grants")
 
 # ---------- sync() 开关与无能力账户 ----------
 os.environ["AGENT_CREDIT_SKIP_SYNC"] = "1"
@@ -127,7 +191,9 @@ check("SKIP_EXTERNAL 连带跳过", checkin.sync(only="workbuddy", data=data, on
 del os.environ["AGENT_CREDIT_SKIP_EXTERNAL"]
 
 data = fresh()
-check("无对账命令的账户返回空", checkin.sync(only="minimax", data=data, on=ON), [])
+# ⚠️ 这里必须挑一个**真的没配**对账命令的账户：2026-10-24 MiniMax 接通了
+# /credit/details 真值通道，已经不是「无对账命令」的例子了，用它会真联网。
+check("无对账命令的账户返回空", checkin.sync(only="autoclaw", data=data, on=ON), [])
 check("无对账命令时不动账本", ledger.remaining(data, "workbuddy", ON), 0)
 
 # ---------- sync() 端到端（monkeypatch trace.stream，不真联网） ----------

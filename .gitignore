@@ -4,6 +4,7 @@ __pycache__/
 
 # 运行期产物：账本与快照不入库（它是本机状态，不是代码）
 data/ledger.json
+data/board.json
 data/_ledger_backup_*.json
 data/*.tmp
 
@@ -12,6 +13,9 @@ logs/
 
 # agent 运行时的自动化任务记忆（UUID 命名，与项目内容无关）
 .workbuddy/memory/automations/
+
+# 其它 agent 工具落在这个目录里的本地配置（权限规则等），跟项目无关
+.ohmyagent/
 
 # 说明：
 # 本项目**不按文件名前缀决定是否入库**，也不按「谁生成的」决定。

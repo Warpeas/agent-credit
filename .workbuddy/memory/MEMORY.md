@@ -31,6 +31,28 @@
 - **同完整性原理**：客户端是 Limited 任务拉起的（中完整性），驱动脚本同完整性跑即可，
   **不需要 UAC**（UIPI 只拦 LOW→HIGH）。旧「必须提权」结论已推翻。
 
+## 影子桌面（CreateDesktop）签到后台化结论（2026-10-20 实测）
+
+- **识别可全后台，点击不可**：`CreateDesktop("agent-credit")` + `CreateProcessW`
+  (lpDesktop="WinSta0\agent-credit") 冷启动 → PrintWindow(PW_RENDERFULLCONTENT) 截图 +
+  WinRT OCR 全程正常（Trae 实测 587 色、OCR 60 词，实证 `logs/poc_client_printwindow.png`）。
+  用户屏幕零感知（无窗口、无抢焦点、无光标动作）。
+- **SendInput 在影子桌面线程被拒（inserted=0）**：输入走「输入桌面」不跟线程桌面；
+  光标探针证明默认桌面不受影响——机制上不会误点主人屏幕。跨桌面只有
+  PostMessage/SendMessage（WM_CLOSE/WM_GETTEXT 可达），Chromium 自绘 UI 无感。
+- 影子桌面 BitBlt(GetDC(NULL)) 恒黑 → MonkeyCode 屏幕捕获路线不可用；
+  冷启动首帧可能空白，捕获重试到 uniq>5 && std>3。
+- 推荐架构：**甲方案已拍板（2026-10-21）**——客户端启动后 MoveWindow 移屏外 →
+  OCR/判据全后台（坐标不变）→ 末次点击先 UIA Invoke，兜底移回窗口+光标保存/瞬移/点击/
+  复位 → 关闭前恢复原 rect（防 Electron 持久化屏外位置）。完整交接 spec：
+  `doc/plan_a_offscreen_checkin.md`（改动点精确到函数名，委托其他会话实现）。
+- P/Invoke 坑（实测）：收 NULL 的字符串参数必须 IntPtr.Zero（PS `$null` 会变空串 → err 87）；
+  Marshal.SizeOf 传实例不传类型字面量；子进程诞生桌面用 lpDesktop 而非 SetThreadDesktop
+  （后者 ERROR_BUSY 170）；WinRT 前必须 Add-Type System.Runtime.WindowsRuntime
+  （否则静默 exit 1）；PS 参数签名别用 [uint]/[ushort]（任务上下文报 Unable to find type）。
+- 复跑入口 `scripts/_task_poc_desktop.ps1`（任务名带日期后缀；沙箱里 Unregister 失败，
+  同名任务只能重跑不能改 action）；结论详情见 `research/` 与本日 memory 日志。
+
 ## PowerShell 脚本 bug 类型
 
 1. **单引号里 `$` 不展开**（`$x='$root\logs\a.png'` 是字面量）→ 一律 `Join-Path`。
@@ -82,6 +104,28 @@
 - **额度（10-13 API panel 硬证据，推翻此前所有 OCR 推测）**：day1=800(+bonus 400)、
   day2=400、day3=400、**day4=1000**、day5=400、day6=400、**day7=1000**，周期合计 **4400**。
   以 `/signin/status` 的 `panel.days` 为准（10-04 记的 12000、catalog 的 3000 均作废）。
+- **⚠️ bonus_points 已包含在 points 里，不是另加一份**（app.asar `@mavis/shared` 原文：
+  `/** Extra credits already included in points; absent on older responses. */`，
+  前端同源 `total_points = points`，按钮「签到得@N」用的也是 points）。
+  实发额 = `points`，**不要再 `points + bonus_points`**——之前这么算把台账多记 **5024**
+  （余额 27648 → **22624** 已修；备份 `data/_ledger_backup_20261024_before_mmbonus_fix.json`；
+  `vendor/minimax-auto-signin/signin.py` 已改成只取 points）。活动期服务端会翻倍，
+  多出来的部分记在 bonus_points 里（10-24 day4=2024 = 1000 基线 + 1024 加成）。
+- **官方口径**（2026-10-24 核对 `agent.minimax.cn/docs/code/account/usage`）：每日 400，
+  连续签到第 4/7 天单日加码至 1000，一周累计 4000，到账起 30 天有效且可累积。
+- **服务端真值通道已打通（2026-10-24）**：`GET /minimax-cloud/api/v1/credit/details`
+  （`page_number`/`page_size`/`include_expired=true`，只读）→ `{details:[...], total_count}`，
+  每条含 `credit_type`(1=购买 2=签到赠予)/`granted_amount`/`remaining_amount`/`consumed_amount`/
+  `granted_at_ms`/`expire_at_ms`。已做 `vendor/minimax-auto-signin/credits.py` +
+  `catalog.yaml` 的 `credits_command` → **看板口径从「本地估算」升为「服务端真值」**，
+  余额 22624（估算）→ **14286**（真值）。
+  ⚠️ 真值通道暴露出本地台账三类漂移：**漏记 8 笔早期签到**（08-05..09-17）、
+  **漏记 09-24/09-25 两天实际已签**（本地 streak 29 是记账断档，服务端口径 09-23..10-24
+  **连续 32 天 100%**）、**漏记活动期加成与扣减**（09-28/09-29 少记、10-02 多记、
+  10-05 已用 138、09-07 已用 136）。
+- **签到积分会被扣**：M Plan 额度用尽后按到期时间倒序自动扣赠予积分
+  （asar `usage_resource_tooltip_rule3`）。本地台账此前 `remaining` 恒等于 `amount`，
+  完全看不到扣减，只有服务端明细才看得见。
 - 有效期 30 天 = confirmed（**付费积分 1 年**，别混用）。
 - external：`vendor/minimax-auto-signin/signin.py`，端点
   `/signin/{status,claim}`，**必带 `timezone_id=Asia/Shanghai`**；
@@ -107,11 +151,12 @@
 ### LobsterAI
 
 - Electron，双窗口同 MiniMax 构型。
-- **积分四类、各自有效期独立**（daily/monthly/longTerm/campaign）→ `validity_days` 为 null
-  是**无法单值表达**，不是 unknown。查法：设置 → 积分明细（`/settings/credits`）。
-- 积分礼**不走 `daily_check_in` 槽位**（slot 永久 empty）→ 判是否已领要看 UI
-  「积分额度」数值 + 有无「立即领取」按钮；入口：左下「我的」面板 / 右上角「每日积分礼」chip。
+- **有效期 30 天、可累积**（asar i18n `dailyCheckInValidityDays` 是服务端变量；UI 实测 30 天；台账 `expires_at = granted_at + 30 天`）。旧记录「积分四类各自独立 → validity_days=null」是 AutoClaw 的结论，误抄到 LobsterAI，已删。
+- 签到走 client-activities 活动体系（activityCode=`daily-check-in-evergreen-prod-20260814`）；旧记录「slot 永久 empty / 不走 daily_check_in」是 external 探测写死 `clientVersion=1.0.0` + `containerApiVersion=1` 的误判。2026-10-25 用 2026.10.16 + sidebar CAV=2 实测 slot=available，context `rewardCredits=100 / claimedDays=34 / claimedCredits=3400 / claimedToday=true`。
+- 判是否已领：2026.10.16 版 UI 直接显示「今日已领」+「奖励到账 +100积分」；旧版才靠「立即领取」按钮消失 + 额度上涨。入口：左下「我的」面板 / 右上角「每日积分礼」chip。
 - 无 external 余额端点、本地 sqlite 无积分缓存 → 余额只能 UI OCR。
+- external 脚本已修（动态读 app.asar 版本 + placement CAV + activityType + idempotencyKey）；主路线仍 UI，未切换。
+- **启动/工作空间体验（2026-10-27 主人反馈）**：总是要等网关启动；不知道为什么不能「不设工作空间」直接用；切换工作空间时也要重启/启动网关，体感很慢。
 - ⚠️ 用户栏选择器不能只按空间挑：面板展开时左下同时有「退出登录」和「我的」
   → 用 `Find-UserBar` + `Test-PanelOpen`（10-08 曾点掉登录态，需人工重登）。
 

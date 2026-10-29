@@ -38,6 +38,10 @@
 
 2. **让客户端自己说话**
    读 `app.asar` / `dist` 里的 i18n 文案与接口路径字符串。**只读，不执行、不改写。**
+   延伸（2026-10-20 对 Qoder CN 实测有效）：客户端常把自己拿到的服务端响应**明文落在
+   自己的日志里**（如 `%APPDATA%\com.qodercn.app.stable\logs\*/main.log` 的
+   `用量响应摘要`）。读它 = 读客户端已经说出来过的话，不解密、不额外发请求、
+   不碰凭据。注意它受客户端自己的缓存/触发条件限制，要用新鲜度闸门。
 
 3. **本机UI 自动化**
    走客户端自身界面点按钮（OCR 定位 + OS 级输入注入）。这是**客户端期望的交互路径**，
@@ -91,8 +95,11 @@
 | AutoClaw | external 直签 | `auth.json` 凭据为 safeStorage 加密（`enc:` 前缀）；且签名需自算 `md5(APP_ID&ts&APP_KEY)` |
 | AutoClaw | CDP 自动化 | 需开 `AUTOCLAW_CDP_PORT`，本机任意进程可连，等于交出客户端控制权 → 规则 1 禁止 |
 | MonkeyCode | external 直签 | `POST /users/wallet/checkin` 需 captcha（code 10701）。challenge 的 `{c:50,s:32,d:3}` 恒定 = 固定规格图形验证码，破解它 → 规则 1 禁止 |
+| MonkeyCode | 逐条 grant / 过期 | 2026-10-20 复扫 exe 仍只有 `/users/wallet` 与 `/users/wallet/checkin`；GET wallet 无 expire/grants。不要再猜 records/transactions/detail/points（10-04 已 404）。总量对账走明文 cookie + GET wallet（毫积分÷1000） |
 | LobsterAI | external 直签 | 服务端 `slot` 恒为 `slotState=empty`，**没有活动可领**。不是脚本问题 |
-| 各家 | 余额自动对账 | 10 个候选路径全404；`/user/profile` 只返回 yid/nickname/id。余额只能靠 UI OCR |
+| Qoder CN | external 直签 / 直查 | 登录态在 `%APPDATA%\com.qodercn.app.stable\auth.v1.dat`，头三字节 `v10` = Chromium safeStorage(DPAPI) 密文 → 规则 1 禁止解密。此前 notes 记的「~/.qoder-cn/.auth 无明文凭据」结论对，但位置要认准 Roaming 的 auth.v1.dat，别再翻 .auth |
+| Qoder CN | 逐条 grant / 每条过期 | 2026-10-20 实测 `GET /sash/api/v2/me/usage` 只下发 `userQuota`/`addOnQuota` 两个桶（+ 个人号恒为 missing 的 org/dedicated 计数），**没有任何批次数组**；`expiresAt` 是本套餐的年 9999 哨兵。不要再猜 packages/records 类端点 |
+| 各家 | 余额自动对账 | 对 **没有** 明文凭据+官方余额接口的客户端仍成立。WorkBuddy / Trae / MonkeyCode 已分别打通，Qoder CN 靠读客户端自己的日志打通（第四种形态），别再按「只能 OCR」处理这四家 |
 
 这些结论都标了 evidence 位置，改动前先看 notes 里的失效条件。
 

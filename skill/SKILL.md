@@ -30,7 +30,10 @@ python <REPO>\credit.py <命令>
 | 手签完成 | `record <id> claimed` 或 `record <id> claimed 200` |
 | 客户端里看到的余额 | `set-balance <id> <数量>` |
 | 用掉一笔 | `record <id> used <数量>` |
+| Trae 每包余额+过期明细 | `python scripts\trae_credit_detail.py`（`--record` 顺带登记余额） |
+| MonkeyCode 积分总量（无逐条过期） | `credits monkeycode_credit` 或 `python -m agent_credit.mc_credits` |
 | 签到后对账（真实余额+逐条过期） | `sync`，或 `checkin` 末尾自动跑（配了 credits_command 的账户） |
+| 积分余额看板（余额+每条剩余/过期+烧卡顺序） | `board`，或 `python -m agent_credit.board` |
 
 账户 id：`workbuddy` `minimax` `trae` `autoclaw` `lobsterai` `dumate` `todesk` `monkeycode_credit` 等，见 `catalog.yaml`。
 
@@ -41,9 +44,13 @@ python <REPO>\credit.py <命令>
 > 本节的规则 6 是它的摘要，冲突时以 `research/SAFETY.md` 为准。
 
 1. **不要启动** Mavis、MonkeyCode Token、Loomy、Coze、小浣熊、千问、Accio、阶跃等登录即领且当日过期的客户端。`open` / `checkin --open` 也不得打开它们。推荐里最多说「你要干这个的话先打开 xxx」。
-2. `checkin` 退出码：`0` 全部自动完成；`2` 有待手签；`1` 失败。把 CLI 原文给用户，待手签列出软件名。
-3. AutoClaw 是**每日手动签到 200**，不是月度登录。用户说「AutoClaw 签了」→ `record autoclaw claimed 200`。
-4. 推荐以 CLI 输出为准，不要即兴改烧法。顺序：已打开的当日清零 > 7 天内到期 > 长期 FIFO > 有上限 > 无过期（AutoClaw）。轻活不要动 MiniMax/WorkBuddy 囤积分。
+2. `checkin` 退出码：`0` 全部自动完成；`2` 有待手签；`1` 失败；`4` 已有另一条签到链路在跑
+   （`logs\checkin.lock` 被占用，等它结束再试）。把 CLI 原文给用户，待手签列出软件名。
+2b. `checkin` 在可见控制台先弹启动闸门：`Y`/`Enter` 立即开始，`N`/`Esc` 跳过今天的 UI 组，
+   15 秒无输入自动开始（`--gate-sec` / `--no-gate` 可调）。计划任务按无人值守处理、不弹提示
+   也不走旧的空闲闸门。用户按 N 时 `_daily_chain.ps1` 会跳过 Trae 明细同步与 Qoder 用量刷新。
+3. AutoClaw 是**每日签到 200**（UI 自动/可手签），不是月度登录。用户说「AutoClaw 签了」→ `record autoclaw claimed 200`。
+4. 推荐以 CLI 输出为准，不要即兴改烧法。顺序：已打开的当日清零 > 7 天内到期 > 长期 FIFO > 有上限 > 过期未知（AutoClaw）。轻活不要动 MiniMax/WorkBuddy 囤积分。
 5. DuMate / ToDesk 默认不领。`due` / `recommend` 只有余额低于上限阈值才提示。
 6. **账号安全优先于积分收益**（完整版见 `research/SAFETY.md`）：
    - **禁止**：解密加密存储的登录态（Trae `storage.json`、AutoClaw `auth.json` 的 safeStorage）、
@@ -70,6 +77,9 @@ python <REPO>\credit.py <命令>
    遇到这种情况返回 `pending` 并提示提权，不要误判成「找不到入口」。
 8b. Trae / TraeCode 走 `scripts/ui_claim_trae.ps1`（提权入口 `run_trae_claim.py`，
    支持 `--explore` 只抓布局 / `--dry-run` 只定位）。**前提：客户端必须已经打开**——
+   托盘里、**任务栏最小化**的也算：2026-10-29 起脚本会枚举隐藏主窗口并 `SW_RESTORE` 还原
+   （Qoder 同样；Qoder 的最小化分支是 2026-10-30 补的 `IsIconic` + `GetWindowPlacement`，
+   见 catalog 的 qodercn notes）。
    本环境冷启动这两个客户端必失败（进程起不来，与 MiniMax 的 updater 现象同源），
    脚本找不到窗口就返回 `notfound` 并提示手动打开。菜单文案由服务端下发，
    所以锚点是多候选（中文「签到 / 每日签到」+ 英文「Check in / Checked in」），
@@ -102,13 +112,49 @@ python <REPO>\credit.py <命令>
 4. 用户确认后 `record <id> claimed`（数量可省略，用 catalog 每日额度）
 5. 用户报了客户端总余额 → `set-balance <id> <数量>`，不要当成签到
 
-对账（WorkBuddy，2026-10-19 打通）：
+Trae 积分明细（余额+过期时间，2026-10-19 跑通并自动化）：
+
+1. **每日自动**：`agent-credit-checkin` 每日任务的 action = `scripts/_daily_chain.ps1`
+   （checkin → `trae_credit_sync.ps1` → `credit board`）。sync 聚焦 Agent 窗发 **Ctrl+Shift+N** 开 IDE 窗
+   （newIDEWindow 内置快捷键；失败重试 3 轮，锁屏会全失败），扩展 startup/focus dump →
+   `--record` 登记 → 关 IDE 窗，全程 ~25s。**只有新鲜 dump 才登记**（2026-10-20 实测：
+   旧 dump 会把 claim 后真实余额覆盖成旧值）。手动跑一次：
+   `scripts\_task_trae_credit_sync.ps1`；结果看 `logs/trae_credit_sync_result.json`。
+2. **SOLO/Agent 窗口不加载用户扩展**（bundle 实锤 `scanUserExtensions` 直接 skip），
+   dump 扩展只活在 IDE 窗口。手动入口：SOLO 右上角「IDE」按钮（⚠️ SOLO-lite 无命令面板）。
+   扩展只 executeCommand 客户端自己注册的只读 getter —— 不碰凭据、不解密、无注入。
+3. **过期时间口径**：结构化通道只给聚合 `expireTime`（最高优包到期日）——Free 单桶即
+   「每笔」；实锤 2026-10-31 23:59 月底到期（validity 升 confirmed）。多包账号的每包
+   明细只在「设置 → 用量管理」页渲染（`icubeOpenUsageDetails`），需要时走 OCR（未做）。
+   `getEntitlementInfo()` 返回 pay status（活动/身份），不含 pack list。
+4. `python scripts\trae_credit_detail.py` 解析打印；`--record` 经
+   **`credit.py sync --only trae`** 走标准对账通道登记（写账只走 CLI）。
+   ⚠️ 别再改回 `set-balance`：那条路写的是**无过期时间**的快照，「快过期先烧」对 Trae 就是瞎的。
+   新鲜度闸门在通道内（按 beijingDayKey），不是今天的 dump 直接拒绝登记、不动账本。
+
+对账（WorkBuddy 2026-10-19 / MonkeyCode 2026-10-20 / Trae 2026-10-20）：
 
 1. `checkin` 末尾对配了 `credits_command` / `status_command` 的账户自动跑对账——
    拉服务端真实余额重建账本条目（source=sync），不记签到、不动连签；`credit sync` 可手动跑。
 2. WorkBuddy 走 `credits_command`（逐条明细，每条带真实过期时间，`credit due` 临期视图直接受益）；
    `status_command`（一行 JSON 总量）是兜底契约。实测本地账本 3900 → 服务端真相 2717。
-3. 对账失败只记日志，**不改 checkin 退出码**；`AGENT_CREDIT_SKIP_SYNC=1` 可关。
+3. MonkeyCode 走 `credits_command`（一条总量、expires=null）。GET /users/wallet 的
+   `balance` 是毫积分，入账前 ÷1000（10-04 界面 195 vs API 195267）。没有逐条过期，
+   validity 维持 unknown。看板会把余额标成服务端真值、过期标成未知。
+4. Trae 走 `credits_command`（`python -m agent_credit.trae_credits --json`），
+   台账里从此有**真实到期日**（实测 2026-10-31 23:59）。
+5. 对账失败只记日志，**不改 checkin 退出码**；`AGENT_CREDIT_SKIP_SYNC=1` 可关。
+
+积分余额看板（2026-10-20 新增）：
+
+1. `credit board` 输出：账户总表（余额/笔数/最近过期/口径）、临期队列（7 天内）、
+   烧卡优先级、逐条明细、数据质量说明。落盘 `logs/board/board-日期.md` + `data/board.json`。
+2. **口径必须分开标**：「服务端真值」（sync 条目）vs「本地估算」（按 catalog 有效期算的
+   daily 条目）vs「过期未知」（AutoClaw 等服务端没下发有效期的）。别把估算说成真相。
+3. 烧卡层级与 `recommend` 共用 `agent_credit/priority.py` 一份口径：
+   当日清零 > 7 天内到期 > 长期 FIFO > 有上限 > 过期未知（最后动）。两处口径分家会打架。
+4. `checkin` 末尾自动刷一次看板；每日链路（`_daily_chain.ps1`）在 Trae 登记后再刷一次，
+   因为 Trae 的登记发生在 checkin 之后。
 
 选软件：
 

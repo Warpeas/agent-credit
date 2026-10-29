@@ -48,6 +48,9 @@ public static class Cap32 {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  // 2026-10-29：关到托盘时主窗口隐藏，需要按标题/类名把它找回来。
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
@@ -224,9 +227,59 @@ function Find-AutoClawWindow {
     return $script:BestHwnd
 }
 
+function Restore-HiddenAutoClawWindow {
+    # 2026-10-29：关到托盘时主窗口 WS_VISIBLE=off，Find-AutoClawWindow 只认可见
+    # 窗口，旧逻辑会白等 60 秒。枚举同进程的隐藏窗口，按「大 + 有标题 + 非黑窗」
+    # 选主窗口，SW_RESTORE 还原。
+    $script:HidHwnd = [IntPtr]::Zero
+    $script:HidArea = 0
+    $pidSet = @{}
+    Get-Process AutoClaw -ErrorAction SilentlyContinue | ForEach-Object { $pidSet[[uint32]$_.Id] = $true }
+    if ($pidSet.Count -eq 0) { return [IntPtr]::Zero }
+    $cb = [Cap32+EnumProc]{
+        param($h, $lp)
+        $owner = [uint32]0
+        [Cap32]::GetWindowThreadProcessId($h, [ref]$owner) | Out-Null
+        if ($pidSet.ContainsKey($owner)) {
+            if ([Cap32]::IsWindowVisible($h)) { return $true }
+            $r = New-Object Cap32+RECT
+            [Cap32]::GetWindowRect($h, [ref]$r) | Out-Null
+            $w = $r.Right - $r.Left
+            $hh = $r.Bottom - $r.Top
+            if ($w -le 500 -or $hh -le 400) { return $true }
+            $sb = New-Object System.Text.StringBuilder 256
+            [void][Cap32]::GetWindowTextW($h, $sb, 256)
+            if ([string]::IsNullOrWhiteSpace($sb.ToString())) { return $true }
+            $cn = New-Object System.Text.StringBuilder 256
+            [void][Cap32]::GetClassName($h, $cn, 256)
+            if ($cn.ToString() -eq 'Chrome_WidgetWin_0') { return $true }
+            if (($w * $hh) -gt $script:HidArea) {
+                $script:HidArea = $w * $hh
+                $script:HidHwnd = $h
+            }
+        }
+        return $true
+    }
+    [Cap32]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+    if ($script:HidHwnd -eq [IntPtr]::Zero) { return [IntPtr]::Zero }
+    Log ("main window hidden (tray?); restoring hwnd=" + $script:HidHwnd)
+    [void][Cap32]::ShowWindow($script:HidHwnd, 9)   # SW_RESTORE
+    Start-Sleep -Milliseconds 900
+    return $script:HidHwnd
+}
+
 $script:LaunchedByUs = $false
 $preexistingApp = @(Get-Process AutoClaw -ErrorAction SilentlyContinue)
 $hwnd = Find-AutoClawWindow
+if ($hwnd -eq [IntPtr]::Zero) {
+    # 2026-10-29：先试托盘还原；还原成功就直接用，不必再等 60 秒。
+    $restored = Restore-HiddenAutoClawWindow
+    if ($restored -ne [IntPtr]::Zero) {
+        Log ("after hidden-window restore, hwnd=" + $restored)
+        $hwnd = Find-AutoClawWindow
+        if ($hwnd -eq [IntPtr]::Zero) { $hwnd = $restored }
+    }
+}
 if ($hwnd -eq [IntPtr]::Zero) {
     # Self-heal: background survivors can never regain a window, so clear them
     # and start fresh -- but ONLY when the client was not already running for the
@@ -589,7 +642,7 @@ function Test-ClickVisible([int]$cx, [int]$cy) {
     return ($pidTop -eq $pidMain)
 }
 
-function BringBack-Click([int]$ax, [int]$ay) {
+function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1, [int]$IntervalMs = 180) {
     # 方案甲 M3（第三级）：窗口移回点击位 → 保存光标 → 真实点击 → 恢复光标
     # → 移回屏外。点击位默认原位，被遮挡则试 (0,0)，再不行放弃（pending 由
     # 后继判据裁定，不重试——SAFETY 第 3 条）。
@@ -597,8 +650,11 @@ function BringBack-Click([int]$ax, [int]$ay) {
     $placed = $false
     $cx = 0
     $cy = 0
+    # 2026-10-25：移回屏内时临时提为 TOPMOST（0x0011=NOSIZE|NOACTIVATE，不抢焦点），
+    # 否则主人前台窗口会盖住点击位，R3 把两个落点都判成「被遮挡」→ 真实点击根本没发出去
+    # （10-25 00:08 本机实测）。点完立刻降回。
     foreach ($s in $spots) {
-        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $s[0], $s[1], 0, 0, 0x0015) | Out-Null
+        [Cap32]::SetWindowPos($hwnd, [IntPtr](-1), $s[0], $s[1], 0, 0, 0x0011) | Out-Null
         Start-Sleep -Milliseconds 300
         $cx = $s[0] + $ax
         $cy = $s[1] + $ay
@@ -607,17 +663,32 @@ function BringBack-Click([int]$ax, [int]$ay) {
     }
     if (-not $placed) {
         Log "bringback: 两个点击位都被遮挡，跳过真实点击"
+        [Cap32]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x0013) | Out-Null
         Move-OffscreenNow
         return
     }
     $saved = [Cap32+POINT]::new()
     [Cap32]::GetCursorPos([ref]$saved) | Out-Null
+    # 2026-10-25：与 Trae/LobsterAI 同一坑——窗口未激活时 CEF/React 可能吞掉第一次
+    # 真实点击（只完成激活）。点击前显式抢前台，点完 Restore-Foreground 归还。
+    Save-Foreground
+    $fgOk = $false
+    try { $fgOk = [bool](Ensure-Foreground) } catch { }
+    $chk = New-Object Cap32+RECT
+    [Cap32]::GetWindowRect($hwnd, [ref]$chk) | Out-Null
+    Log ("bringback: ensure-foreground=" + $fgOk + " rect=" + $chk.Left + "," + $chk.Top + " click=" + $cx + "," + $cy)
+    Start-Sleep -Milliseconds 150
     try {
         [Cap32]::SetCursorPos($cx, $cy) | Out-Null
         Start-Sleep -Milliseconds 120
-        [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-        [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-        Log ("bringback: real click @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+        # 2026-10-25：首击常被 CEF/React 的焦点切换吞掉。调用方可要求短间隔连点
+        # （AutoClaw 签到按钮用 2 连击、180ms），全部点完再统一恢复光标/前台/屏外。
+        for ($ci = 1; $ci -le [Math]::Max(1, $Clicks); $ci++) {
+            [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+            [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            Log ("bringback: real click " + $ci + "/" + [Math]::Max(1, $Clicks) + " @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+            if ($ci -lt $Clicks) { Start-Sleep -Milliseconds $IntervalMs }
+        }
     } finally {
         # R4：任何异常路径都要恢复光标并重新停到屏外
         [Cap32]::SetCursorPos($saved.X, $saved.Y) | Out-Null
@@ -625,11 +696,14 @@ function BringBack-Click([int]$ax, [int]$ay) {
         [Cap32]::GetCursorPos([ref]$now) | Out-Null
         # A3 断言：点击前后 GetCursorPos 一致
         Log ("bringback: cursor restored " + $now.X + "," + $now.Y + " (expect " + $saved.X + "," + $saved.Y + ")")
+        # 摘掉 TOPMOST，否则窗口回屏内后会一直钉在最上层
+        [Cap32]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x0013) | Out-Null
+        Restore-Foreground
         Move-OffscreenNow
     }
 }
 
-function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth, [switch]$SkipUia) {
+function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth, [switch]$SkipUia, [int]$Clicks = 1, [int]$IntervalMs = 180) {
     $cr = New-Object Cap32+RECT
     [Cap32]::GetWindowRect($hwnd, [ref]$cr) | Out-Null
     $sx = $cr.Left + $ax
@@ -640,8 +714,11 @@ function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth, [switch]$SkipUia) {
     if (-not $Offscreen -and [Cap32]::GetForegroundWindow() -eq $hwnd) {
         [Cap32]::SetCursorPos($sx, $sy) | Out-Null
         Start-Sleep -Milliseconds 120
-        [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-        [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        for ($ci = 1; $ci -le [Math]::Max(1, $Clicks); $ci++) {
+            [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+            [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            if ($ci -lt $Clicks) { Start-Sleep -Milliseconds $IntervalMs }
+        }
         return
     }
 
@@ -668,7 +745,7 @@ function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth, [switch]$SkipUia) {
             $uiaOut = @(Invoke-AtPoint $ax $ay)
             if ($uiaOut -contains $true) { return }
         }
-        BringBack-Click $ax $ay
+        BringBack-Click $ax $ay $Clicks $IntervalMs
         return
     }
 
@@ -816,32 +893,60 @@ if ($DryRun) {
     Out-Json "dryrun" ("找到「每日签到」@ " + $anchor.x + "," + $anchor.y + "，将点击按钮 @ " + $btnX + "," + $btnY)
 }
 
-Click-At $btnX $btnY -SkipSynth -SkipUia
+$preStreak = 0
+foreach ($l in $lines) {
+    $m = [regex]::Match($l.text, '已签到\s*(\d+)\s*天')
+    if ($m.Success) { $preStreak = [int]$m.Groups[1].Value; break }
+}
+Log ("step: 点击前连签=" + $preStreak)
 
-# Multi-frame verification: the success toast may be brief, and a button that
-# disappears after the click is itself proof of success.
+# 2026-10-25：首击经常只完成 CEF/React 的焦点切换，onClick 不触发。改成
+# 「短间隔双击」：一轮里连点 2 下（180ms 间隔），没签上再换下一轮，最多 3 轮
+# （共 6 次点击）。已领取后按钮会禁用，重复点击是幂等的；每轮之间用 OCR 复核，
+# 一旦出现成功标记/已完成/连签+1/按钮连续两帧消失就立即收手。
 $okHit = $null
 $alreadyHit = $null
 $btnGone = $false
-foreach ($wait in @(1500, 2500, 3500)) {
-    Start-Sleep -Milliseconds $wait
-    $after = Get-OcrLinesSafe
-    if ($null -eq $after) { continue }
-    $anchor2 = Find-CheckinAnchor $after
-    if (-not $anchor2) { continue }
-    $btnStill = $false
-    foreach ($l in $after) {
-        if ($l.text -eq "签到" -and [Math]::Abs($l.y - ($anchor2.y + 95)) -lt 60 -and $l.x -lt ($anchor2.x + 400)) { $btnStill = $true; break }
+$maxRounds = 3
+$clicksPerRound = 2
+$clickIntervalMs = 180
+for ($round = 1; $round -le $maxRounds; $round++) {
+    Log ("step: 第 " + $round + "/" + $maxRounds + " 轮双击签到按钮（" + $clicksPerRound + " 击，间隔 " + $clickIntervalMs + "ms）")
+    Click-At $btnX $btnY -SkipSynth -SkipUia -Clicks $clicksPerRound -IntervalMs $clickIntervalMs
+    $btnGoneFrames = 0
+    foreach ($wait in @(1200, 1800)) {
+        Start-Sleep -Milliseconds $wait
+        $after = Get-OcrLinesSafe
+        if ($null -eq $after) { continue }
+        $anchor2 = Find-CheckinAnchor $after
+        if (-not $anchor2) { continue }
+        $btnStill = $false
+        foreach ($l in $after) {
+            if ($l.text -eq "签到" -and [Math]::Abs($l.y - ($anchor2.y + 95)) -lt 60 -and $l.x -lt ($anchor2.x + 400)) { $btnStill = $true; break }
+        }
+        # 单帧漏读很常见；按钮连续两帧都不在，才算「消失」
+        if ($btnStill) { $btnGoneFrames = 0 } else { $btnGoneFrames++ }
+        if ($btnGoneFrames -ge 2) { $btnGone = $true; break }
+        foreach ($l in $after) {
+            if (($l.text.Contains("签到成功") -or $l.text.Contains("领取成功")) -and [Math]::Abs($l.y - ($anchor2.y + 95)) -lt 200) { $okHit = $l; break }
+        }
+        if ($okHit) { break }
+        foreach ($l in $after) {
+            if ($l.text.Contains("已完成") -and [Math]::Abs($l.y - ($anchor2.y + 95)) -lt 60 -and $l.x -lt ($anchor2.x + 400)) { $alreadyHit = $l; break }
+        }
+        if ($alreadyHit) { break }
+        # 卡片上的连签天数也是硬证据：10-24 点击前 16 天、点击后 17 天。
+        foreach ($l in $after) {
+            $m2 = [regex]::Match($l.text, '已签到\s*(\d+)\s*天')
+            if ($m2.Success -and [int]$m2.Groups[1].Value -gt $preStreak) {
+                $alreadyHit = @{ text = ("已签到{0}天（点击前 {1} 天）" -f $m2.Groups[1].Value, $preStreak) }
+                break
+            }
+        }
+        if ($alreadyHit) { break }
     }
-    if (-not $btnStill) { $btnGone = $true }
-    foreach ($l in $after) {
-        if (($l.text.Contains("签到成功") -or $l.text.Contains("领取成功")) -and [Math]::Abs($l.y - ($anchor2.y + 95)) -lt 200) { $okHit = $l; break }
-    }
-    if ($okHit) { break }
-    foreach ($l in $after) {
-        if ($l.text.Contains("已完成") -and [Math]::Abs($l.y - ($anchor2.y + 95)) -lt 60 -and $l.x -lt ($anchor2.x + 400)) { $alreadyHit = $l; break }
-    }
-    if ($alreadyHit) { break }
+    if ($okHit -or $alreadyHit -or $btnGone) { break }
+    Start-Sleep -Milliseconds 500
 }
 Log "step: 复核点击结果"
 if ($okHit) { Out-Json "ok" ("签到成功: " + $okHit.text) }

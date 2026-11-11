@@ -493,7 +493,7 @@ accounts:
     vendor: 字节跳动
     unit: credit
     grant_type: daily_expire
-    daily_amount: 1500
+    daily_amount: 60
     validity_days: 0
     cap: null
     claim_policy: never_auto
@@ -501,15 +501,15 @@ accounts:
     command: ""
     capabilities: [multimodal, search, office, coding]
     open_when_needed: true
-    notes: "每日 1500 当日清零。用时再开。"
+    notes: "每日 60 新积分（=1500 旧积分，2026-11-05 起 25:1 单位换算）当日清零。用时再开。"
     models_note: "DeepSeek-V4-Pro / GLM-5.3 / Doubao-Seed-2.1-pro / Kimi K3 + Seedream 5.0/Seedance 2.5 多模态；扣子编程另有 MiniMax M2.5/GLM-5/Seed-2.0-Code【2026-10-22 官方文档：已扩为多模型货架 + AI 编程】"
     rating:
       value: 2
       capability: 4
       automation: 1
-      review: "1500/天当日清零。字节系多模型货架（DeepSeek-V4-Pro/GLM-5.3/豆包 2.1/Kimi K3）+ Seedream/Seedance 多模态生成 + 扣子编程，模型新鲜度是清零档里最高的。清零机制决定它只能当临时补充。"
+      review: "60 新积分/天（=1500 旧）当日清零。字节系多模型货架（DeepSeek-V4-Pro/GLM-5.3/豆包 2.1/Kimi K3）+ Seedream/Seedance 多模态生成 + 扣子编程，模型新鲜度是清零档里最高的。但实际操作中审批/确认步骤频繁，积分消耗快，清零机制又决定它只能当临时补充，不建议当日常主力。"
       best_for: "多模态/搜索类临时任务"
-      owner_note: ""
+      owner_note: "【2026-11-12 主人实测】总是需要审批，积分消耗很快，不太推荐使用。"
 
 
   - id: xiaohuanxiong

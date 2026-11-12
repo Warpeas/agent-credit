@@ -60,6 +60,8 @@ $shotPath = "$root\logs\_qoder_shot.png"
 function Log($m){ $s=(Get-Date -Format "HH:mm:ss")+" "+$m; try{[System.IO.File]::AppendAllText($logPath,$s+"`n",(New-Object System.Text.UTF8Encoding($false)))}catch{}; [Console]::Error.WriteLine($s) }
 trap {
     try { if ($script:OriginalRect) { Restore-OriginalRect } } catch {}
+    # 异常路径也要把前台还给原窗口：客户端由 Python 侧拉起/关闭，本脚本只负责现场。
+    try { Restore-Foreground } catch {}
     try { $m="FATAL: "+$_.Exception.Message+" @ "+$_.InvocationInfo.PositionMessage; Log $m
         if ($OutFile) { [System.IO.File]::WriteAllText($OutFile,(ConvertTo-Json -Compress @{status='failed';detail=$m})) } } catch {}
     break
@@ -603,6 +605,24 @@ function Move-OffscreenNow {
     $ok = [Q]::SetWindowPos($script:Hwnd,[IntPtr](-1),($vLeft - $w + $strip),$vTop,0,0,0x0011)
     if (-not $ok) { Log "offscreen: topmost strip move failed" }
 }
+function Test-RectClose($got,$want,[int]$tol = 4){
+    if (-not $got -or -not $want) { return $false }
+    return ([Math]::Abs($got.W - $want.W) -le $tol -and [Math]::Abs($got.H - $want.H) -le $tol)
+}
+function Set-RestorePlacement($h,$r,[int]$showCmd){
+    # Win32 推荐做法：把目标 rect 写进 WINDOWPLACEMENT 的 rcNormalPosition，再 SetWindowPlacement。
+    # 2026-11-13：SetWindowPos 在 Qoder 上可能只改得了位置、宽高被丢（实测还原成 12x2076 的细条），
+    # placement 是 Electron/Chromium 自己也认的状态通道，作为第二选择。
+    try {
+        $wp = New-Object Q+WP
+        $wp.length = [System.Runtime.InteropServices.Marshal]::SizeOf($wp)
+        if (-not [Q]::GetWindowPlacement($h,[ref]$wp)) { return $false }
+        $wp.showCmd = $showCmd
+        $wp.normal.L = [int]$r.X; $wp.normal.T = [int]$r.Y
+        $wp.normal.Rr = [int]($r.X + $r.W); $wp.normal.B = [int]($r.Y + $r.H)
+        return [Q]::SetWindowPlacement($h,[ref]$wp)
+    } catch { return $false }
+}
 function Restore-OriginalRect {
     # M4：恢复启动 rect / 最大化状态，防 Electron 把屏外位置持久化。
     if (-not $script:OriginalRect) { return }
@@ -612,14 +632,57 @@ function Restore-OriginalRect {
         [void][Q]::SetWindowPos($script:Hwnd,[IntPtr](-2),0,0,0,0,0x0013)  # HWND_NOTOPMOST
         if ($script:WasZoomed) {
             [void][Q]::ShowWindow($script:Hwnd,3)   # SW_MAXIMIZE
+            Start-Sleep -Milliseconds 400
+            if (-not [Q]::IsZoomed($script:Hwnd)) {
+                # 2026-11-13：窗口刚搬回来时 SW_MAXIMIZE 偶尔不落地（还带着条带态），补一次。
+                Log "restore-rect: SW_MAXIMIZE 没生效，改用 SetWindowPlacement"
+                [void](Set-RestorePlacement $script:Hwnd $script:OriginalRect 3)
+                Start-Sleep -Milliseconds 300
+            }
             Log "restore-rect: maximized (was zoomed)"
         } else {
             $r = $script:OriginalRect
-            [void][Q]::SetWindowPos($script:Hwnd,[IntPtr]::Zero,$r.X,$r.Y,0,0,0x0015)
+            # 2026-11-11：屏外流程可能把窗口放大到 3600x2090，还原时必须把宽高也传回去
+            # （0x0014 = NOZORDER|NOACTIVATE，允许改尺寸）。
+            # 2026-11-13：实测 SetWindowPos 只改得了位置、宽高被丢，窗口成 12px 细条
+            # （日志 now -12,0 12x2076 / expect -12,0 3600x2076）。改成四步递进、
+            # 每步读回校验，最后一定兜到「能用」的尺寸，绝不留细条。
+            if ([Q]::IsZoomed($script:Hwnd) -or [Q]::IsIconic($script:Hwnd)) {
+                [void][Q]::ShowWindow($script:Hwnd,9)   # SW_RESTORE
+                Start-Sleep -Milliseconds 400
+            }
+            [void][Q]::SetWindowPos($script:Hwnd,[IntPtr]::Zero,$r.X,$r.Y,$r.W,$r.H,0x0014)
             Start-Sleep -Milliseconds 250
-            $chk = New-Object Q+R
-            [void][Q]::GetWindowRect($script:Hwnd,[ref]$chk)
-            Log ("restore-rect: now " + $chk.L + "," + $chk.T + " (expect " + $r.X + "," + $r.Y + ")")
+            $chk = Read-Rect $script:Hwnd
+            if (-not (Test-RectClose $chk $r)) {
+                Log ("restore-rect: 首试没到位 (" + $chk.W + "x" + $chk.H + ")，改用 SetWindowPlacement")
+                [void](Set-RestorePlacement $script:Hwnd $r 1)
+                Start-Sleep -Milliseconds 350
+                $chk = Read-Rect $script:Hwnd
+            }
+            if (-not (Test-RectClose $chk $r)) {
+                # 倒数第二招：先在屏内把尺寸定下来，再挪到目标位置（顺序反过来绕开尺寸被忽略）。
+                Log ("restore-rect: 仍不到位 (" + $chk.W + "x" + $chk.H + ")，改「先定尺寸再挪位」")
+                [void][Q]::SetWindowPos($script:Hwnd,[IntPtr]::Zero,0,0,$r.W,$r.H,0x0014)
+                Start-Sleep -Milliseconds 250
+                [void][Q]::SetWindowPos($script:Hwnd,[IntPtr]::Zero,$r.X,$r.Y,0,0,0x0015)
+                Start-Sleep -Milliseconds 250
+                $chk = Read-Rect $script:Hwnd
+            }
+            if (-not (Test-RectClose $chk $r)) {
+                # 保底：夹进虚拟桌面并给一个合理尺寸。宁可位置偏 8px，也不留 12px 细条。
+                $vL=[Q]::GetSystemMetrics(76); $vT=[Q]::GetSystemMetrics(77)
+                $vW=[Q]::GetSystemMetrics(78); $vH=[Q]::GetSystemMetrics(79)
+                $w2=[Math]::Max(900,[Math]::Min($r.W,$vW-80))
+                $h2=[Math]::Max(600,[Math]::Min($r.H,$vH-80))
+                $x2=[Math]::Max($vL+8,[Math]::Min($r.X,$vL+$vW-$w2-8))
+                $y2=[Math]::Max($vT+8,[Math]::Min($r.Y,$vT+$vH-$h2-8))
+                Log ("restore-rect: 兜底夹进桌面 " + $x2 + "," + $y2 + " " + $w2 + "x" + $h2)
+                [void][Q]::SetWindowPos($script:Hwnd,[IntPtr]::Zero,$x2,$y2,$w2,$h2,0x0014)
+                Start-Sleep -Milliseconds 250
+                $chk = Read-Rect $script:Hwnd
+            }
+            Log ("restore-rect: now " + $chk.X + "," + $chk.Y + " " + $chk.W + "x" + $chk.H + " (expect " + $r.X + "," + $r.Y + " " + $r.W + "x" + $r.H + ")")
         }
         # 条带模式把窗口提到了普通窗口最上层；按启动前的前台窗口把 z-order 放回去，
         # 否则签到完 Qoder 会一直盖在主人正在用的窗口上面。启动前 Qoder 就是前台
@@ -653,6 +716,12 @@ function Restore-Foreground {
     # 主人回来打字会打进 Qoder。这里复用 Ensure-Foreground 的 Alt 解前台锁，
     # 并核对 GetForegroundWindow；失败至少留日志，不假装成功。
     if ($script:SavedForeground -eq [IntPtr]::Zero) { return }
+    # 用户已经切走并在操作时不要再抢回来（二次打断比不还原更烦）。
+    if ((Get-IdleSeconds) -lt 8) {
+        Log "restore-foreground: 用户正在操作，跳过抢回前台"
+        $script:SavedForeground = [IntPtr]::Zero
+        return
+    }
     $target = $script:SavedForeground
     $script:SavedForeground = [IntPtr]::Zero
     try {
@@ -820,10 +889,21 @@ function BringBack-Click([int]$ax,[int]$ay) {
     Save-Foreground
     # 2026-10-30：真实点击前先等主人停手（静默闸门），点完立刻把光标放回原处——
     # 旧顺序是「点完等 250ms 才还原」，期间鼠标一直停在点击位，主人会以为鼠标被抢。
-    [void](Wait-InputQuiet 320 20000)
+    # 2026-11-11：等到超时仍活跃就放弃，不再「按最小暴露继续」硬点。
+    if (-not (Wait-InputQuiet 320 20000)) {
+        Log "bringback: 用户持续操作，放弃本次真实点击"
+        Move-OffscreenNow
+        return $false
+    }
     $saved = New-Object Q+P
     [void][Q]::GetCursorPos([ref]$saved)
     $clicked = $false
+    # 等待期间点击位可能被新窗口盖住：点前再验一次，别点进别人的窗口。
+    if (-not (Test-ClickVisible $cx $cy)) {
+        Log "bringback: 等待期间点击位被遮挡，放弃本次真实点击"
+        Move-OffscreenNow
+        return $false
+    }
     try {
         $clicked = [bool][Q]::Click($cx,$cy)
         if (-not $clicked) {
@@ -855,17 +935,27 @@ function BringBack-Click([int]$ax,[int]$ay) {
 function Click-At([int]$ax,[int]$ay,[switch]$SkipSynth) {
     # 坐标一律是窗口位图内的相对坐标；屏幕坐标按窗口当前位置现算。
     if (-not $Offscreen) {
-        if (-not (Ensure-Foreground $script:Hwnd)) { return $false }
-        $cr = New-Object Q+R
-        [void][Q]::GetWindowRect($script:Hwnd,[ref]$cr)
-        $sx = $cr.L + $ax; $sy = $cr.T + $ay
-        [void](Wait-InputQuiet 320 20000)
-        $saved = New-Object Q+P
-        [void][Q]::GetCursorPos([ref]$saved)
-        $ok = [bool][Q]::Click($sx,$sy)
-        [void][Q]::SetCursorPos($saved.X,$saved.Y)
-        Log ("click screen($sx,$sy) ok=$ok cursor restored " + $saved.X + "," + $saved.Y)
-        return $ok
+        # 先等静默、再抢前台；抢完复核，避免按键/点击落到别的窗口。
+        # 2026-11-11：主人正在动鼠标时 Click 的光标复核会失败（按设计放弃注入），
+        # 旧逻辑一次失败就整轮 pending。改成守 15s 重试几次，抓一个真正的静默窗口。
+        $deadline = (Get-Date).AddSeconds(15)
+        while ($true) {
+            if (-not (Wait-InputQuiet 320 5000)) { Log "click: 用户持续操作，放弃"; return $false }
+            if (-not (Ensure-Foreground $script:Hwnd)) { return $false }
+            if ([Q]::GetForegroundWindow() -ne $script:Hwnd) { Log "click: 前台不是 Qoder，放弃"; return $false }
+            $cr = New-Object Q+R
+            [void][Q]::GetWindowRect($script:Hwnd,[ref]$cr)
+            $sx = $cr.L + $ax; $sy = $cr.T + $ay
+            $saved = New-Object Q+P
+            [void][Q]::GetCursorPos([ref]$saved)
+            $setRet = [Q]::SetCursorPos($sx, $sy)
+            $ok = [bool][Q]::Click($sx,$sy)
+            [void][Q]::SetCursorPos($saved.X, $saved.Y)
+            Log ("click screen($sx,$sy) ok=$ok setRet=$setRet cursor restored " + $saved.X + "," + $saved.Y)
+            if ($ok) { return $true }
+            if ((Get-Date) -ge $deadline) { Log "click: 光标复核连续失败，放弃（主人仍在动鼠标）"; return $false }
+            Start-Sleep -Milliseconds 200
+        }
     }
     if (-not $SkipSynth) {
         $ok = Send-SynthMouse $ax $ay
@@ -890,6 +980,39 @@ function Grab-Frame($t){
     $script:bmp = Capture-Win $t
     $script:words = OcrWords $script:bmp $t.X $t.Y
     $script:text = Join-Text $script:words
+}
+
+# ---- 证据留存（2026-10-31）---------------------------------------------
+# 领取判定全来自像素 + OCR，出错时只有时间线日志、无法复原当时的画面。每次「领取」
+# 模式都把关键帧与 OCR 词表落到 logs\qodercn_claims\<时间戳>\，并记录命中的判定词，
+# 供事后复核。-Usage/-Explore/-DryRun 不落，避免噪音。
+$script:evidenceDir = $null
+function First-Marker([string]$text,[string[]]$words){
+    foreach($w in $words){ if (Test-Contains $text @($w)) { return $w } }
+    return ''
+}
+function Save-Evidence([string]$phase){
+    if ($Usage -or $Explore -or $DryRun) { return }
+    try {
+        if (-not $script:evidenceDir) {
+            $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $script:evidenceDir = Join-Path $root ("logs\qodercn_claims\" + $stamp)
+            New-Item -ItemType Directory -Force -Path $script:evidenceDir | Out-Null
+            # 只留最近 14 天，帧图每张 1–3MB，避免无限增长
+            try {
+                Get-ChildItem (Join-Path $root "logs\qodercn_claims") -Directory |
+                    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-14) } |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            } catch { }
+        }
+        $png = Join-Path $script:evidenceDir ($phase + ".png")
+        $txt = Join-Path $script:evidenceDir ($phase + ".txt")
+        if ($script:bmp) { $script:bmp.Save($png, [System.Drawing.Imaging.ImageFormat]::Png) }
+        $lines = @()
+        foreach($w in $script:words){ $lines += ("{0}`tscreen={1},{2}`timg={3},{4}" -f $w.text,$w.sx,$w.sy,$w.ix,$w.iy) }
+        [System.IO.File]::WriteAllLines($txt, $lines, (New-Object System.Text.UTF8Encoding($false)))
+        Log ("evidence: $phase -> " + $png)
+    } catch { Log ("evidence failed ($phase): " + $_.Exception.Message) }
 }
 
 # 2026-10-14：冷启动主窗口渲染慢（实测进程起来后还要数秒），轮询等 90s；
@@ -932,12 +1055,31 @@ $vW = [Q]::GetSystemMetrics(78); $vH = [Q]::GetSystemMetrics(79)
 # 「只剩条带」也算残留：上次被强杀时窗口可能就停在 vLeft - w + 48 且 topmost；
 # 若不处理，下次会把条带位置当 OriginalRect，永远恢复不回来。
 $residualStrip = ($t.X + $t.W) -le ($vLeft + $OffscreenStripPx + 16)
-if ($residualStrip -or $t.X -ge ($vLeft + $vW) -or
+# 2026-11-13：还原失败会留下 12px 宽的细条（见 Restore-OriginalRect 的注释）。
+# 这种 rect 不算「完全在屏外」，上面那些条件都命中不了，下次仍会拿它当 OriginalRect →
+# 永远修不回来。所以「明显过小」也按残留态处理，并按 placement 的正常 rect 恢复尺寸。
+$tooSmall = ($t.W -lt 600 -or $t.H -lt 400)
+if ($residualStrip -or $tooSmall -or $t.X -ge ($vLeft + $vW) -or
     ($t.Y + $t.H) -le $vTop -or $t.Y -ge ($vTop + $vH)) {
     Log ("residual offscreen/strip rect $($t.X),$($t.Y) $($t.W)x$($t.H); move back on-screen")
     [void][Q]::SetWindowPos($hwnd,[IntPtr](-2),0,0,0,0,0x0013)  # HWND_NOTOPMOST
-    [void][Q]::SetWindowPos($hwnd,[IntPtr]::Zero,[Math]::Max(0,$vLeft),[Math]::Max(0,$vTop),0,0,0x0015)
-    Start-Sleep -Milliseconds 300
+    if ($tooSmall) {
+        # 细条态：位置能挪、尺寸挪不动（同 Restore-OriginalRect 的实测），
+        # 用 placement 里记着的正常 rect 一次性把位置和尺寸都写回去。
+        $pl = Get-Placement $hwnd
+        $fix = $null
+        if ($pl -and $pl.W -ge 600 -and $pl.H -ge 400) { $fix = $pl }
+        if ($fix) {
+            Log ("window too small; restore by placement " + $fix.X + "," + $fix.Y + " " + $fix.W + "x" + $fix.H)
+            [void](Set-RestorePlacement $hwnd $fix 1)
+        } else {
+            Log "window too small; restore by default 1200x800"
+            [void][Q]::SetWindowPos($hwnd,[IntPtr]::Zero,[Math]::Max(0,$vLeft),[Math]::Max(0,$vTop),1200,800,0x0014)
+        }
+    } else {
+        [void][Q]::SetWindowPos($hwnd,[IntPtr]::Zero,[Math]::Max(0,$vLeft),[Math]::Max(0,$vTop),0,0,0x0015)
+    }
+    Start-Sleep -Milliseconds 400
     $t = Read-Rect $hwnd
     $hwnd = $t.Hwnd
 }
@@ -1048,14 +1190,21 @@ if ($Usage) {
 
 $granted = Get-Granted $script:text
 $popupNow = Test-CampaignPopup $script:text
-# 幂等：只有在活动弹窗确实可见时，「已领取/不可领取」才算数（聊天面板常年出现这些词）
-if ($popupNow -and (Test-Claimed $script:text)) {
-    Out-Json "already" "活动弹窗显示已领取/不可领取，今日无需重复领取"
-}
-
-# 情况一：启动自动弹窗已在 -> 直接找黑药丸「领取」
+Save-Evidence "00-initial"
+# 2026-10-31 顺序修正：先找黑药丸，再谈「已领取」。
+# 2026-11-04 再收口：初始帧**不允许**只凭 OCR 文本判「已领取」。
+# 实况：11-04 00:21 聊天面板里正好躺着「每天领 100 Credits」和「已领取」两段旧文字
+# （logs/qodercn_claims/20261104-002111/00-initial.txt：领@872,226 / 已领@904,512），
+# popup 与 claimed 两个文本判据同时为真、黑药丸扫不到 -> 整轮一次没点却回 already，
+# 台账白记 100。「弹窗到底在不在」必须由情况二自己点开弹窗来证实，
+# 那里的 already 才是因果可验证的。
 $claim = $null
 if ($popupNow) { $claim = Find-BlackPill $script:bmp $t }
+if (-not $claim -and $popupNow -and (Test-Claimed $script:text)) {
+    $mk = First-Marker $script:text @('已领取','领取成功','已到账','今日已领','不可领取')
+    Log ("already-skip(initial): 文本命中「$mk」但弹窗未经证实，改走情况二点开权益中心再判")
+    Save-Evidence "01-textonly-initial"
+}
 
 # 情况二：弹窗不在 -> 用户名 -> 权益中心 -> 弹窗（2026-10-16 改版后的新路径）
 if (-not $claim) {
@@ -1117,9 +1266,16 @@ if (-not $claim) {
         Start-Sleep -Milliseconds 1500; Grab-Frame $t; $popupNow = Test-CampaignPopup $script:text
     }
     if (-not $popupNow) { Out-Json "pending" "点了「权益中心」但没出现活动弹窗（弹窗可能再次改版或被其他浮层挡住）" }
-    if (Test-Claimed $script:text) { Out-Json "already" "活动弹窗显示已领取，今日无需重复领取" }
+    Save-Evidence "02-popup"
+    # 同上：先扫黑药丸，再按「已领取」收场（顺序换过来是 2026-10-31 误判的根因）
     $granted = Get-Granted $script:text
     $claim = Find-BlackPill $script:bmp $t
+    if (-not $claim -and (Test-Claimed $script:text)) {
+        $mk = First-Marker $script:text @('已领取','领取成功','已到账','今日已领','不可领取')
+        Log ("already-decision(popup): marker='" + $mk + "'")
+        Save-Evidence "02-already-popup"
+        Out-Json "already" "活动弹窗显示已领取（命中「$mk」），今日无需重复领取"
+    }
 }
 
 if (-not $claim) {
@@ -1130,17 +1286,23 @@ if ($DryRun) { Out-Json "dryrun" ("已定位「领取」，未点击") }
 
 if (-not $Offscreen -and -not (Ensure-Foreground $hwnd)) { Out-Json "pending" "点击「领取」前无法确认前台，已放弃点击" }
 # 领取按钮实测不吃合成鼠标消息（webview），屏外模式直接跳 BringBack 真实点击。
+$claimedBefore = Test-Claimed $script:text
+Save-Evidence "03-before-click"
 [void](Click-At $claim.ix $claim.iy -SkipSynth)
 Start-Sleep -Milliseconds 2200
 Grab-Frame $t
-if ((Test-Claimed $script:text)) {
-    $msg = "领取成功"; if ($granted -gt 0) { $msg += " [granted] $granted" }
-    Out-Json "ok" $msg
-}
-# 复核兜底：领取后黑药丸变灰「已领取」，黑块检测应消失
+Save-Evidence "04-after-click"
+# 复核：以「黑药丸消失」为主信号。文案变化只在点击前没有已领词时才算数——
+# 否则聊天面板里的旧词会让每次点击都“成功”（2026-10-31 实锤 granted 可能空转）。
 $still = Find-BlackPill $script:bmp $t
 if (-not $still) {
     $msg = "领取成功（黑药丸已消失）"; if ($granted -gt 0) { $msg += " [granted] $granted" }
+    Out-Json "ok" $msg
+}
+if (-not $claimedBefore -and (Test-Claimed $script:text)) {
+    $mk = First-Marker $script:text @('已领取','领取成功','已到账','今日已领','不可领取')
+    Log ("post-click: 文案由未领变为 '" + $mk + "'")
+    $msg = "领取成功（点击后文案显示「$mk」）"; if ($granted -gt 0) { $msg += " [granted] $granted" }
     Out-Json "ok" $msg
 }
 Out-Json "pending" "点击了「领取」但复核未见成功信号（可能需二次确认或文案改版），请手动确认"

@@ -95,11 +95,24 @@ ORIG_RECT = None
 # SW_RESTORE，用正常态 rect 做后续换算；收尾时再按需恢复最大化。
 PARK_RECT = None
 WAS_MAXIMIZED = False
+# 本次由脚本拉起的 PID 集合：收尾只关这些，用户自己开的实例一律不动。
+LAUNCHED_PIDS: set[int] = set()
 
 
 class RECT(ctypes.Structure):
     _fields_ = [("left", wt.LONG), ("top", wt.LONG),
                 ("right", wt.LONG), ("bottom", wt.LONG)]
+
+
+class WPOINT(ctypes.Structure):
+    _fields_ = [("x", wt.LONG), ("y", wt.LONG)]
+
+
+class WINDOWPLACEMENT(ctypes.Structure):
+    """GetWindowPlacement 用：rcNormalPosition 是 Electron/Tauri 自己也认的「正常态」rect。"""
+    _fields_ = [("length", wt.UINT), ("flags", wt.UINT), ("showCmd", wt.UINT),
+                ("ptMinPosition", WPOINT), ("ptMaxPosition", WPOINT),
+                ("rcNormalPosition", RECT)]
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -124,6 +137,13 @@ user32.SetWindowPos.restype = wt.BOOL
 user32.GetLastInputInfo.argtypes = [ctypes.POINTER(LASTINPUTINFO)]
 user32.GetLastInputInfo.restype = wt.BOOL
 kernel32.GetTickCount.restype = wt.DWORD
+user32.GetWindowPlacement.argtypes = [wt.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+user32.GetWindowPlacement.restype = wt.BOOL
+user32.SetWindowPlacement.argtypes = [wt.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+user32.SetWindowPlacement.restype = wt.BOOL
+user32.IsZoomed.argtypes = [wt.HWND]
+user32.IsIconic.argtypes = [wt.HWND]
+SW_SHOWNORMAL = 1
 
 
 def log(m: str) -> None:
@@ -163,18 +183,20 @@ def proc_pids(name: str) -> list[int]:
     return out
 
 
-def close_client(timeout: float = 8.0) -> int:
+def close_client(timeout: float = 8.0, only: set[int] | None = None) -> int:
     """关闭 MonkeyCode 客户端，返回关掉的进程数。
 
     顺序：先 WM_CLOSE 让主窗口走正常退出（能存配置、不留脏状态），
     超时才对剩余进程 TerminateProcess。
-    不用 taskkill /IM —— 那个会无差别杀掉所有同名进程，
-    而我们要精确只清理由本脚本拉起的那一批。
+    `only` 给出时只处理这些 PID（本次脚本拉起的实例），
+    否则会把用户中途自己打开的同名客户端一起关掉。
     """
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
     pids = set(proc_pids(PROC))
+    if only is not None:
+        pids &= only
     if not pids:
         return 0
 
@@ -194,10 +216,10 @@ def close_client(timeout: float = 8.0) -> int:
     t0 = time.time()
     killed = 0
     while time.time() - t0 < timeout:
-        if not proc_pids(PROC):
+        if not (set(proc_pids(PROC)) & pids):
             return len(pids)
         time.sleep(0.5)
-    for pid in proc_pids(PROC):                  # 还剩的强杀
+    for pid in (set(proc_pids(PROC)) & pids):     # 还剩的强杀
         h = kernel32.OpenProcess(0x0001 | 0x0400, False, pid)  # SYNCHRONIZE|TERMINATE
         if h:
             kernel32.TerminateProcess(h, 0)
@@ -309,6 +331,10 @@ def ensure_foreground(hwnd: int) -> bool:
 
 def restore_foreground(prev_foreground: int) -> None:
     """把前台还给运行前的窗口，别让用户对着一个死掉的客户端。"""
+    # 用户已经切走并在操作时不要再抢回来（二次打断比不还原更烦）。
+    if user_idle_seconds() < 8:
+        log("restore-foreground: 用户正在操作，跳过抢回前台")
+        return
     fg = int(prev_foreground or user32.GetForegroundWindow() or 0)
     if fg and fg != CURRENT_HWND and user32.IsWindow(fg):
         try:
@@ -374,18 +400,26 @@ def real_click_at(x: int, y: int) -> bool:
     hover 的 120ms 里主人把鼠标挪走时，直接按下去会点到他当前所在的位置
     （可能点进别的窗口），所以按下前必须再核对一次；两次都不中就放弃。
     """
-    wait_input_quiet()
+    if not wait_input_quiet():
+        log("click: 用户持续操作，放弃本次真实点击")
+        return False
     saved = _POINT()
     user32.GetCursorPos(ctypes.byref(saved))
     try:
         for attempt in (1, 2):
             if attempt == 2:
-                wait_input_quiet()
+                if not wait_input_quiet():
+                    log("click: 用户持续操作，放弃重试")
+                    return False
             user32.SetCursorPos(int(x), int(y))
             time.sleep(0.12)
             if not cursor_at(x, y):
                 log(f"click: 光标被挪走（attempt {attempt}），不盲点")
                 continue
+            # 等待期间点击位可能被新窗口盖住：按下去之前再核一次归属。
+            if CURRENT_HWND and not client_owns_point(CURRENT_HWND, x, y):
+                log(f"click: 点击位已被别的窗口占据（attempt {attempt}），放弃")
+                return False
             user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
             return True
@@ -420,14 +454,96 @@ def wait_for_user_idle(timeout: int, threshold: int) -> bool:
     return False
 
 
+def _rect_close(r, w: int, h: int, tol: int = 4) -> bool:
+    if not r:
+        return False
+    return abs((r.right - r.left) - w) <= tol and abs((r.bottom - r.top) - h) <= tol
+
+
+def _restore_placement(hwnd: int, rect: RECT) -> bool:
+    """把目标 rect 写进 WINDOWPLACEMENT.rcNormalPosition 再 SetWindowPlacement。"""
+    wp = WINDOWPLACEMENT()
+    wp.length = ctypes.sizeof(WINDOWPLACEMENT)
+    if not user32.GetWindowPlacement(wt.HWND(hwnd), ctypes.byref(wp)):
+        return False
+    wp.showCmd = SW_SHOWNORMAL
+    wp.rcNormalPosition = rect
+    return bool(user32.SetWindowPlacement(wt.HWND(hwnd), ctypes.byref(wp)))
+
+
 def restore_rect(hwnd: int, rect: RECT) -> None:
+    """还原窗口位置 + 尺寸，并读回校验。
+
+    2026-11-13（与 Qoder 同款坑）：SetWindowPos 在 Electron/Tauri 窗口上可能只挪位置、
+    宽高被丢掉，窗口留下一条细缝；下一轮又把细缝当成 ORIG_RECT，永远修不回来。
+    这里四步递进、每步校验，最后兜底夹进屏幕给一个能用的尺寸。
+    """
     w = rect.right - rect.left
     h = rect.bottom - rect.top
     if w <= 0 or h <= 0:
         return
-    user32.SetWindowPos(wt.HWND(hwnd), None, rect.left, rect.top, w, h,
+    hp = wt.HWND(hwnd)
+    if user32.IsZoomed(hp) or user32.IsIconic(hp):
+        user32.ShowWindow(hp, SW_RESTORE)
+        time.sleep(0.4)
+    user32.SetWindowPos(hp, None, rect.left, rect.top, w, h,
                         SWP_NOZORDER | SWP_NOACTIVATE)
     time.sleep(0.3)
+    cur = win_rect(hwnd)
+    if _rect_close(cur, w, h):
+        log(f"restore-rect: now {cur.left},{cur.top} {cur.right-cur.left}x{cur.bottom-cur.top}")
+        return
+    got = "?" if not cur else f"{cur.right-cur.left}x{cur.bottom-cur.top}"
+    log(f"restore-rect: 首试没到位 ({got})，改用 SetWindowPlacement")
+    _restore_placement(hwnd, rect)
+    time.sleep(0.35)
+    cur = win_rect(hwnd)
+    if _rect_close(cur, w, h):
+        log(f"restore-rect: placement ok {cur.left},{cur.top} {cur.right-cur.left}x{cur.bottom-cur.top}")
+        return
+    log("restore-rect: 仍不到位，改「先定尺寸再挪位」")
+    user32.SetWindowPos(hp, None, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+    time.sleep(0.25)
+    user32.SetWindowPos(hp, None, rect.left, rect.top, 0, 0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+    time.sleep(0.25)
+    cur = win_rect(hwnd)
+    if _rect_close(cur, w, h):
+        log(f"restore-rect: two-step ok {cur.left},{cur.top} {cur.right-cur.left}x{cur.bottom-cur.top}")
+        return
+    sw, sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    w2 = max(900, min(w, sw - 160))
+    h2 = max(600, min(h, sh - 160))
+    x2 = max(8, min(rect.left, sw - w2 - 8))
+    y2 = max(8, min(rect.top, sh - h2 - 8))
+    log(f"restore-rect: 兜底夹进屏幕 {x2},{y2} {w2}x{h2}")
+    user32.SetWindowPos(hp, None, x2, y2, w2, h2, SWP_NOZORDER | SWP_NOACTIVATE)
+    time.sleep(0.3)
+    cur = win_rect(hwnd)
+    log(f"restore-rect: now {cur.left},{cur.top} {cur.right-cur.left}x{cur.bottom-cur.top} "
+        f"(expect {rect.left},{rect.top} {w}x{h})")
+
+
+def sane_rect(hwnd: int, r):
+    """把「细缝 rect」修成 placement 里记着的正常 rect。
+
+    2026-11-13：上一轮异常退出可能把窗口留在 12px 宽的细缝上。直接把它当
+    ORIG_RECT/PARK_RECT，就等于忠实还原一条缝，永远修不回来。
+    """
+    if not r:
+        return r
+    w, h = r.right - r.left, r.bottom - r.top
+    if w >= 600 and h >= 400:
+        return r
+    wp = WINDOWPLACEMENT()
+    wp.length = ctypes.sizeof(WINDOWPLACEMENT)
+    if user32.GetWindowPlacement(wt.HWND(hwnd), ctypes.byref(wp)):
+        n = wp.rcNormalPosition
+        if (n.right - n.left) >= 600 and (n.bottom - n.top) >= 400:
+            log(f"orig-rect: 细缝 {w}x{h}，改用 placement 正常态 "
+                f"{n.right-n.left}x{n.bottom-n.top}")
+            return n
+    return r
 
 
 def park_offscreen(hwnd: int, record: bool = False) -> None:
@@ -449,7 +565,7 @@ def park_offscreen(hwnd: int, record: bool = False) -> None:
     # 只有第一次（窗口还在屏内）记录正常态 rect；后续重复 park 时窗口已在屏外，
     # 记下来会把 PARK_RECT 写成屏外坐标，bringback 又被钳回屏幕边缘。
     if record:
-        PARK_RECT = r
+        PARK_RECT = sane_rect(hwnd, r)
     w, h = r.right - r.left, r.bottom - r.top
     if w <= 0 or h <= 0:
         return
@@ -553,7 +669,10 @@ def _cleanup(launched_by_us: bool, prev_foreground: int) -> None:
     这个逻辑对齐 ui_claim_autoclaw.ps1 的 $script:LaunchedByUs
     与 ui_claim_trae.ps1 的 taskkill 收尾。
     """
-    if not launched_by_us and CURRENT_HWND and ORIG_RECT:
+    # 2026-11-13：不管是不是我们拉起的，关窗前都要先还原 rect / 最大化态——
+    # Tauri/Electron 会把窗口位置写进自己的状态文件，带着屏外条带关掉，下次冷启动
+    # 就在屏外开窗（「防 Electron 持久化屏外位置」就是这条）。
+    if CURRENT_HWND and ORIG_RECT:
         try:
             restore_rect(CURRENT_HWND, ORIG_RECT)
             # 停放前若窗口是最大化，收尾恢复最大化状态，别把主人的窗口留成还原态
@@ -562,10 +681,10 @@ def _cleanup(launched_by_us: bool, prev_foreground: int) -> None:
                 time.sleep(0.2)
             log("cleanup: restored original window rect"
                 + (" (maximized)" if WAS_MAXIMIZED else ""))
-        except OSError:
-            pass
+        except OSError as exc:
+            log(f"cleanup: restore window rect failed: {exc}")
     if launched_by_us:
-        n = close_client()
+        n = close_client(only=LAUNCHED_PIDS)
         log(f"cleanup: closed {n} client process(es) we launched")
     else:
         log("cleanup: skipped (client was already running before us)")
@@ -1153,12 +1272,13 @@ def main() -> int:
             time.sleep(2)
             pids = set(proc_pids(PROC))
             if pids:
+                LAUNCHED_PIDS.update(pids)
                 log(f"pid appeared after {time.time()-t0:.0f}s")
                 break
     early_hwnd = find_main(pids)
     if early_hwnd and offscreen:
         CURRENT_HWND = early_hwnd
-        ORIG_RECT = win_rect(early_hwnd)
+        ORIG_RECT = sane_rect(early_hwnd, win_rect(early_hwnd))
         ensure_visible(early_hwnd)
         park_offscreen(early_hwnd, record=True)
         log("offscreen: parked before settle")
@@ -1186,7 +1306,7 @@ def main() -> int:
                 except OSError:
                     pass
             CURRENT_HWND = hwnd
-            ORIG_RECT = win_rect(hwnd)
+            ORIG_RECT = sane_rect(hwnd, win_rect(hwnd))
         ensure_visible(hwnd)
         park_offscreen(hwnd, record=(PARK_RECT is None))
 

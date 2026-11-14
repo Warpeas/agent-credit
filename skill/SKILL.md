@@ -43,7 +43,7 @@ python <REPO>\credit.py <命令>
 > 那里有完整的禁止清单、允许路线优先级、探测预算和收手判据。
 > 本节的规则 6 是它的摘要，冲突时以 `research/SAFETY.md` 为准。
 
-1. **不要启动** Mavis、MonkeyCode Token、Loomy、Coze、小浣熊、千问、Accio、阶跃等登录即领且当日过期的客户端。`open` / `checkin --open` 也不得打开它们。推荐里最多说「你要干这个的话先打开 xxx」。
+1. **不要启动** Mavis、Loomy、Coze、小浣熊、千问、Accio、阶跃等登录即领且当日过期的客户端。`open` / `checkin --open` 也不得打开它们。推荐里最多说「你要干这个的话先打开 xxx」。
 2. `checkin` 退出码：`0` 全部自动完成；`2` 有待手签；`1` 失败；`4` 已有另一条签到链路在跑
    （`logs\checkin.lock` 被占用，等它结束再试）。把 CLI 原文给用户，待手签列出软件名。
 2b. `checkin` 在可见控制台先弹启动闸门：`Y`/`Enter` 立即开始，`N`/`Esc` 跳过今天的 UI 组，

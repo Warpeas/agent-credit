@@ -3,7 +3,9 @@
 | 项 | 值 |
 |---|---|
 | 账户 id | `monkeycode_credit` |
-| 状态 | **已填（2026-10-20 复核）** |
+| 状态 | **已填（2026-11-14 更新）** |
+
+目前 MonkeyCode 只有每日签到 +100 积分，不再发放其他额度或 Token。
 
 ```yaml
 account_id: monkeycode_credit
@@ -38,7 +40,7 @@ automation:
   reliability: 已实测
 
 evidence:
-  - "2026-10-20 只读 GET /api/v1/users/wallet HTTP 200：字段仅 id / balance / daily_token_balance / daily_token_limit，无 expire、grants、records"
+  - "2026-10-20 只读 GET /api/v1/users/wallet HTTP 200：余额无逐条 grant/过期字段"
   - "2026-10-20 只读 GET /api/v1/users/wallet/checkin HTTP 200：{checked_in: true}"
   - "2026-10-20 只读 GET /api/v1/users/subscription HTTP 200：会员 plan=basic，不是积分包"
   - "2026-10-20 复扫 monkeycode-desktop.exe：积分相关路径仍只有 /api/v1/users/wallet 与 /api/v1/users/wallet/checkin"
@@ -61,7 +63,6 @@ catalog_patch:
 
 - 积分**总量**（界面积分）
 - 今日是否已签
-- 当日 token 额度（属 `monkeycode_token`，不入积分账本）
 
 拿不到的：
 

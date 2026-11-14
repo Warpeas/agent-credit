@@ -119,13 +119,9 @@ def parse_wallet(payload: dict[str, Any]) -> dict[str, Any]:
         raise CreditQueryError("wallet 响应缺少 balance")
     raw = data["balance"]
     credits = display_credits(raw)
-    token_bal = data.get("daily_token_balance")
-    token_lim = data.get("daily_token_limit")
     return {
         "balance": credits,
         "balance_raw": int(raw),
-        "daily_token_balance": token_bal if isinstance(token_bal, (int, float)) else None,
-        "daily_token_limit": token_lim if isinstance(token_lim, (int, float)) else None,
     }
 
 
@@ -149,8 +145,6 @@ def fetch_credits(cookie_header: str | None = None) -> dict[str, Any]:
         "balance_raw": wallet["balance_raw"],
         "scale": SCALE,
         "claimed_today": claimed,
-        "daily_token_balance": wallet["daily_token_balance"],
-        "daily_token_limit": wallet["daily_token_limit"],
         "grants": None,
         "expires": None,
         "note": "官方接口无逐条 grant/过期时间；balance 已按毫积分÷1000 换成界面积分",
@@ -179,17 +173,11 @@ def format_text(result: dict[str, Any]) -> str:
         claimed_s = "否"
     else:
         claimed_s = "未知"
-    token_bal = result.get("daily_token_balance")
-    token_lim = result.get("daily_token_limit")
-    token_s = "-"
-    if isinstance(token_bal, (int, float)) and isinstance(token_lim, (int, float)):
-        token_s = f"{int(token_bal)} / {int(token_lim)}"
     lines = [
         f"MonkeyCode 积分（{result.get('queried_at') or '-'}）",
         f"总剩余: {result['balance']} credits"
         f"（raw {result['balance_raw']} ÷ {result['scale']}）",
         f"今日已签: {claimed_s}",
-        f"当日 token: {token_s}（属 monkeycode_token，不入积分账本）",
         "过期时间: 无（服务端未下发逐条 grant / expire 字段）",
         "明细: 无。二进制只有 /users/wallet 与 /users/wallet/checkin。",
     ]

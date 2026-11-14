@@ -94,7 +94,6 @@ research/prompts/UNIVERSAL.md
 
 1. `dumate` / `todesk` — 卡在领取上限（cap）没测出来
 2. `kimi` / `joycode` / `qclaw` — 月度或一次性，优先级最低
-3. `monkeycode_token` — 10M/天当日清零，用时再开，不用每日签
 
 各家的坑（黑窗、坐标换算、验证码）记在 `catalog.yaml` 对应账户的 `notes` 里，
 排查过程记在 `research/tools/`。

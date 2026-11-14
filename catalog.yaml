@@ -34,7 +34,7 @@ validity_audit_2026_10_04:
   monkeycode_credit:
     days: null
     confidence: unknown
-    evidence: "【2026-10-20 复扫仍 unknown】GET /users/wallet 仍只返回 id/balance/daily_token_*，无 expire/grants；exe 51MB 复扫仍只有 /users/wallet 与 /users/wallet/checkin；GET /users/subscription 只返回会员 plan=basic。总量可对账（毫积分÷1000），逐条过期仍无从查证。【2026-10-04 两轮核查后仍为 unknown，但已排除更多可能】① 接口层：GET /api/v1/users/wallet 只返回{id, balance, daily_token_balance, daily_token_limit}，**无任何有效期字段**；二进制（monkeycode-desktop.exe，Go 编译）里与积分相关的 API 路径只有/api/v1/users/wallet 和 /api/v1/users/wallet/checkin 两个，另探 records / transactions / detail / points 四个候选明细端点全 404；exe 里 validity 仅 3 处命中且全为无关（Go 运行时 / 证书吊销 / 打包的垃圾数据）。② UI 层：2026-10-04 实测走过「设置 → 账号」，页面只有三栏（今日额度 / 积分 / 已邀请），**没有积分明细或有效期入口**，「签到 +100」也没有附带任何期限说明。结论：这个字段既不在接口返回里，界面上也不展示，本地无从查证。维持 unknown 的理由不是「没找接口」，而是「客户端与 API 两侧都确认没有」。⚠️ 不要为此解密登录态去调captcha 链路（见 research/SAFETY.md 规则 1）。"
+    evidence: "【2026-11-14 当前发放规则】MonkeyCode 目前只有每日签到 +100 积分，不再发放其他额度或 Token。【2026-10-20 复扫仍 unknown】GET /users/wallet 无逐条 grant/expire；exe 51MB 复扫仍只有 /users/wallet 与 /users/wallet/checkin；GET /users/subscription 只返回会员 plan=basic。总量可对账（毫积分÷1000），逐条过期仍无从查证。【2026-10-04 两轮核查后仍为 unknown，但已排除更多可能】① 接口层：GET /api/v1/users/wallet **无任何有效期字段**；二进制（monkeycode-desktop.exe，Go 编译）里与积分相关的 API 路径只有/api/v1/users/wallet 和 /api/v1/users/wallet/checkin 两个，另探 records / transactions / detail / points 四个候选明细端点全 404；exe 里 validity 仅 3 处命中且全为无关（Go 运行时 / 证书吊销 / 打包的垃圾数据）。② UI 层：2026-10-04 实测走过「设置 → 账号」，页面只有三栏（今日额度 / 积分 / 已邀请），**没有积分明细或有效期入口**，「签到 +100」也没有附带任何期限说明。结论：有效期既不在接口返回里，界面上也不展示，本地无从查证。维持 unknown 的理由不是「没找接口」，而是「客户端与 API 两侧都确认没有」。⚠️ 不要为此解密登录态去调captcha 链路（见 research/SAFETY.md 规则 1）。"
 calendar:
   - id: lobster_gift
     account: lobsterai
@@ -428,34 +428,9 @@ accounts:
       owner_note: "10M token 看着多，实际不好用。「省心组合」模型更新慢、能力弱、响应也慢（当前是 hy4preview + deepseek v4pro）。不知道是上下文管理还是提示词的问题：做项目推进很慢，输入抓不到重点，输出倒是全面细致但没重点。没有工作空间设计，不适合 vibe coding。多 agent 的设计也没看出明显优势。唯一可能的价值点在于是腾讯电脑管家团队出品，电脑管理方面或许有点用。【2026-10-22 公开渠道更正：实为应用宝团队出品，官方名 Marvis 马维斯；模型现为 Hy4 + DeepSeek-V4-Flash】"
 
 
-  - id: monkeycode_token
-    name: MonkeyCode Token
-    aliases: [mc, monkeycode]
-    vendor: 长亭百川
-    unit: token
-    grant_type: daily_expire
-    daily_amount: 10000000
-    validity_days: 0
-    cap: null
-    claim_policy: never_auto
-    claim_mode: never
-    command: ""
-    capabilities: [coding]
-    open_when_needed: true
-    notes: "10M Token 登录即领、当日清零。用时再开。"
-    models_note: "模型无关（BYOK）：GPT / Claude / DeepSeek / GLM / Kimi / Qwen / 豆包 / 本地模型；Code Agent 层支持 Codex/Claude Code/OpenCode【2026-10-22 官网】"
-    rating:
-      value: 4
-      capability: 3
-      automation: 1
-      review: "同样是 10M Token/天当日清零，长亭百川系，编码向，模型无关可自接（GPT/Claude/DeepSeek/GLM/Kimi 等，主人确认 GPT 可用）。逻辑同 Mavis：额度巨大但必须当天用掉。亮点是开发时能调思考强度、能看到推理过程；缺 auto 模式，手机端登录体验差。风险点：额度补充规则不明（当日清零后如何续、是否有其他补充途径均未确认）。"
-      best_for: "当天集中编码任务，需要亲自控制推理强度时"
-      owner_note: "手机端登录很奇怪：要扫微信码，且不能跳转。确认能用 GPT 模型；开发时可以调思考强度、也能看到推理过程，但没有提供 auto 模式。额度怎么补充目前不清楚。"
-
-
   - id: monkeycode_credit
     name: MonkeyCode 积分
-    aliases: [mc积分]
+    aliases: [mc, monkeycode, mc积分]
     vendor: 长亭百川
     unit: credit
     grant_type: accumulating
@@ -470,14 +445,14 @@ accounts:
     capabilities: [coding]
     open_when_needed: false
     notes: "【2026-10-26 会话过期→面板卡 other】本地唯一 cookie monkeycode_ai_session 于 10-25 11:33（北京）过期：00:04 签到 pre-check 与对账都 401，客户端启动时没有续期，点开设置后 UIA 停在 other（有「账号」导航、无签到按钮），旧逻辑连点 10 次「账号」空转 40s 报 pending。当天 22:29 主人在账号页点绿色「连接」后客户端回写 cookies.json、API 立刻恢复 200，22:46 补签成功（576→676）。修法：probe 识别 ^(重新)?连接$ 按钮（排除「断开连接」），uia_claim_flow 在 other 态先点一次「连接」再试账号页，失败文案改为「登录态失效，请在客户端点绿色连接授权」，不再空转。⚠️ 连接后若仍无签到入口，说明需要人工完成浏览器授权，不要继续盲点。【2026-10-25 空闲闸门自杀】catalog 命令带 --idle-wait 0（意图是「共享闸门已等过，不再重复等」），但脚本的 --idle-wait 0 仍会做一次 idle 检查，活跃就 pending。10-24/10-25 都是共享闸门通过后，脚本自己读到 idle=4s（其中一部分还是前面 Trae/BringBack 的合成鼠标把 GetLastInputInfo 归零）→ 未启动客户端直接中止，却被 checkin 报成「外部命令失败且无 UI 路径可回落」。修法：checkin 已统一等过一次空闲，单账户命令加 --no-idle-gate，把闸门只留给手动单跑；--no-idle-gate 同时关掉 uia_click 里的「点击前再查空闲」——实测 MonkeyCode 客户端一启动就会自己注入一次输入事件（Popen 后 idle 立即归零），per-click 闸门 100% 拒绝点击，10-24/10-25 的「UIA 找到设置按钮但点击被遮挡或用户活跃」就是这么来的。【2026-10-25 最大化窗口坐标漂移】客户端被主人最大化过（rect -13,-13 3866x2090）；屏外停放后 SetForegroundWindow 会触发 Windows/Electron 还原成 normal rect（2426x1615 @294,294），UIA 探针按最大化布局给的坐标立刻失效（按钮 y=2038 → 实际点 y=2332，屏幕外）。修法：park 前先 SW_RESTORE 并把正常态 rect 存进 PARK_RECT（重复 park 不覆盖），bringback 用 PARK_RECT；点击点按工作区钳制（允许标题栏暂时移出屏幕上缘）；点击前临时 TOPMOST（SWP_NOACTIVATE），不再用 ensure_foreground 的 Alt 技巧（本机实测会拉起 Windows 壳层 Shell_SystemDim 遮罩，导致反遮挡检查永远失败）。【环境坑】Windows 安全中心 PickerHost 残留的 Shell_SystemDim 会盖住所有窗口；同日验证时杀 PickerHost 后立刻恢复，属系统弹窗不是脚本问题。claim_mode=ui 但实际走的是这个 Python UI 脚本（不在 ui_claim.py 的 UI_ROUTE_IDS 里），所以 external 失败时不会二次回落——这是报错文案误导，不是第二条路。【2026-10-10 恢复自动，claim_mode=ui】根因是掉登录不是改版：主人点「连接 MonkeyCode 云端」重连后，① 积分卡片原位回归（入口没挪，「签到 +100」仍在积分卡片下方，坐标与 10-04 一致）；② cookies.json 被客户端回写（重连动作才回写，平时确实不回写），external 幂等闸门与复核通道随之恢复（GET wallet/checkin 200）。脚本升级为状态驱动导航：点「设置」前先检测账号页绿色特征（x∈[0.48,0.70]W、y∈[0.40,0.70]H 区域绿像素>15，实测弹层开=111~120、主界面=0），弹层残留开着时不再点设置——「设置」是 toggle，10-10 凌晨实测弹层开着时点它会关掉弹层、后续点击全部落空（toggle 类教训第二次出现，另见 LobsterAI 用户栏）。结果判定以接口为准，复核失败报 pending 不入账。历史存档：【2026-10-10 早】00:05 轮按旧坐标点击落在空白处报 ok 虚记 100（已回滚，备份 data/_ledger_backup_20261010_monkey_rollback.json）。【2026-10-04 balance 定案，2026-10-20 校正】/api/v1/users/wallet 的 balance 与签到积分同步，但是毫积分（界面积分=balance//1000；10-04 界面 195 vs API 195267，领+100 后界面 295 vs API 295267）。不要把 raw balance 直接 set-balance。【2026-10-20 对账】只读 GET /users/wallet + /wallet/checkin。无逐条 grant、无过期字段；subscription 只返回会员 plan=basic。credits_command 同步一条总量（expires=null），checkin 末尾自动跑并刷新看板。【external 直签不可行】POST checkin → 10701 需验证码；captcha 链路 c/s/d 恒 50/32/3 固定规格图形码，成本远高于 UI。【坐标体系】Tauri(webview2)，截图 PNG 真实像素==窗口 rect，lx/ly 用 1088 宽缩略图坐标、scale=w/1088 换算加窗口原点。同 pid 有 tray_icon_app 与桌宠分层窗口，find_main 按 class+标题双重排除。PrintWindow 抓不到 webview 内容，必须屏幕捕获。【2026-10-23 屏外模式】claim 默认先把窗口停到屏外条带（留 48px），UIA 探针用 -AllowOffscreen；只有真正点击时短暂 bringback，结束恢复原 rect/前台。checkin 的 UI 共享闸门通过后脚本内部闸门默认 0 等待（活跃就 pending），不再单独等 120s。"
-    models_note: "与 monkeycode_token 同一产品：模型无关（BYOK），GPT / Claude / DeepSeek / GLM / Kimi / Qwen / 豆包 / 本地模型【2026-10-22 官网】"
+    models_note: "模型无关（BYOK），可使用 GPT / Claude / DeepSeek / GLM / Kimi / Qwen / 豆包及本地模型【2026-10-22 官网】"
     rating:
       value: 1
       capability: 3
       automation: 1
-      review: "100/天的积分档。10-04 之前判定「不用签到」是错的（主人 09-28 就说过有入口），现已打通 UI 自动化并实测入账。100 分对 GPT 编码场景只是零花，但胜在全自动。产品体验见 monkeycode_token 条目。"
+      review: "目前只有每日签到 +100 积分，不再发放其他额度或 Token。签到 UI 自动化已打通并实测入账；积分总量可自动对账，但没有逐条有效期信息。"
       best_for: "长亭百川系编码客户端的每日积分，脚本自动领取"
-      owner_note: "与 monkeycode_token 是同一产品；使用体验见 monkeycode_token 条目（手机端扫码登录别扭、能调思考强度、无 auto 模式）。"
+      owner_note: "签到入口在账号页积分卡片下方；签到 +100 积分。"
 
 
   - id: loomy

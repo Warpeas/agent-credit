@@ -79,8 +79,6 @@ def main() -> int:
     out = {
         "balance": int(wallet.get("balance") or 0),
         "claimed_today": bool(checked_in) if checked_in is not None else None,
-        "daily_token_balance": int(wallet.get("daily_token_balance") or 0),
-        "daily_token_limit": int(wallet.get("daily_token_limit") or 0),
         "wallet_http": code,
         "checkin_http": code2,
     }
@@ -90,7 +88,6 @@ def main() -> int:
     else:
         print(f"[wallet]  HTTP {code}")
         print(f"  账号剩余积分 : {out['balance']}")
-        print(f"  今日 token   : {out['daily_token_balance']} / {out['daily_token_limit']}")
         print(f"[checkin] HTTP {code2}")
         print(f"  今日是否已签 : {out['claimed_today']}")
 

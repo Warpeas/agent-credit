@@ -82,7 +82,7 @@ def main() -> None:
     rec = recommend("重构这个仓库")
     assert "coding" in rec["capabilities"]
     open_ids = [x["id"] for x in rec["suggest_open"]]
-    assert "mavis" in open_ids or "monkeycode_token" in open_ids
+    assert "mavis" in open_ids
     pool_ids = [x["id"] for x in rec["pool"]]
     assert "autoclaw" in pool_ids or "workbuddy" in pool_ids
     assert rec["primary"]["id"] != "catpaw"

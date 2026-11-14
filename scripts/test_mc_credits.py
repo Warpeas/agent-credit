@@ -57,13 +57,11 @@ w = mc.parse_wallet({
     "data": {
         "id": "x",
         "balance": 195267,
-        "daily_token_balance": 10000000,
-        "daily_token_limit": 10000000,
     },
 })
 check("parse_wallet 用毫积分换算", w["balance"], 195)
 check("parse_wallet 保留 raw", w["balance_raw"], 195267)
-check("parse_wallet 不把 token 当积分", w["daily_token_balance"], 10000000)
+check("parse_wallet 只返回积分余额", set(w), {"balance", "balance_raw"})
 
 try:
     mc.parse_wallet({"code": 0, "data": {}})
@@ -97,8 +95,6 @@ sample = {
     "balance_raw": 176855,
     "scale": 1000,
     "claimed_today": True,
-    "daily_token_balance": 1,
-    "daily_token_limit": 10,
     "grants": None,
     "expires": None,
     "queried_at": "2026-10-20 22:00:00",
@@ -108,6 +104,7 @@ check("可读输出含总量", "总剩余: 176 credits" in text, True)
 check("可读输出含已签", "今日已签: 是" in text, True)
 check("可读输出声明无过期", "无" in text and "过期" in text, True)
 check("可读输出不含 cookie 字样", "cookie" not in text.lower(), True)
+check("可读输出不含其他额度", "token" not in text.lower(), True)
 
 
 # ---------- --line 契约形状（给 status_command / sync）----------

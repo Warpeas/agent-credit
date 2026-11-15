@@ -1,0 +1,101 @@
+# 派单提供者配置
+#
+# 调度器不认识任何具体提供者：它只读这张表。
+# - enabled: 是否参与调度（false = 完全跳过，便于临时停用）
+# - priority: 越小越先试；失败且允许回退时自动试下一个
+# - capabilities: 覆盖适配器默认能力声明；任务用 --capability 匹配
+#
+# 新增一个提供者：在 agent_credit/dispatch/adapters/ 下加一个模块（见 doc/adapter-contract.md），
+# 然后在这里加一段配置即可，不需要改调度逻辑。
+
+providers:
+  ollama:
+    enabled: true
+    priority: 10
+    capabilities:
+      - text
+      - commit
+      - explain
+      - code-gen
+      - test-gen
+    base_url: http://127.0.0.1:11434
+    model: qwen3:8b-q4_K_M
+    num_ctx: 8192
+    num_predict: 600
+    temperature: 0.2
+
+  qoder:
+    enabled: true
+    priority: 20
+    capabilities:
+      - code
+      - review
+      - test-gen
+      - commit
+    binary: qoderclicn
+    permission_mode: accept_edits
+
+  lobsterai:
+    enabled: true
+    priority: 30
+    capabilities:
+      - text
+      - code
+      - review
+      - commit
+    binary: C:\Users\M4A1g\lobsterai\project\tools\lobster.cmd
+    caller: agent-credit
+
+  codebuddy:
+    enabled: true
+    priority: 40
+    capabilities:
+      - code
+      - review
+      - test-gen
+      - commit
+      - explain
+    binary: codebuddy
+    # headless 派单必须自动批准工具：acceptEdits 下它连 Bash/pytest 都要问，
+    # 结果只回一句"需要授权"就当成功返回（2026-11-15 实测）。
+    permission_mode: bypassPermissions
+
+  # DuMate 走自带 opencode 运行时的本地 HTTP 链路（无独立 CLI）。模型请求仍由
+  # DuMate 自己的本地网关发出，真实消耗个人额度；余额无公开接口，按未知处理。
+  dumate:
+    enabled: true
+    priority: 55
+    capabilities:
+      - text
+      - code
+      - review
+      - test-gen
+      - commit
+      - explain
+    # binary / config_dir 默认自动发现；需要固定路径时再取消下面两行的注释。
+    # binary: C:\Users\M4A1g\AppData\Local\Programs\DuMate\resources\extra-resource\opencode\bin\dumate-opencode.exe
+    # config_dir: C:\Users\M4A1g\AppData\Roaming\qianfan-desktop-app\qianfan_desk_xdg\<userId>\config
+    startup_timeout_s: 45
+
+  # Loomy 走本机任务箱通道（无官方 CLI/网关；worker = skill「跑任务箱」）。
+  # preflight 会查 Loomy 进程与 worker 心跳，客户端没开就如实报不可用并回退。
+  # office/search 是它的独占标签（别家适配器不声明）；text 等通用标签排最后兜底烧额度。
+  # ⚠️ yaml_lite 不支持行内注释，注释一律写在独立行（2026-11-15 踩坑）。
+  loomy:
+    enabled: true
+    priority: 50
+    capabilities:
+      - office
+      - search
+      - text
+      - commit
+      - explain
+    # 任务箱目录（相对仓库根，可写绝对路径）
+    taskbox: data/loomy-taskbox
+    # 派单后轮询结果的间隔
+    poll_interval_s: 2
+    # worker 心跳超过 30 分钟视为不活跃，preflight 拒单
+    heartbeat_max_age_s: 1800
+    # preflight 用 tasklist 查这些进程名
+    process_names:
+      - Loomy

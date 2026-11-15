@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from . import checkin as checkin_mod
+from . import dispatch as dispatch_mod
 from . import ledger
 from . import lock as lock_mod
 from . import trace
@@ -338,6 +341,103 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dispatch_candidates(task: dispatch_mod.Task, forced: str | None):
+    return dispatch_mod.candidates(task, forced=forced)
+
+
+def cmd_dispatch(args: argparse.Namespace) -> int:
+    if args.history:
+        data = ledger.load()
+        rows = ledger.dispatch_stats(data, limit=args.limit)
+        if args.json:
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            return 0
+        if not rows:
+            print("尚无派单记录")
+            return 0
+        for r in rows:
+            avg = round(r["duration_s"] / r["runs"], 1) if r["runs"] else 0
+            print(f"{r['provider']:<12} 次数 {r['runs']:>3}  成功 {r['ok']:>3}  "
+                  f"回退 {r['fallback']:>3}  余额未知 {r['balance_unknown']:>3}  "
+                  f"总耗时 {r['duration_s']}s  均值 {avg}s")
+        return 0
+
+    text = args.task or ""
+    if args.task_file:
+        text = Path(args.task_file).read_text(encoding="utf-8")
+    elif text == "-":
+        text = sys.stdin.read()
+    if not text.strip() and not args.dry_run:
+        print('用法: credit dispatch --capability <能力> --task "<任务文本>"', file=sys.stderr)
+        return 1
+
+    task = dispatch_mod.Task(
+        text=text.strip(),
+        capability=args.capability,
+        cwd=Path(args.cwd) if args.cwd else None,
+        timeout_s=args.timeout,
+    )
+
+    if args.dry_run:
+        # 只看「谁会被试、为什么被跳过」，不真的派单、不记账
+        providers = _dispatch_candidates(task, args.provider)
+        if not providers:
+            print(f"没有启用的提供者支持能力 {args.capability}", file=sys.stderr)
+            return 1
+        for p in providers:
+            pre = p.preflight(task)
+            state = "可用" if pre.available else f"不可用：{pre.reason}"
+            print(f"{p.name:<12} priority={p.priority:<4} {state}")
+        return 0
+
+    outcome = dispatch_mod.run(task, forced=args.provider, allow_fallback=not args.no_fallback)
+
+    attempts = [f"{a.provider}({'ok' if a.ok else 'fail'},{a.duration_s}s)" for a in outcome.attempts]
+    total_s = round(sum(a.duration_s for a in outcome.attempts), 1)
+    last = outcome.attempts[-1] if outcome.attempts else None
+    data = ledger.load()
+    ledger.record_dispatch(
+        data,
+        provider=outcome.provider or (last.provider if last else "-"),
+        capability=task.capability,
+        ok=outcome.ok,
+        duration_s=total_s,
+        exit_code=outcome.exit_code,
+        fallback=outcome.fallback,
+        attempts=attempts,
+        balance_before=last.balance_before if last else None,
+        balance_unknown=outcome.balance_unknown,
+        task_digest=hashlib.sha1(task.text.encode("utf-8")).hexdigest()[:12],
+        note="; ".join(a.note for a in outcome.attempts if a.note)[:400],
+    )
+    ledger.save(data)
+
+    if args.json:
+        print(json.dumps({
+            "ok": outcome.ok,
+            "provider": outcome.provider,
+            "fallback": outcome.fallback,
+            "balance_unknown": outcome.balance_unknown,
+            "duration_s": total_s,
+            "exit_code": outcome.exit_code,
+            "attempts": [a.__dict__ for a in outcome.attempts],
+            "text": outcome.text,
+        }, ensure_ascii=False, indent=2))
+        return 0 if outcome.ok else (outcome.exit_code or 1)
+
+    for a in outcome.attempts:
+        mark = "ok  " if a.ok else "fail"
+        detail = f" {a.note}" if a.note else ""
+        print(f"[{mark}] {a.provider} {a.duration_s}s{detail}", file=sys.stderr)
+    if outcome.ok:
+        if outcome.fallback:
+            print(f"（已回退到 {outcome.provider}）", file=sys.stderr)
+        print(outcome.text)
+        return 0
+    print("派单失败：所有候选提供者都不可用或执行失败", file=sys.stderr)
+    return outcome.exit_code or 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="credit", description="Agent 积分台账与签到")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -405,6 +505,21 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("show", help="某个账户的 JSON 详情")
     s.add_argument("account")
     s.set_defaults(func=cmd_show)
+
+    s = sub.add_parser("dispatch", help="把任务派给本机其它 agent（单机串行，按 providers.yaml 优先级）")
+    s.add_argument("--capability", default="text",
+                   help="任务能力标签，匹配 providers.yaml 里的 capabilities（默认 text）")
+    s.add_argument("--task", default=None, help='任务文本；传 "-" 从 stdin 读')
+    s.add_argument("--task-file", default=None, help="从文件读任务文本")
+    s.add_argument("--cwd", default=None, help="给支持工作目录的适配器指定目录")
+    s.add_argument("--provider", default=None, help="强制只用一个提供者（不做回退）")
+    s.add_argument("--no-fallback", action="store_true", help="首个提供者失败即停")
+    s.add_argument("--timeout", type=int, default=600, help="单个提供者超时秒数")
+    s.add_argument("--dry-run", action="store_true", help="只做候选与预检，不派单不记账")
+    s.add_argument("--history", action="store_true", help="查看 ledger 里的派单聚合统计")
+    s.add_argument("--limit", type=int, default=None, help="--history 只看最近 N 条事件")
+    s.add_argument("--json", action="store_true", help="输出 JSON")
+    s.set_defaults(func=cmd_dispatch)
     return p
 
 

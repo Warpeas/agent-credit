@@ -285,3 +285,58 @@ def reconcile_total(
         entry["expiry_basis"] = "derived"
     return {"before": before, "after": remaining(data, account_id, on),
             "entries": len(active_entries(data, account_id, on))}
+
+
+def record_dispatch(
+    data: dict[str, Any],
+    *,
+    provider: str,
+    capability: str,
+    ok: bool,
+    duration_s: float,
+    exit_code: int,
+    fallback: bool,
+    attempts: list[str],
+    balance_before: int | None = None,
+    balance_unknown: bool = False,
+    task_digest: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    """记一条派单事件。这是回答「到底省了多少」的唯一数据源。"""
+    event = {
+        "id": uuid.uuid4().hex[:12],
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "provider": provider,
+        "capability": capability,
+        "ok": bool(ok),
+        "duration_s": round(float(duration_s), 1),
+        "exit_code": int(exit_code),
+        "fallback": bool(fallback),
+        "attempts": list(attempts),
+        "balance_before": balance_before,
+        "balance_unknown": bool(balance_unknown),
+        "task_digest": task_digest,
+        "note": note,
+    }
+    data.setdefault("dispatches", []).append(event)
+    return event
+
+
+def dispatch_stats(data: dict[str, Any], limit: int | None = None) -> list[dict[str, Any]]:
+    """按提供者聚合派单事件：次数、成功数、回退数、总耗时。"""
+    events = list(data.get("dispatches") or [])
+    if limit:
+        events = events[-limit:]
+    stats: dict[str, dict[str, Any]] = {}
+    for e in events:
+        item = stats.setdefault(
+            e.get("provider") or "-",
+            {"provider": e.get("provider") or "-", "runs": 0, "ok": 0, "fallback": 0,
+             "balance_unknown": 0, "duration_s": 0.0},
+        )
+        item["runs"] += 1
+        item["ok"] += 1 if e.get("ok") else 0
+        item["fallback"] += 1 if e.get("fallback") else 0
+        item["balance_unknown"] += 1 if e.get("balance_unknown") else 0
+        item["duration_s"] = round(item["duration_s"] + float(e.get("duration_s") or 0), 1)
+    return sorted(stats.values(), key=lambda s: -s["runs"])

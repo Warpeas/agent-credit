@@ -389,6 +389,7 @@ function Get-OcrLines($pngPath) {
     $maxTry = 1
     if ($Offscreen) { $maxTry = 5 }
     $bmp = $null
+    $stillBlank = $false
     for ($tryN = 1; $tryN -le $maxTry; $tryN++) {
         $bmp=New-Object System.Drawing.Bitmap($winW,$winH)
         $g=[System.Drawing.Graphics]::FromImage($bmp)
@@ -408,6 +409,32 @@ function Get-OcrLines($pngPath) {
             if ($tryN -eq 1) { Log "step: 屏外捕获空白帧，2s 间隔重试（backgroundThrottling 容忍）" }
             $bmp.Dispose()
             Start-Sleep -Seconds 2
+        }
+    }
+    # 2026-11-17 空白帧兜底：4K(3840x2160) 下连续 5 帧 PrintWindow 空白时
+    # （00:03/00:26/10:26 三轮全超时的根因，与 1080p 不复现；单因素 PoC 无法
+    # 复现——嫌疑 GameViewer 虚拟屏拓扑变化 / DComp surface 抓取失败，随环境
+    # 波动），短暂把窗口按原 rect 移回屏内曝光 0.6s（TOPMOST+NOACTIVATE，
+    # AutoClaw BringBack 同款口径）用 CopyFromScreen 直接抓屏幕像素——屏内
+    # 屏幕捕获拍到的一定是本窗口内容，四类根因全部免疫。抓完立即停回屏外。
+    # ⚠️ 分支门只看 Test-Blank 不看 $pw：22:02 轮实测屏外 DWM 不合成时
+    # PrintWindow 直接返回 false，带 $pw 门会让兜底永远不触发。
+    if ($Offscreen -and (Test-Blank $bmp)) {
+        $stillBlank = $true
+        Log "step: 连续空白帧未自愈，启用屏内曝光捕获（TOPMOST 0.6s）"
+        $bmp.Dispose()
+        [L32]::SetWindowPos($hwnd, [IntPtr](-1), $winX, $winY, $winW, $winH, 0x51) | Out-Null  # HWND_TOPMOST, NOSIZE|NOACTIVATE|SHOWWINDOW
+        Start-Sleep -Milliseconds 600
+        $bmp=New-Object System.Drawing.Bitmap($winW,$winH)
+        $g=[System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($winX,$winY,0,0,$bmp.Size)
+        $g.Dispose()
+        [L32]::SetWindowPos($hwnd, [IntPtr](-2), -($winW+64), 0, $winW, $winH, 0x15) | Out-Null  # NOTOPMOST，停回屏外
+        if (Test-Blank $bmp) {
+            Log "step: 曝光捕获仍空白（窗口被主人窗口完全遮挡且透明渲染？），放弃本次捕获"
+        } else {
+            Log "step: 曝光捕获成功"
+            $stillBlank = $false
         }
     }
     if($pngPath){ $bmp.Save($pngPath,[System.Drawing.Imaging.ImageFormat]::Png) }

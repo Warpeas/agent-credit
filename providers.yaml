@@ -7,11 +7,22 @@
 #
 # 新增一个提供者：在 agent_credit/dispatch/adapters/ 下加一个模块（见 doc/adapter-contract.md），
 # 然后在这里加一段配置即可，不需要改调度逻辑。
+#
+# 当前顺序（2026-11-15 定）：
+#   codebuddy 10（hy4free，编码主力）→ loomy 20（每日额度）→ ollama 30（本地免费，
+#   挡在额度紧张的三家前面）→ lobsterai 40 → qoder 50 → dumate 60（额度少，排最后）
+# 注意：先按 --capability 取交集，再按 priority 排。loomy 没声明 code/review/test-gen，
+# 这三类任务里它不会出现；code-gen 只有 ollama 声明。
+#
+# 派单主题（静态指令）：所有 provider 默认读 instructions/dispatch-theme.md，
+# 由适配器用各家原生方式注入（codebuddy/qoder: --append-system-prompt，
+# ollama: system 字段；loomy/dumate/lobsterai 无对应能力，见 doc/adapter-contract.md §11）。
+# 单个 provider 可用 theme: <路径> 覆盖，theme: off 关闭；环境变量 AGENT_CREDIT_THEME 优先。
 
 providers:
   ollama:
     enabled: true
-    priority: 10
+    priority: 30
     capabilities:
       - text
       - commit
@@ -26,7 +37,7 @@ providers:
 
   qoder:
     enabled: true
-    priority: 20
+    priority: 50
     capabilities:
       - code
       - review
@@ -37,7 +48,7 @@ providers:
 
   lobsterai:
     enabled: true
-    priority: 30
+    priority: 40
     capabilities:
       - text
       - code
@@ -46,9 +57,12 @@ providers:
     binary: C:\Users\M4A1g\lobsterai\project\tools\lobster.cmd
     caller: agent-credit
 
+  # hy4free 免费额度，作为编码主力。已知毛病：写 ~/.codebuddy/projects 失败时
+  # 2~3 秒即退出、退出码仍为 0；codebuddy.py 按输出判失败并归一到 126，
+  # 调度器不重试、立刻试下一个（判定依据见 doc/adapter-contract.md §10.3）。
   codebuddy:
     enabled: true
-    priority: 40
+    priority: 10
     capabilities:
       - code
       - review
@@ -59,12 +73,20 @@ providers:
     # headless 派单必须自动批准工具：acceptEdits 下它连 Bash/pytest 都要问，
     # 结果只回一句"需要授权"就当成功返回（2026-11-15 实测）。
     permission_mode: bypassPermissions
+    # auto：直连优先。适配器给子进程注入 CODEBUDDY_CONFIG_DIR=<data>/codebuddy-home，
+    # 不再写家目录；直连若因写盘/启动失败（归一化 126/127）自动回落队列。
+    # direct 只直连；queue 只队列。队列作为兜底保留，不删除。
+    transport: auto
+    queue_fallback: true
+    task_name: agent-credit-codebuddy
+    poll_interval_s: 2
+    retrigger_s: 10
 
   # DuMate 走自带 opencode 运行时的本地 HTTP 链路（无独立 CLI）。模型请求仍由
   # DuMate 自己的本地网关发出，真实消耗个人额度；余额无公开接口，按未知处理。
   dumate:
     enabled: true
-    priority: 55
+    priority: 60
     capabilities:
       - text
       - code
@@ -78,12 +100,14 @@ providers:
     startup_timeout_s: 45
 
   # Loomy 走本机任务箱通道（无官方 CLI/网关；worker = skill「跑任务箱」）。
-  # preflight 会查 Loomy 进程与 worker 心跳，客户端没开就如实报不可用并回退。
-  # office/search 是它的独占标签（别家适配器不声明）；text 等通用标签排最后兜底烧额度。
+  # preflight 会查 Loomy 进程与 worker 心跳，客户端没开或心跳超过 15 分钟就如实
+  # 报不可用并回退——所以第二顺位只有在 worker 真的在跑时才生效，不是配了就自动能用。
+  # office/search 是它的独占标签（别家适配器不声明）；text/commit/explain 也参与
+  # 通用链，排在 codebuddy 之后。
   # ⚠️ yaml_lite 不支持行内注释，注释一律写在独立行（2026-11-15 踩坑）。
   loomy:
     enabled: true
-    priority: 50
+    priority: 20
     capabilities:
       - office
       - search
@@ -94,8 +118,14 @@ providers:
     taskbox: data/loomy-taskbox
     # 派单后轮询结果的间隔
     poll_interval_s: 2
-    # worker 心跳超过 30 分钟视为不活跃，preflight 拒单
-    heartbeat_max_age_s: 1800
+    # worker 心跳超过 15 分钟视为不活跃，preflight 拒单。
+    # 这个值必须 ≥ 3 倍唤醒间隔（当前 300s × 3），否则会出现「日级调度配 30 分钟阈值」那种自废组合。
+    heartbeat_max_age_s: 900
+    # 外部唤醒源间隔（scripts/loomy-wake.py + Windows 计划任务 agent-credit-loomy-wake）。
+    # Loomy 官方定时任务只有 daily/weekly，没有分钟级；这个脚本复用它的调度桥来补 5 分钟一次。
+    wake_interval_s: 300
+    # preflight 用它显示「下次消费约 HH:MM:SS」，把「真不可用」和「还没到点」区分开
+    wake_state: data/loomy-wake-state.json
     # preflight 用 tasklist 查这些进程名
     process_names:
       - Loomy

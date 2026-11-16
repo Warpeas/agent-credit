@@ -168,6 +168,32 @@ try {
     # 3. 解析 + 登记（写账只走 credit.py CLI）
     #    只有新鲜 dump 才登记——2026-10-20 00:03 实测：IDE 窗没开成时拿昨天
     #    的旧 dump set-balance，会把 claim 后的真实余额覆盖成旧值。
+    $py = "$env:USERPROFILE\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+    if (-not (Test-Path $py)) { $py = (Get-Command python).Source }
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    $env:PYTHONIOENCODING = "utf-8"
+
+    # 2d. 逐包明细（2026-11-10）：趁刚拉新的 IDE 窗口还开着，让客户端自己打开
+    #     「设置→用量管理」，滚动截图 + OCR 出当天的 logs/trae_usage.json。
+    #     结构化通道只给聚合值，逐包只能这么读。失败绝不影响签到/对账：
+    #     trae_credits 的日期闸门会让对账自动退回聚合口径，这里只留原因。
+    if ($fresh -and $ideHwnd -ne [IntPtr]::Zero -and [TraeWin]::Alive($ideHwnd)) {
+        $ocrOut = & $py -u "$root\scripts\trae_usage_collect.py" `
+            --hwnd $ideHwnd.ToInt64() --out "$root\logs\trae_usage.json" 2>&1 | Out-String
+        $ocrExit = $LASTEXITCODE
+        $ocrTail = (($ocrOut -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 1)
+        if ($ocrExit -eq 0) {
+            $result.steps += "usage_ocr_ok"
+            Log "usage ocr ok: $ocrTail"
+        } else {
+            $result.steps += "usage_ocr_failed(exit=$ocrExit)"
+            Log "usage ocr failed exit=${ocrExit}: $(($ocrOut -replace "`r?`n", " | ").Trim())"
+        }
+    } else {
+        $result.steps += "usage_ocr_skipped"
+        Log "usage ocr skipped: fresh=$fresh hwnd=$ideHwnd"
+    }
+
     if ($fresh -and $NoRecord) {
         # 由签到流程内部调用：dump 已新鲜，登记留给 checkin 末尾的 sync（同一进程、
         # 同一份内存账本），这里绝不另开一条写账路径。
@@ -175,10 +201,6 @@ try {
         $result.steps += "record_skipped_no_record"
         Log "record skipped (-NoRecord; 由 checkin 末尾的 sync 统一登记)"
     } elseif ($fresh) {
-        $py = "$env:USERPROFILE\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-        if (-not (Test-Path $py)) { $py = (Get-Command python).Source }
-        [Console]::OutputEncoding = [Text.Encoding]::UTF8
-        $env:PYTHONIOENCODING = "utf-8"
         $out = & $py -u "$root\scripts\trae_credit_detail.py" --record 2>&1 | Out-String
         $recordExit = $LASTEXITCODE
         Log "parser output: $out"

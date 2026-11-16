@@ -39,6 +39,9 @@ from .console import use_utf8
 from .paths import LOG_DIR
 
 DUMP_PATH = LOG_DIR / "trae_credit_detail.json"
+# 「设置 → 用量管理」页的 OCR 结果（scripts/trae_usage_parse.py 产出）。
+# 结构化通道没有 user_entitlement_pack_list 时，用它补逐包口径。
+USAGE_PATH = LOG_DIR / "trae_usage.json"
 ACCOUNT = "trae"
 
 
@@ -194,14 +197,122 @@ def build_grants(parsed: dict[str, Any]) -> list[dict[str, Any]]:
     }]
 
 
+def load_usage(path: Path | None = None) -> dict[str, Any] | None:
+    """读用量管理页的 OCR 结果；缺失/坏文件返回 None（回退聚合口径）。"""
+    path = path or USAGE_PATH
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def usage_detail(usage: dict[str, Any] | None,
+                 parsed: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """OCR 逐包结果 → 账本 detail 载荷。不可信时返回 None，绝不硬写。
+
+    两道闸门：
+      1) 与 dump 同一天——隔天的 OCR 会把当天签到后的余额覆盖成旧值；
+      2) 逐包剩余合计与 dump 的 total 相差 ≤1——对不上说明抓错了帧/页面没渲染完
+         （2026-11-10 实跑：OCR 合计 3182.91 vs 扩展 remaining 3182.9088，差 0.0012）。
+    """
+    if not isinstance(usage, dict):
+        return None
+    packs = usage.get("packs") or []
+    if not packs:
+        return None
+    try:
+        usage_dt = datetime.fromisoformat(str(usage.get("fetched_at") or "")).astimezone()
+        usage_day = usage_dt.date()
+    except ValueError:
+        print(f"usage_ocr: fetched_at 无法解析 ({usage.get('fetched_at')}) → 回退聚合", file=sys.stderr)
+        return None
+    if dump_date(parsed) != usage_day:
+        # 跨零点：截图与 dump 相隔几秒却分属两天（23:59:59 / 00:00:05），
+        # 仍是同一份现场数据，放行；隔天的旧图相差数小时，照旧拒绝。
+        dt = dump_time(parsed)
+        near = bool(dt and abs((dt - usage_dt).total_seconds()) <= 600)
+        if not near:
+            print(f"usage_ocr: 截图日期 {usage_day} ≠ dump 日期 {dump_date(parsed)} → 回退聚合",
+                  file=sys.stderr)
+            return None
+        print(f"usage_ocr: 跨零点（截图 {usage_dt:%H:%M:%S} / dump {dt:%H:%M:%S}）按同一份现场处理",
+              file=sys.stderr)
+    total = parsed.get("total")
+    try:
+        ocr_total = sum(float(p.get("remaining") or 0) for p in packs if isinstance(p, dict))
+    except (TypeError, ValueError):
+        print("usage_ocr: 剩余字段不是数字 → 回退聚合", file=sys.stderr)
+        return None
+    if isinstance(total, (int, float)) and not isinstance(total, bool):
+        # 容差 0.2%：截图与 dump 之间隔着几十秒，期间 IDE 会继续消耗几个积分
+        # （2026-11-10 实测 4 分钟掉 33.7 分，属于正常使用）。闸门只挡「截错页/
+        # 漏行」这种量级不符，挡不了也不该挡正常的几分钱漂移。
+        tol = max(1.0, float(total) * 0.002)
+        if abs(ocr_total - float(total)) > tol:
+            print(f"usage_ocr: 逐包合计 {ocr_total:.2f} ≠ dump total {float(total):.2f}"
+                  f"（容差 {tol:.2f}）→ 回退聚合", file=sys.stderr)
+            return None
+    detail: list[dict[str, Any]] = []
+    for p in packs:
+        if not isinstance(p, dict):
+            continue
+        try:
+            amount = float(p.get("granted") or 0)
+            remain = float(p.get("remaining") or 0)
+        except (TypeError, ValueError):
+            continue
+        expires = str(p.get("expires_at") or "")
+        if amount <= 0 or len(expires) < 10:
+            continue
+        source = str(p.get("source") or "").strip() or "签到奖励"
+        detail.append({
+            "amount": amount,
+            "remaining": remain,
+            "expires_at": expires[:10],
+            "expires_at_time": expires,
+            "status": "active" if remain > 0 else "used",
+            "type": source,
+            "source": source,
+            # 到期日是页面上逐笔读到的真值，不是按领取日推的
+            "expiry_basis": "server",
+        })
+    return detail or None
+
+
 def payload(parsed: dict[str, Any]) -> dict[str, Any]:
     """标准对账载荷：与 wb_credits --ledger 同契约（grants + total）。
 
     ensure_ascii 的选择在打印处做（这里只出结构），载荷用 ASCII 转义，
     免得 cmd.exe 的 GBK 控制台把中文 JSON 拆坏。
     """
-    grants = build_grants(parsed)
     total = parsed.get("total")
+    decided = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not parsed.get("packs"):
+        detail = usage_detail(load_usage(), parsed)
+        if detail:
+            exact = None
+            if isinstance(total, (int, float)) and not isinstance(total, bool):
+                exact = round(float(total), 2)
+            return {
+                "account": ACCOUNT,
+                "total": int(round(exact)) if exact is not None else
+                         int(round(sum(d["remaining"] for d in detail))),
+                "detail": detail,
+                "granularity": "per_pack",
+                "source": "usage_ocr",
+                # expireTime 是账期边界，不是这 28 笔的到期日（逐笔见 detail）
+                "billing_cycle": {
+                    "end": parsed.get("expire_at"),
+                    "origin": "creditsUsage.expireTime",
+                    "balance_exact": exact,
+                    "synced_at": decided,
+                },
+                "queried_at": decided,
+            }
+    grants = build_grants(parsed)
     if isinstance(total, bool) or not isinstance(total, (int, float)):
         total = sum(g["remain"] for g in grants)
     return {
@@ -209,7 +320,7 @@ def payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "total": int(round(total)),
         "grants": grants,
         "granularity": "per_pack" if parsed.get("packs") else "aggregate",
-        "queried_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "queried_at": decided,
     }
 
 
@@ -227,18 +338,22 @@ def format_text(parsed: dict[str, Any]) -> str:
     lines = [f"Trae 积分明细（dump {parsed.get('fetched_at') or '?'}）",
              f"总剩余: {_fmt_num(p['total'])} credits"]
     if parsed.get("expire_at"):
-        lines.append(f"到期: {parsed['expire_at']}")
+        lines.append(f"账期边界: {parsed['expire_at']}（creditsUsage.expireTime，不等于逐笔到期日）")
     if p["granularity"] == "per_pack":
-        lines.append("口径: 逐包（user_entitlement_pack_list）")
+        origin = "用量管理页 OCR" if p.get("source") == "usage_ocr" else "user_entitlement_pack_list"
+        lines.append(f"口径: 逐包（{origin}）")
     else:
         lines.append("口径: 聚合（客户端展示的最高优包到期日；逐包需「设置→用量管理」OCR）")
     if parsed.get("day_key"):
         state = "已签" if parsed.get("claimed_today") else "未签"
         lines.append(f"今日签到({parsed['day_key']}): {state} "
                      f"credits={parsed.get('claim_credits')} extra={parsed.get('claim_extra')}")
-    lines.append(f"登记条目: {len(p['grants'])} 条")
-    for g in p["grants"]:
-        lines.append(f"  {g['expires'] or '-':<12} 剩余 {g['remain']:>8}  {g['package']}")
+    rows = p.get("detail") or p.get("grants") or []
+    lines.append(f"登记条目: {len(rows)} 条")
+    for g in rows:
+        label = g.get("source") or g.get("package") or ""
+        lines.append(f"  {g.get('expires_at') or g.get('expires') or '-':<12} "
+                     f"剩余 {_fmt_num(g.get('remaining', g.get('remain'))):>8}  {label}")
     return "\n".join(lines)
 
 

@@ -182,13 +182,18 @@ def build(data: dict[str, Any] | None = None, on: date | None = None,
 
 
 def _quality(grants: list[dict[str, Any]]) -> str:
-    """余额口径：全是服务端对账条目 = 真值；全是本地登记 = 估算；混合 = 混合。"""
+    """余额口径：全是服务端对账条目 = 真值；全是本地登记 = 估算；混合 = 混合。
+
+    逐包明细的账户（Trae 走「用量管理」OCR 入账）来源不是 "sync"，但余额与
+    到期日都逐笔来自服务端页面，故 expiry_basis 全为 server 时同样算真值。
+    """
     sources = {g["source"] for g in grants}
     if not sources:
         return "unknown"
-    if sources == {"sync"}:
+    bases = {g["expiry_basis"] for g in grants}
+    if sources == {"sync"} or bases == {"server"}:
         return "server"
-    if "sync" in sources:
+    if "sync" in sources or "server" in bases:
         return "mixed"
     return "estimate"
 

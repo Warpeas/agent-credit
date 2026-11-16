@@ -140,7 +140,16 @@ checkin.run_gate = lambda *a, **k: gate.Decision("start", "key", 15)
 checkin.ui_claim = lambda account_id: (True, f"{account_id} 模拟 [granted] 100")
 results, _ = checkin.checkin()
 ui_results = [r for r in results if r.account_id in checkin.UI_IDLE_ACCOUNTS]
-check("Y：UI 组不再等空闲、直接签", {r.status for r in ui_results}, {"ok"})
+# monkeycode_credit 在 b9dfcd9 后 claim_mode=external，测试环境 SKIP_EXTERNAL
+# 会把它挡成 pending。它留在 UI 组是产品语义正确的——playwright 真开 Edge
+# 窗口，照样要等主人空闲——所以断言按 claim_mode 分流：ui 成员必须 ok，
+# 非 ui 成员允许 skipped/pending 但不许 failed。
+mode_of = {a["id"]: (a.get("claim_mode") or "manual") for a in checkin.accounts()}
+check("Y：UI 组 ui 成员不再等空闲、直接签",
+      {r.status for r in ui_results if mode_of[r.account_id] == "ui"}, {"ok"})
+check("Y：UI 组非 ui 成员不许 failed",
+      {r.status for r in ui_results if mode_of[r.account_id] != "ui"}
+      <= {"skipped", "pending"}, True)
 
 print()
 print("全部通过" if not bad else f"{bad} 个失败")

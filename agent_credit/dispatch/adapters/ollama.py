@@ -66,6 +66,11 @@ class OllamaProvider(Provider):
                 "temperature": float(self.config.get("temperature") or 0.2),
             },
         }
+        # 派单主题：Ollama 没有服务端持久化，只有 /api/generate 的 system 字段，
+        # 每次请求带上（多行没问题，不走 .cmd shim）。
+        theme = self.theme_text()
+        if theme:
+            payload["system"] = theme
         started = time.time()
         try:
             data = self._request("/api/generate", payload, timeout=task.timeout_s)
@@ -87,7 +92,9 @@ class OllamaProvider(Provider):
         speed = f"{eval_count / eval_dur:.1f} tok/s" if eval_dur else "n/a"
         return Result(
             ok=bool(text),
-            exit_code=0 if text else 3,
+            # 本地模型没有额度可限，空输出只是"跑完但没正文"（契约里的 1），
+            # 不能借用 3（疑似额度/限流），否则 --history 的限流统计会失真。
+            exit_code=0 if text else 1,
             text=text,
             duration_s=duration,
             note=f"{self.model}, {speed}, {eval_count} tok" if text else "模型无输出",

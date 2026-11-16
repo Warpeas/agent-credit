@@ -5,6 +5,7 @@ import hashlib
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -346,6 +347,31 @@ def _dispatch_candidates(task: dispatch_mod.Task, forced: str | None):
 
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
+    if args.usage:
+        try:
+            report = ledger.usage_stats(ledger.load(), since=args.since)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0
+        scope = f" --since {report['since']}" if report["since"] else ""
+        print(f"用量聚合{scope}：事件 {report['events']} 条，legacy {report['legacy']} 条"
+              f"（无 usage 字段，未回填、不计入合计）")
+        if not report["rows"]:
+            print("没有可聚合的用量事件")
+            return 0
+        print(f"{'提供者':<12} {'模型':<14} {'尝试':>4} {'输入token':>10} {'输出token':>10} "
+              f"{'消耗额度':>9} {'剩余%':>6} {'重置时间':<26} {'失败':>4}")
+        for r in report["rows"]:
+            left = "-" if r["remaining_percent"] is None else f"{r['remaining_percent']:g}"
+            print(f"{r['provider']:<12} {r['model']:<14} {r['attempts']:>4} "
+                  f"{r['input_tokens']:>10} {r['output_tokens']:>10} "
+                  f"{r['credits']:>9g} {left:>6} {str(r['reset_at'] or '-'):<26} "
+                  f"{r['failed']:>4}")
+        return 0
+
     if args.history:
         data = ledger.load()
         rows = ledger.dispatch_stats(data, limit=args.limit)
@@ -392,25 +418,31 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
     outcome = dispatch_mod.run(task, forced=args.provider, allow_fallback=not args.no_fallback)
 
-    attempts = [f"{a.provider}({'ok' if a.ok else 'fail'},{a.duration_s}s)" for a in outcome.attempts]
     total_s = round(sum(a.duration_s for a in outcome.attempts), 1)
-    last = outcome.attempts[-1] if outcome.attempts else None
-    data = ledger.load()
-    ledger.record_dispatch(
-        data,
-        provider=outcome.provider or (last.provider if last else "-"),
-        capability=task.capability,
-        ok=outcome.ok,
-        duration_s=total_s,
-        exit_code=outcome.exit_code,
-        fallback=outcome.fallback,
-        attempts=attempts,
-        balance_before=last.balance_before if last else None,
-        balance_unknown=outcome.balance_unknown,
-        task_digest=hashlib.sha1(task.text.encode("utf-8")).hexdigest()[:12],
-        note="; ".join(a.note for a in outcome.attempts if a.note)[:400],
-    )
-    ledger.save(data)
+    digest = hashlib.sha1(task.text.encode("utf-8")).hexdigest()[:12]
+    dispatch_id = uuid.uuid4().hex[:12]
+    # 每次尝试单独一条事件，各带自己的 usage 与尝试序号；不做重复累加。
+    # 读-改-写全程持账本锁：后台实例/另一个 CLI 同时记账时不会互相覆盖。
+    with ledger.transaction() as data:
+        for index, attempt in enumerate(outcome.attempts, 1):
+            ledger.record_dispatch(
+                data,
+                dispatch_id=dispatch_id,
+                attempt=index,
+                provider=attempt.provider,
+                capability=task.capability,
+                ok=attempt.ok,
+                duration_s=attempt.duration_s,
+                exit_code=attempt.exit_code,
+                fallback=bool(outcome.ok and attempt.ok and index > 1),
+                attempts=[f"{attempt.provider}({'ok' if attempt.ok else 'fail'},{attempt.duration_s}s)"],
+                balance_before=attempt.balance_before,
+                balance_unknown=attempt.balance_unknown,
+                task_digest=digest,
+                note=(attempt.note or "")[:400],
+                usage=attempt.usage,
+                route=attempt.route,
+            )
 
     if args.json:
         print(json.dumps({
@@ -517,6 +549,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--timeout", type=int, default=600, help="单个提供者超时秒数")
     s.add_argument("--dry-run", action="store_true", help="只做候选与预检，不派单不记账")
     s.add_argument("--history", action="store_true", help="查看 ledger 里的派单聚合统计")
+    s.add_argument("--usage", action="store_true",
+                   help="按提供者/模型聚合用量（token、消耗额度、剩余百分比、失败条数）")
+    s.add_argument("--since", default=None,
+                   help="配合 --usage 限制时间范围：7d / 24h / YYYY-MM-DD")
     s.add_argument("--limit", type=int, default=None, help="--history 只看最近 N 条事件")
     s.add_argument("--json", action="store_true", help="输出 JSON")
     s.set_defaults(func=cmd_dispatch)

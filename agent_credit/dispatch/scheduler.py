@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .base import Provider, Result, Task
+from .base import Provider, Result, Task, usage_failed
 from .registry import build
 
 
@@ -15,6 +15,8 @@ class Attempt:
     note: str = ""
     balance_before: int | None = None
     balance_unknown: bool = False
+    usage: dict = field(default_factory=dict)
+    route: str = ""
 
 
 @dataclass
@@ -57,8 +59,10 @@ def run(
     if not providers:
         outcome.attempts.append(
             Attempt(provider="-", ok=False, exit_code=64, duration_s=0.0,
-                    note=f"没有启用的提供者支持能力 {task.capability}" + (f"（指定了 {forced}）" if forced else ""))
+                    note=f"没有启用的提供者支持能力 {task.capability}" + (f"（指定了 {forced}）" if forced else ""),
+                    usage=usage_failed("未执行：没有启用的提供者支持该能力"))
         )
+        outcome.exit_code = 64  # 契约：64 = 没有可用候选，由调度器产出
         return outcome
 
     for index, provider in enumerate(providers):
@@ -66,7 +70,8 @@ def run(
         if not pre.available:
             outcome.attempts.append(
                 Attempt(provider=provider.name, ok=False, exit_code=69, duration_s=0.0,
-                        note=f"预检失败: {pre.reason}")
+                        note=f"预检失败: {pre.reason}",
+                        usage=usage_failed(f"未执行：预检失败（{pre.reason}）"))
             )
             continue
 
@@ -79,7 +84,8 @@ def run(
             if balance_before is not None and balance_before <= 0:
                 outcome.attempts.append(
                     Attempt(provider=provider.name, ok=False, exit_code=75, duration_s=0.0,
-                            note=f"余额不足: {note}", balance_before=balance_before)
+                            note=f"余额不足: {note}", balance_before=balance_before,
+                            usage=usage_failed("未执行：余额不足被跳过"))
                 )
                 continue
             if balance_before is None:
@@ -101,6 +107,9 @@ def run(
                 note=result.note,
                 balance_before=balance_before,
                 balance_unknown=balance_unknown,
+                usage=result.usage or usage_failed(
+                    f"适配器未回传 usage（{provider.name} 未实现用量采集或未执行）"),
+                route=result.route,
             )
         )
         if result.ok:

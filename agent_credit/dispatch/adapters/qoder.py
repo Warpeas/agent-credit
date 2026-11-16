@@ -55,6 +55,11 @@ class QoderProvider(Provider):
         ]
         if task.cwd:
             cmd += ["-w", str(task.cwd)]
+        # 派单主题：Qoder 没有隔离的配置目录（写用户级 AGENTS.md 会污染用户自己的
+        # 交互会话），所以只能借助它原生的 --append-system-prompt 每次带上。
+        theme = self.theme_oneliner()
+        if theme:
+            cmd += ["--append-system-prompt", theme]
         started = time.time()
         try:
             proc = subprocess.run(

@@ -44,10 +44,32 @@ class CheckinResult:
     at: float = field(default_factory=time.time)
 
 
+def _missing_requires(acc: dict[str, Any]) -> str:
+    """catalog 可选字段 requires：签到/对账依赖的本地路径列表。
+
+    全部存在才允许跑；任一缺失自动跳过——客户端装没装由脚本探测，
+    不需要人工改 claim_policy（2026-11-15 MonkeyCode 本机未装时引入）。
+    路径支持 %ENV% 变量（与 catalog 里 command 同款风格，expandvars 可展开）。
+    返回缺失路径的拼接串（空串 = 依赖齐全）。
+    """
+    reqs = acc.get("requires") or []
+    if isinstance(reqs, str):
+        reqs = [reqs]
+    missing = []
+    for req in reqs:
+        path = os.path.expandvars(str(req))
+        if not os.path.exists(path):
+            missing.append(path)
+    return "；".join(missing)
+
+
 def _should_claim(acc: dict[str, Any], data: dict[str, Any], on: date) -> tuple[bool, str]:
     policy = acc.get("claim_policy")
     if policy in ("never_auto", "monthly") or acc.get("claim_mode") == "never":
         return False, "不自动领取"
+    missing = _missing_requires(acc)
+    if missing:
+        return False, f"客户端依赖缺失，自动跳过：{missing}"
     if ledger.claimed_on(data, acc["id"], on):
         return False, "今日已签"
     if policy == "below_threshold":
@@ -487,6 +509,11 @@ def sync(
         command = (acc.get("credits_command") or "").strip() \
             or (acc.get("status_command") or "").strip()
         if not command:
+            continue
+        missing = _missing_requires(acc)
+        if missing:
+            trace.note(f"{acc['name']} 跳过对账：客户端依赖缺失（{missing}）",
+                       label=acc["id"])
             continue
         command = command.replace("{REPO}", str(REPO_ROOT))
         rc, out = trace.stream(command, shell=True, label=acc["id"], timeout=60)

@@ -99,3 +99,29 @@ providers:
     # preflight 用 tasklist 查这些进程名
     process_names:
       - Loomy
+
+  # ToDesk AI 走桌面客户端的 GUI 键鼠通道（无 CLI、无对外 API；内部 8909 是私有 RPC，
+  # 凭据在 Program Files 的 config.ini 里，复用等于踩契约 §9.1/§9.2，故不做）。
+  # 实现要点：Tauri/WebView2 下 UIA 读不到输入框和正文，所以用官方全局快捷键 + 剪贴板
+  # 输入，用「让 AI 把结果写文件」回传（data/todesk-taskbox/*.out.md）。
+  # 额度按积分计（500/天、当天过期），客户端不返回用量 → supports_balance=False，
+  # 每次事件的 usage 都是 status=failed（契约 §7.2 允许）。
+  # 会抢焦点、单实例，所以排在链尾兜底：其它 provider 全失败或全部不可用时才用它。
+  todesk:
+    enabled: true
+    priority: 90
+    capabilities:
+      - text
+      - office
+      - explain
+    exe: "C:\Program Files\ToDesk AI\ToDeskAI.exe"
+    # 结果回传目录（相对路径按仓库根解析）
+    taskbox: data/todesk-taskbox
+    # 官方全局快捷键：Alt+Space 唤起主界面，Ctrl+Alt+N 新建会话
+    wake_hotkey: alt+space
+    new_session_hotkey: ctrl+alt+n
+    # 单次派单最长等待（s）；超时记 124
+    answer_timeout_s: 240
+    # 抢屏保护：用户最近这么多秒内有键鼠输入就不派单（0 = 关闭保护）
+    require_idle_s: 60
+    poll_interval_s: 1.0

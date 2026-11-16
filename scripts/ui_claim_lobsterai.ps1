@@ -487,7 +487,7 @@ function Test-ClickVisible([int]$cx, [int]$cy) {
     return ($pidTop -eq $pidMain)
 }
 
-function BringBack-Click([int]$ax, [int]$ay) {
+function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1) {
     # 方案甲 M3（第三级）：窗口移回点击位 → 保存光标 → 真实点击 → 恢复光标
     # → 移回屏外。点击位默认原位，被遮挡则试 (0,0)，再不行放弃（pending 由
     # 后继判据裁定，不重试——SAFETY 第 3 条）。
@@ -524,9 +524,15 @@ function BringBack-Click([int]$ax, [int]$ay) {
     try {
         [void][L32]::SetCursorPos($cx, $cy)
         Start-Sleep -Milliseconds 120
-        [L32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-        [L32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-        Log ("bringback: real click @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+        # 2026-11-16：Chromium 首击只完成焦点切换是 AutoClaw/Trae 实证过的坑
+        # （面板菜单行单真点 3 帧无变化）；$Clicks=2 时 180ms 间隔连点两下，
+        # 与 AutoClaw 签到按钮同一口径。
+        for ($ci2 = 1; $ci2 -le [Math]::Max(1, $Clicks); $ci2++) {
+            [L32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+            [L32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            Log ("bringback: real click " + $ci2 + "/" + [Math]::Max(1, $Clicks) + " @ " + $cx + "," + $cy + " (cursor saved " + $saved.X + "," + $saved.Y + ")")
+            if ($ci2 -lt $Clicks) { Start-Sleep -Milliseconds 180 }
+        }
     } finally {
         # R4：任何异常路径都要恢复光标并重新停到屏外
         [void][L32]::SetCursorPos($saved.X, $saved.Y)
@@ -874,6 +880,66 @@ if(Test-PanelOpen $lines){
             if(-not $claimBtn -and $l.x -lt ($winW*0.35) -and $l.text -match $ClaimBtnRe -and $l.text -notmatch '登录'){ $claimBtn=$l }
         }
         if($claimBtn -or $alreadyHit){ break }
+    }
+}
+
+# --- 2026-11-16 改版适配：领取入口移入「每日积分礼」页面 ---
+# 新版客户端撤掉了右上角 chip，「我的」面板里的「每日积分礼」变成菜单项，
+# 点它进入积分页，领取按钮/今日已领在页面内而不在面板行上
+# （01:16 实测 panel 帧只有菜单行+积分额度 1328.75，无任何领取按钮）。
+# panel 行上找不到按钮时，点面板内的「每日积分礼」行，再到页面里找按钮。
+if(-not $claimBtn -and -not $alreadyHit){
+    $giftMenu=$null
+    foreach($l in $cap){
+        if($l.x -lt ($winW*0.35) -and $l.text -match '每日积分礼'){ $giftMenu=$l }
+    }
+    if(-not $giftMenu){
+        # $cap 可能不存在（面板已开 skip toggling 分支没抓帧）：现抓一帧
+        $capNow = Get-OcrLines ""
+        foreach($l in $capNow){
+            if($l.x -lt ($winW*0.35) -and $l.text -match '每日积分礼'){ $giftMenu=$l }
+        }
+    }
+    if($giftMenu){
+        $gx2=$giftMenu.x+[int]($giftMenu.w/2); $gy2=$giftMenu.y+[int]($giftMenu.h/2)
+        Log ("gift menu row '"+$giftMenu.text+"' at "+$gx2+","+$gy2+" -> open gift page")
+        # 双击：单真点实测被 Chromium 首击吞掉（01:22 三帧无变化），与 AutoClaw 同口径
+        if ($Offscreen) { BringBack-Click $gx2 $gy2 2 } else { Click-At $gx2 $gy2 -SkipSynth }
+        $gBtn=$null; $gDone=$null; $gi=0
+        foreach($delay in @(2000,2500,3000)){
+            Start-Sleep -Milliseconds $delay
+            $gi++
+            $gcap = Get-OcrLines ($frameDir+"\lobsterai_gift"+$gi+".png")
+            $gdump = ($gcap | ForEach-Object { $_.text+"@"+$_.x+","+$_.y }) -join " | "
+            Log ("gift"+$gi+": "+$gdump.Substring(0,[Math]::Min(500,$gdump.Length)))
+            foreach($l in $gcap){
+                if(-not $gDone -and $l.text -match '今日已领|已领取|本期已完成|已签到'){ $gDone=$l }
+                if(-not $gBtn -and $l.text -match $ClaimBtnRe -and $l.text -notmatch '登录'){ $gBtn=$l }
+            }
+            if($gDone -or $gBtn){ break }
+        }
+        if($gDone){
+            Log ("gift already: "+$gDone.text); Close-LaunchedApp
+            if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"already","detail":"'+$gDone.text+'"}',(New-Object System.Text.UTF8Encoding($false))) }
+            exit 0
+        }
+        if($gBtn){
+            $bx4=$gBtn.x+[int]($gBtn.w/2); $by4=$gBtn.y+[int]($gBtn.h/2)
+            Log ("click gift page claim btn '"+$gBtn.text+"' at "+$bx4+","+$by4)
+            # -SkipSynth：动作按钮必须真实点击（与 chip/panel 同口径）
+            Click-At $bx4 $by4 -SkipSynth
+            $okHit3=$null
+            foreach($delay in @(2000,2500,3000)){
+                Start-Sleep -Milliseconds $delay
+                $fcap3 = Get-OcrLines ""
+                foreach($l in $fcap3){ if($l.text -match '今日已领|已领|领取成功|成功'){ $okHit3=$l } }
+                if($okHit3){ break }
+            }
+            if($okHit3){ Log ("ok marker: "+$okHit3.text); Close-LaunchedApp; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"ok","detail":"'+$okHit3.text+'"}',(New-Object System.Text.UTF8Encoding($false))) } exit 0 }
+            Log "clicked gift page claim, no confirm marker"
+            Restore-Scene; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"pending","detail":"clicked gift claim, no confirm"}',(New-Object System.Text.UTF8Encoding($false))) }
+            exit 2
+        }
     }
 }
 

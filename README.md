@@ -15,7 +15,6 @@
 | **B** | AutoClaw 智谱 | 智谱 AI | 200/天 | 分类（4 类） | 无（另有不定期大额积分活动） | 每日签到·可累积 | UI/OCR 提权 | 4/4/2 | 3.4 |
 | **B** | Qoder CN | 阿里巴巴 | 100/天 | 30 天 | 无 | 每日签到·可累积 | UI/OCR 提权 | 3/5/2 | 3.3 |
 | **B** | Trae | 字节跳动 | 100/天 | 31 天 | 无 | 每日签到·可累积 | UI/OCR 提权 | 3/4/3 | 3.3 |
-| **B** | ZCode 智谱 | 智谱 AI | 周期制 | 服务端下发 | 无 | 月度 | 不自动 | 3/5/1 | 3.0 |
 | **B** | LobsterAI | 网易有道 | 100/天 | 30 天 | 无 | 每日签到·可累积 | UI/OCR 提权 | 2/4/3 | 2.9 |
 | **B** | DuMate 百度搭子 | 百度 | 500/天 | 30 天 | 无 | 每日签到·可累积 | 手签 | 4/3/1 | 2.8 |
 | **B** | JoyCode 京东 | 京东云 | 一次性 | 至 2026-10-16 | 无 | 一次性 | 不自动 | 4/3/1 | 2.8 |
@@ -24,6 +23,7 @@
 | **B** | Mavis 腾讯 | 腾讯 | 10M token/天 | 当日清零 | 无 | 登录即领·当日清零 | 不自动 | 4/2/1 | 2.5 |
 | **C** | CatPaw 美团 | 美团 | 一次性 | 365 天 | 无 | 一次性 | 不自动 | 2/4/1 | 2.3 |
 | **C** | 扣子 Coze | 字节跳动 | 60/天 | 当日清零 | 无 | 登录即领·当日清零 | 不自动 | 2/4/1 | 2.3 |
+| **C** | ZCode 智谱 | 智谱 AI | 周期制 | 服务端下发 | 无 | 月度 | 不自动 | 1/5/1 | 2.2 |
 | **C** | ToDesk AI | ToDesk | 500/天 | 当日清零 | 无 | 每日签到·当日清零 | 手签 | 2/3/1 | 2.0 |
 | **C** | MonkeyCode 积分 | 长亭百川 | 100/天 | 服务端下发 | 无 | 每日签到·可累积 | external 直签 | 1/3/1 | 1.6 |
 | **C** | 千问办公 | 阿里巴巴 | 100/天 | 当日清零 | 无 | 登录即领·当日清零 | 不自动 | 1/3/1 | 1.6 |
@@ -60,7 +60,7 @@
 - 额度：200/天，分类（4 类），连签/额外：无（另有不定期大额积分活动）
 - 模型：【2026-10-25 本机 1.20.0 settings.json 实测】Auto（zai_auto，metadata.auto_model_name=deepseek-v4-pro，1M context/393k output，低消耗）+ Auto-Fast（zai_auto-fast，1M/131k，支持图片，中消耗）+ GLM-5.3（zaicoding_glm-5.3，1M/307k，高消耗）+ GLM-5.3-Flash（zai_glm-5.3-flash，1M/131k，支持图片，低消耗）+ 自定义 API（本机 Ollama qwen3:14b）。不是『只有 GLM』，也不是旧记录的多厂商大池；官方 2026-10-22 页面另列 GLM-5-Turbo/GLM-5V-Turbo，未在本机目录出现。
 - 移动端：有—— 与桌面端项目不同步，是独立的云端 claw 环境；移动端模型未实测。桌面端 1.20.0 已确认 Auto 路由 metadata 指向 DeepSeek-V4-Pro + GLM-5.3/5.3-Flash，不能再说『同为 GLM』
-- 简评：200/天，有效期分类（daily/monthly/longTerm/campaign，非统一天数），本地执行能力全，有思考过程。模型不是只有 GLM：1.20.0 的 Auto/Auto-Fast metadata 指向 DeepSeek-V4-Pro，另有 GLM-5.3/5.3-Flash，且支持自定义 API；但内置目录只有 4 个，场景覆盖仍不如多厂商大池。签到藏在灵感中心任务卡里靠 OCR 定位，首页横幅还受服务端开关控制，随时可能定位不到；实测经常容易资源紧张，任务会停止执行；时不时有送大额积分的活动（非固定周期，不能当稳定日额度）。有效期逐条到期日服务端不下发，台账按『过期未知』处理。
+- 简评：200/天，有效期分类（daily/monthly/longTerm/campaign，非统一天数），本地执行能力全，有思考过程。模型不是只有 GLM：1.20.0 的 Auto/Auto-Fast metadata 指向 DeepSeek-V4-Pro，另有 GLM-5.3/5.3-Flash，且支持自定义 API；但内置目录只有 4 个，场景覆盖仍不如多厂商大池。签到藏在灵感中心任务卡里靠 OCR 定位，首页横幅还受服务端开关控制，随时可能定位不到；实测经常容易资源紧张，任务会停止执行；时不时有送大额积分的活动（非固定周期，不能当稳定日额度）。有效期逐条到期日已实测可读（UI 积分明细页；每日签到=发放后 7 天整过期），台账已按逐条过期登记（credits_command=UI 采集解析，FIFO 口径）。
 - 适合：需要本地执行 + Auto/GLM 多模型路由的场景；资源紧张时会停止执行，别当稳定主力
 - 主人体验：有思考过程（早先记的『不输出思考情况』是误记，已更正）。但经常容易资源紧张，任务会停止执行；时不时有送大额积分的活动（非固定周期，不能当稳定日额度），实际用起来不太好用。**桌面端 1.20.0 模型目录不是只有 GLM**：settings.json 的 models.catalog = Auto/Auto-Fast（metadata.auto_model_name=deepseek-v4-pro）+ GLM-5.3 + GLM-5.3-Flash + 自定义 API（本机 Ollama qwen3:14b）。旧记录『只有 GLM』与更早的『Pony-Alpha-2/DeepSeek/Kimi/MiniMax 多模型池』都不准确。移动端与桌面端项目不同步，是独立的云端 claw 环境；移动端模型未实测。
 
@@ -80,19 +80,11 @@
 - 适合：需要多模型切换、MCP 工具链的编码任务
 - 主人体验：_待补充_
 
-### B · ZCode 智谱（智谱 AI）— 3.0 分
-
-- 额度：周期制，服务端下发，连签/额外：无
-- 模型：GLM-5.3（1M 上下文）/ GLM-5.3-Flash / GLM-5-turbo；ZCode 为 GLM-5.3 官方 Harness，绑定 BigModel/Z.ai 账号直用套餐【zcode.z.ai/cn/docs，2026-10-30】；本机版本 3.16.3.8992
-- 简评：订阅制订额，无每日签到、不进自动盘（同 Kimi Work 的订阅型分组）；额度机制是 5 小时段 + 周双窗口、不结转，量级不小但不可攒。能力是台账天花板级：GLM-5.3 官方 Harness，agentic 编码全流程 + computer-use 原生桌面操控 + browser-use 浏览器自动化 + MCP/插件/技能生态 + 子智能体/定时/闲时任务，本仓库日常维护即由 ZCode 会话完成。短板：内置仅 GLM 系、无生图/生视频输出、无独立官方移动客户端（Remote/Bot 远控）。
-- 适合：日常编码主力与长任务自动化；非高峰跑省额度
-- 主人体验：_待补充_
-
 ### B · LobsterAI（网易有道）— 2.9 分
 
 - 额度：100/天，30 天，连签/额外：无
-- 模型：BYOK 多提供商（2026.10.16 客户端 provider 表）：内置免费 DeepSeek-V4.1-Flash（lobsterai-server/yd-fast，本会话 model=lobsterai-server/deepseek-flash）；BYOK 可接 OpenAI GPT-5.6 Sol/Terra/Luna、GPT-5.5/5.4，Anthropic Claude Opus 4.7/4.6、Sonnet 4.6，Gemini 3.1 Pro/3 Flash，xAI Grok 4.5/4.3，DeepSeek V4 Flash/Pro，Kimi K3/K2.6/K2.5，GLM 5.1/5/4.7，MiniMax M3/M2.7/M2.5，Qwen3.6/3.5 Plus，Doubao-Seed-2.0，另含 Ollama/LM Studio/GitHub Copilot/OpenRouter/自定义【2026-10-25 本机 app_config + dist-electron/shared/providers/constants.js；官网 2026.10.16】
-- 简评：100/天、30 天可累积、无连签加成，额度本身不大；但每日「每日积分礼」UI 路线已连续实测入账（09-28..10-25 共 28 天，服务端 context claimedDays=34 / claimedCredits=3400），不再是「占着坑不产粮」。模型侧 2026.10.16 客户端已换到 DeepSeek V4 Flash/Pro、Kimi K3、GLM 5.1、MiniMax M3、Qwen3.6、Doubao 2.0，BYOK 还能接 GPT-5.6 / Claude Opus 4.7 / Gemini 3.1 Pro；浏览器自动化可调试，办公文档链路完整。短板：UI 签到依赖窗口锚点/OCR，近一个月多次因合成点击与前台遮挡失效；无原生 Computer Use；无手机客户端（仅 IM 远控）。
+- 模型：BYOK 多提供商（2026.10.30 客户端 provider 表）：内置免费默认 DeepSeek-V4.1-Flash（lobsterai-server/yd-fast，本会话 model=lobsterai-server/deepseek-flash）；BYOK 可接 OpenAI GPT-5.6 Sol/Terra/Luna、GPT-5.5/5.4，Anthropic Claude Opus 4.7/4.6、Sonnet 4.6，Gemini 3.1 Pro/3 Flash/3.1 Flash Lite，xAI Grok 4.5/4.3/Build 0.1，DeepSeek V4 Flash/Pro/Reasoner，Kimi K3/K2.7 Code/K2.6/K2.5，GLM 5.3/5.3 Flash/5.1/5/4.7，MiniMax M3/M2.7/M2.5，Qwen3.8 Max/3.7 Plus/3.8 Flash/3.6/3.5 Plus，Doubao-Seed-2.0 Pro/Lite/Mini，MiMo V2.6 Pro/V2.5，Step 3.5 Flash，另含 Ollama/LM Studio/GitHub Copilot/OpenRouter/自定义【2026-11-06 本机 app_config + 2026.10.30 dist-electron/shared/providers/constants.js；官网 2026.10.30】
+- 简评：100/天、30 天可累积、无连签加成，额度本身不大；但每日「每日积分礼」UI 路线已连续实测入账，且 2026-11-06 打通只读 `/api/user/credits-earned`：47 条逐次发放（46 天日奖励 + 1 条新用户 300，累计 4900；每条带剩余/已用/过期日/状态），台账已从本地估算升为服务端真值（首次 3100 → 2775，28 条活条目）。实际用量偏低：53 天只用了约 1331.6（约 25.1/天），另有 845.7 过期未用。模型侧 2026.10.30 客户端已换到 Qwen3.8 Max/Flash、Kimi K3/K2.7 Code、GLM 5.3/5.3 Flash、MiniMax M3、DeepSeek V4、MiMo V2.6，BYOK 还能接 GPT-5.6 / Claude Opus 4.7 / Gemini 3.1 Pro；浏览器自动化可调试，办公文档链路完整。短板：UI 签到依赖窗口锚点/OCR，近一个月多次因合成点击与前台遮挡失效；无原生 Computer Use；无手机客户端（仅 IM 远控）。
 - 适合：日常办公/编码副手；每日顺手领，UI 自动签到已跑通
 - 主人体验：2026-10-27 主人反馈：总是要等网关启动；不知道为什么不能「不设工作空间」直接用；切换工作空间时也要重启/启动网关，体感很慢。
 
@@ -153,6 +145,13 @@
 - 适合：多模态/搜索类临时任务
 - 主人体验：【2026-11-12 主人实测】总是需要审批，积分消耗很快，不太推荐使用。
 
+### C · ZCode 智谱（智谱 AI）— 2.2 分
+
+- 额度：周期制，服务端下发，连签/额外：无
+- 模型：GLM-5.3（1M 上下文）/ GLM-5.3-Flash / GLM-5-turbo；ZCode 为 GLM-5.3 官方 Harness，绑定 BigModel/Z.ai 账号直用套餐【zcode.z.ai/cn/docs，2026-10-30】；本机版本 3.16.3.8992
+- 简评：订阅制订额、无每日签到、不进自动盘。免费侧基本无价值：原先前 5 天送体验积分，之后仅偶有活动追加且额度很少，目前体验额度已直接停发；最低起步套餐近 100 元/月。可用性差，使用中经常提示服务器繁忙；此前还曝出上传用户信息的安全争议。能力仍是台账天花板级（GLM-5.3 官方 Harness，agentic 编码全流程 + computer-use 原生桌面操控 + browser-use 浏览器自动化 + MCP/插件/技能生态 + 子智能体/定时/闲时任务），但免费额度归零、起步价高、可用性与隐私口碑不佳，综合不推荐。
+- 适合：不推荐（体验额度已停发、起步近 100 元/月、服务器常繁忙）
+- 主人体验：前 5 天会送积分，之后有时做活动再送但额度很少；使用时常提示服务器繁忙，可用性很差。目前直接没有体验额度了，最低起步套餐近 100 元/月。此前还爆出过上传用户信息的问题。总之不太推荐。
 
 ### C · ToDesk AI（ToDesk）— 2.0 分
 
@@ -255,6 +254,7 @@ credit.cmd checkin --open
 credit.cmd open workbuddy
 credit.cmd recommend 重构这个仓库
 credit.cmd record autoclaw claimed
+credit.cmd record qodercn streak 16
 credit.cmd set-balance minimax 3200
 credit.cmd record workbuddy used 50
 credit.cmd board
@@ -304,8 +304,8 @@ credit.cmd board --json
 
 | 口径 | 含义 | 谁 |
 |---|---|---|
-| **服务端真值** | 余额与过期日都来自服务端逐条明细（source=sync） | WorkBuddy、Trae、**MiniMax** |
-| 本地估算 | 余额按每日签到累加，过期日按 catalog 有效期算 | LobsterAI |
+| **服务端真值** | 余额与过期日都来自服务端逐条明细（source=sync） | WorkBuddy、Trae、**MiniMax**、**LobsterAI** |
+| 本地估算 | 余额按每日签到累加，过期日按 catalog 有效期算 | 未配 `credits_command` 的账户 |
 | 真值总量 + 推导过期 | 服务端只给桶总量，用它校正台账总数；每条到期日来自「领取日 + 有效期」 | Qoder CN（reconcile 契约） |
 | 过期未知 | 服务端没下发有效期，排序按「最后动」处理 | AutoClaw、MonkeyCode 积分 |
 
@@ -316,6 +316,7 @@ credit.cmd board --json
 | WorkBuddy | **逐条**剩余 + 每条过期时间（47 条量级） | 只读调官方 billing/meter 端点 |
 | MiniMax Code | **逐条**剩余 + 每条过期时间（40 笔量级，含已过期与已用尽） | 只读 GET `/minimax-cloud/api/v1/credit/details`（2026-10-24 打通） |
 | Trae | 总余额 + 到期日（聚合口径，逐包需 UI OCR） | 客户端扩展导出 dump |
+| LobsterAI | **逐条**发放额 + 剩余 + 每条过期时间（47 条量级，含已过期/已用尽） | 只读 GET `/api/user/credits-earned`（2026-11-06 打通） |
 | MonkeyCode 积分 | 总余额（**无**逐条过期） | 只读 GET /users/wallet（毫积分 ÷1000） |
 | Qoder CN | 总余额 + 分桶（套餐内/资源包）+ 今日签到态；服务端**不下发**逐条批次，台账用 reconcile 保住每条的推导到期日 | 读客户端自己落的 `me/usage` 日志摘要 |
 
@@ -331,6 +332,40 @@ credit.cmd board --json
 screen(400,2023) 开窗，同一秒 main.log 落下新的「用量响应摘要」），随后
 `credit.py sync --only qodercn` 由闸门裁定有没有取到新数。
 
+⚠️ 该方法只读得到**近几分钟内**的记录：客户端 main.log 按 10MB 轮转成 `main.1.log` /
+`main.2.log`，聊天一忙几分钟一轮，最老的直接被删。2026-10-31 实踩——当天记录被挤进
+`main.2.log` 后，旧解析器（只 glob `*/main.log`）报「记录不是今天的（10-25）」，
+`--line` / `--ledger` 当场失明。现已改扫 `main*.log` 并按行内时间戳取最新；
+对账仍要**紧贴** `-Usage` 跑，别指望过一阵再补拉（记录可能已被轮转删掉）。
+
+⚠️ **`granted` ≠ 到账**（2026-10-31 实锤）：Qoder 的「领取」按钮变灰只代表点了，
+不代表服务端发了额度。10-30 01:12:39 的用量记录（比那次点击早 2 分钟）已显示
+`addOnQuota total=1600 / used=307`，之后三次记录（10-30 14:04、10-31 00:07、00:36）
+一字不差 → 10-30、10-31 两轮点击对 total 零影响；10-21 同理（800 停了一整天）。
+10-13 起 19 次点击实际只到账 16 次（total 1600÷100），缺 10-21、10-30、10-31。
+reconcile 会把多记的 +100 扣回（10-31 1393→1293），所以**余额始终是对的**，
+但连签会虚高——用 `credit record qodercn streak <N>` 按实际到账修正（已修 19→16）。
+判到账只认 total 是否 +100，别认按钮。
+
+**Qoder 的「日」是 10:00 换轮，不是 0 点**（2026-10-31 主人指正）：00:00–09:59 领的是
+前一天 10:00 开启的那一轮，所以 00:05 的定时轮实际在领「前一天轮」。跳过后的补救窗口
+只到当天 10:00；过了 10:00 这一轮作废（10-30 轮就这么丢的）。反之，10:00 之后开启的
+一轮到次日 10:00 前都能领，次日 00:05 的轮次仍落在同一轮里。实测 10-31 15:19：
+`total 1600 / used 308 / remaining 1292`，10:00 换轮不会自动发 100，必须点领取。
+台账按日历日记账会与轮次错位一天——10-31 那条 +100 对应的是 10-30 轮。
+
+**领取可靠性加固（2026-10-31）**：
+
+- 判定顺序改为「先扫黑药丸，再按已领取收场」。旧顺序先看全窗 OCR，聊天区里的
+  「已领取/领取成功」会让按钮还亮着就跳过。
+- 点击后只认「黑药丸消失」或「点击前没有已领词、点击后出现」，不再单凭全窗 OCR 报 granted。
+- 每次领取把小窗帧与 OCR 词表落到 `logs/qodercn_claims/<时间戳>/`（`00-initial` /
+  `02-popup` / `03-before-click` / `04-after-click`，PNG + TXT，保留 14 天）。
+- Python 侧兜底：ps1 返回 already、但客户端活动态 15 分钟内仍 `claimable=true` 时，
+  按 pending 处理，不记 +100。
+- 每日链路在领完后写一行 `logs/qodercn_verify.log`：`status / before / after / delta`，
+  `delta>=100` 才算到账。**次日上午先看这一行**，再对着证据图复核。
+
 烧卡层级（当日清零 > 7 天内到期 > 长期 FIFO > 有上限 > 过期未知）与 `recommend`
 共用 `agent_credit/priority.py` 一份口径：看板说先烧 A、推荐说先烧 B 那种分裂，
 是这类项目最容易出的内耗。
@@ -344,7 +379,7 @@ screen(400,2023) 开窗，同一秒 main.log 落下新的「用量响应摘要�
 |---|---|---|---|
 | MiniMax Code | **30** | confirmed | asar i18n 官方文案 + 服务端 `expire_at_ms` 算出正好 30 天 |
 | WorkBuddy | 30 | measured | 本地记账规则；服务端 status 无有效期字段 |
-| LobsterAI | 30 | measured | i18n `dailyCheckInValidityDays` 的 `days` 是服务端变量；UI 实测 30 天 |
+| LobsterAI | 30 | confirmed | 服务端逐条 `expiresAt` 与 `earnedAt` 相差正好 30 天（`/api/user/credits-earned`，2026-11-06） |
 | Trae | 31 | measured | 官方规则页 + 双方 Agent 自述（FIFO 自然日）；API 无字段 |
 | AutoClaw | **分类，无统一值** | measured | 积分分daily/monthly/longTerm/campaign 四类，各类独立算；明细页在设置→积分 |
 | MonkeyCode 积分 | ? | **unknown** | 2026-10-20 复扫：wallet 无 expire/grants，exe 仍只有 wallet/checkin；总量可对账（毫积分÷1000），逐条过期仍无从查证 |

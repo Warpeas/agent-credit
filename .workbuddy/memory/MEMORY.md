@@ -94,6 +94,14 @@
 6. **坐标换算**：Read 展示 PNG 等比缩到 1088 宽，`scale = 真实像素宽/1088`，
    `abs = 窗口原点 + 缩略图坐标*scale`（见 `scripts/ui_claim_monkeycode.py:content_click`）。
 7. OCR 会被活动广告文案劫持 → 锚点/按钮限定左侧栏 `x<600` 且限文本长度（锚点 ≤12、按钮 ≤16）。
+8. **还原窗口时 `SetWindowPos` 给的宽高可能被 Electron/Chromium 丢掉**（2026-11-13 实锤）：
+   Qoder 收尾 `SetWindowPos(...,3600,2076,0x0014)` 只落了位置，窗口留成 `12x2076` 一条缝，
+   而且「残留条带」判据拦不住，下一轮会把缝当 OriginalRect，永远修不回来。
+   口径：还原必须**读回校验 + 四步递进**（SetWindowPos → SetWindowPlacement(rcNormalPosition)
+   → 先在屏内定尺寸再挪位 → 夹进桌面兜底），并把 W<600 或 H<400 当异常态处理（优先按
+   `GetWindowPlacement` 的正常 rect 修）；冷启动实例关窗前也要先还原 rect，防客户端持久化屏外位置。
+   已落地：`scripts/ui_claim_qodercn.ps1`（Restore-OriginalRect）、`scripts/ui_claim_monkeycode.py`
+   （restore_rect / sane_rect / _cleanup）。
 
 ## 客户端事实
 
@@ -152,9 +160,10 @@
 
 - Electron，双窗口同 MiniMax 构型。
 - **有效期 30 天、可累积**（asar i18n `dailyCheckInValidityDays` 是服务端变量；UI 实测 30 天；台账 `expires_at = granted_at + 30 天`）。旧记录「积分四类各自独立 → validity_days=null」是 AutoClaw 的结论，误抄到 LobsterAI，已删。
-- 签到走 client-activities 活动体系（activityCode=`daily-check-in-evergreen-prod-20260814`）；旧记录「slot 永久 empty / 不走 daily_check_in」是 external 探测写死 `clientVersion=1.0.0` + `containerApiVersion=1` 的误判。2026-10-25 用 2026.10.16 + sidebar CAV=2 实测 slot=available，context `rewardCredits=100 / claimedDays=34 / claimedCredits=3400 / claimedToday=true`。
+- 签到走 client-activities 活动体系（activityCode=`daily-check-in-evergreen-prod-20260814`）；旧记录「slot 永久 empty / 不走 daily_check_in」是 external 探测写死 `clientVersion=1.0.0` + `containerApiVersion=1` 的误判。2026-10-25 用 2026.10.16 + sidebar CAV=2 实测 slot=available，context `rewardCredits=100 / claimedDays=34 / claimedCredits=3400 / claimedToday=true`。2026-11-06 客户端 2026.10.30 复核仍 available，context `claimedDays=46 / claimedCredits=4600`；台账 39 条（09-28..11-06，缺 10-24），近 30 天 29/30。
+- **2026-11-06 修 external 静默失效**：2026.10.30 的 `app.asar` 文件 payload 带 NUL 对齐前缀，旧 `client_version()` 直接 `json.loads` 抛异常被 `except` 吞掉 → 返回 `0.0.0` → 服务端 slot 返回 `empty`（假「无活动」）。已改为 `lstrip(b"\x00")` + `JSONDecoder.raw_decode`，`status` 恢复 available，版本读出 2026.10.30。客户端升级后先跑一次 `status` 再判定「无活动」。
 - 判是否已领：2026.10.16 版 UI 直接显示「今日已领」+「奖励到账 +100积分」；旧版才靠「立即领取」按钮消失 + 额度上涨。入口：左下「我的」面板 / 右上角「每日积分礼」chip。
-- 无 external 余额端点、本地 sqlite 无积分缓存 → 余额只能 UI OCR。
+- 2026-11-06 打通积分明细：只读 `GET /api/user/credits-earned`（同一 Bearer token）返回逐条 `credits/creditsUsed/creditsRemaining/status/earnedAt/expiresAt`；`agent_credit/lobsterai_credits.py`（`--line`/`--ledger`）已接 catalog 的 status/credits_command，看板口径升为服务端真值。旧记录「无 external 余额端点、余额只能 UI OCR」作废。
 - external 脚本已修（动态读 app.asar 版本 + placement CAV + activityType + idempotencyKey）；主路线仍 UI，未切换。
 - **启动/工作空间体验（2026-10-27 主人反馈）**：总是要等网关启动；不知道为什么不能「不设工作空间」直接用；切换工作空间时也要重启/启动网关，体感很慢。
 - ⚠️ 用户栏选择器不能只按空间挑：面板展开时左下同时有「退出登录」和「我的」

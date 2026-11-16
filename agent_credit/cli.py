@@ -6,6 +6,7 @@ import json
 import sys
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from . import trace
 from . import mc_credits
 from . import wb_credits
 from . import board as board_mod
+from . import autoclaw_credits
 from . import trae_credits
 from . import qodercn_credits
 from .apps import launch
@@ -25,10 +27,44 @@ from .doctor import format_report, report
 from .recommend import format_recommend, recommend
 
 
+def cmd_idle(args: argparse.Namespace) -> int:
+    """等键鼠空闲：返回 0=已空闲（可续跑）/ 3=超时仍活跃。"""
+    from . import interaction
+
+    decision = interaction.wait_for_idle(args.threshold, args.max, label="idle")
+    print(json.dumps({"ok": decision.ok, "idle": round(decision.idle, 1),
+                      "waited": round(decision.waited, 1)}, ensure_ascii=False))
+    return 0 if decision.ok else 3
+
+
+def _chain_state_line() -> str | None:
+    """读计划任务链留下的阶段心跳，区分「等键鼠空闲」和「正在执行」。"""
+    path = checkin_mod.REPO_ROOT / "logs" / "chain_state.json"
+    try:
+        st = json.loads(path.read_text(encoding="utf-8-sig"))
+        at = datetime.strptime(st["at"], "%Y-%m-%d %H:%M:%S")
+    except (OSError, ValueError, KeyError):
+        return None
+    if (datetime.now() - at).total_seconds() > 900:
+        return None
+    label = {
+        "checkin": "签到中", "waiting_idle": "等待键鼠空闲",
+        "running_ui": "UI 签到执行中", "resume": "续跑 UI 账户",
+        "sync": "对账中", "deferred": "已让位", "done": "本轮已结束",
+    }.get(st.get("phase"), str(st.get("phase") or "运行中"))
+    note = str(st.get("note") or "").strip()
+    tail = f"（{note}）" if note else ""
+    return f"后台任务：{label}{tail}  [{st.get('at')} pid {st.get('pid')}]"
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     data = ledger.load()
     on = ledger.today()
-    lines = [f"日期 {on.isoformat()}  台账 {ledger.LEDGER_PATH}", ""]
+    lines = [f"日期 {on.isoformat()}  台账 {ledger.LEDGER_PATH}"]
+    background = _chain_state_line()
+    if background:
+        lines.append(background)
+    lines.append("")
     for acc in accounts():
         st = ledger.state(data, acc["id"])
         rem = ledger.remaining(data, acc["id"], on)
@@ -155,7 +191,21 @@ def cmd_record(args: argparse.Namespace) -> int:
             print(f"连签奖励 +{result['bonus_entry']['amount']}")
         print(f"连签 {result['streak']} 天，剩余 {result['remaining']}")
         return 0
-    print("action 必须是 used 或 claimed", file=sys.stderr)
+    if action == "streak":
+        # 按实际到账修正连签：签到动作成功但服务端没发额度时，mark_claimed 仍会 +1，
+        # 连签就会虚高。这里只改计数，不动余额/条目（余额以 reconcile 为准）。
+        if args.amount is None:
+            print("streak 必须带天数", file=sys.stderr)
+            return 1
+        acc = find_account(args.account)
+        data = ledger.load()
+        st = ledger.state(data, acc["id"])
+        old = st.get("streak_current") or 0
+        st["streak_current"] = max(0, int(args.amount))
+        ledger.save(data)
+        print(f"{acc['name']} 连签 {old} → {st['streak_current']}（按实际到账修正）")
+        return 0
+    print("action 必须是 used / claimed / streak", file=sys.stderr)
     return 1
 
 
@@ -196,6 +246,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         if r["ok"]:
             print(f"{r['name']}: {r['before']} → {r['after']}"
                   f"（{r['mode']}，{r['entries']} 条）")
+        elif r.get("deferred"):
+            # 客户端正在使用中：主动让位，不是失败，也不阻塞其他账户。
+            print(f"{r['name']}: 对账跳过 — {r['detail']}")
         else:
             bad += 1
             print(f"{r['name']}: 对账失败 — {r['detail']}", file=sys.stderr)
@@ -279,6 +332,33 @@ def cmd_credits(args: argparse.Namespace) -> int:
         else:
             print(qodercn_credits.format_text(record, campaign))
         return 0
+    if account == "autoclaw":
+        # 数据源 = 只读 UI 采集（scripts/autoclaw_credits_ui_capture2.py）的
+        # 当天新鲜 JSON；不是今天的采集一律拒绝登记（防旧值覆盖真余额）。
+        try:
+            if args.allow_stale:
+                data = autoclaw_credits.load_capture(fresh_only=False)
+            else:
+                data = autoclaw_credits.load_capture(fresh_only=True)
+            payload = autoclaw_credits.build_payload(data)
+        except SystemExit as exc:
+            print(f"查询失败：{exc}", file=sys.stderr)
+            return 1
+        if args.ledger:
+            slim = {k: v for k, v in payload.items() if k != "grants_raw"}
+            print(json.dumps(slim, ensure_ascii=False))
+            return 0
+        if args.line:
+            print(json.dumps({"balance": payload["total"],
+                              "balance_at_capture": payload["balance_at_capture"],
+                              "captured_at": payload["captured_at"]},
+                             ensure_ascii=False))
+            return 0
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=1, default=str))
+        else:
+            print(autoclaw_credits.format_text(payload))
+        return 0
     print("积分明细查询目前支持 workbuddy / trae / monkeycode_credit / qodercn"
           "（其余家见 research/answers/ 的登记进度）",
           file=sys.stderr)
@@ -332,6 +412,9 @@ def cmd_set_balance(args: argparse.Namespace) -> int:
 def cmd_show(args: argparse.Namespace) -> int:
     acc = find_account(args.account)
     data = ledger.load()
+    if getattr(args, "remaining", False):
+        print(ledger.remaining(data, acc["id"]))
+        return 0
     payload: dict[str, Any] = {
         "account": acc,
         "state": ledger.state(data, acc["id"]),
@@ -477,6 +560,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="各家余额与签到状态")
     s.set_defaults(func=cmd_status)
 
+    s = sub.add_parser("idle", help="等键鼠空闲（0=已空闲 / 3=超时仍活跃）")
+    s.add_argument("--threshold", type=float, default=60,
+                   help="连续无输入多少秒算空闲（默认 60）")
+    s.add_argument("--max", type=float, default=300,
+                   help="最多等多少秒（默认 300）")
+    s.set_defaults(func=cmd_idle)
+
     s = sub.add_parser("checkin", help="按策略签到（ui=本机客户端；失败则提示手签）")
     s.add_argument("--only", help="只处理一个账户 id/别名")
     s.add_argument("--open", action="store_true", help="打开待手签且已安装的客户端（不含当日清零）")
@@ -491,9 +581,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task", nargs="+")
     s.set_defaults(func=cmd_recommend)
 
-    s = sub.add_parser("record", help="手签入账或登记消耗")
+    s = sub.add_parser("record", help="手签入账、登记消耗、修正连签")
     s.add_argument("account")
-    s.add_argument("action", choices=["used", "claimed"])
+    s.add_argument("action", choices=["used", "claimed", "streak"],
+                   help="claimed=签到入账；used=登记消耗；streak=按实际到账修正连签")
     s.add_argument("amount", nargs="?", type=int, default=None)
     s.add_argument("--source", default="daily")
     s.add_argument("--expires", default=None, help="YYYY-MM-DD，默认按 catalog 有效期")
@@ -506,9 +597,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--only", help="只处理一个账户 id/别名")
     s.set_defaults(func=cmd_sync)
 
-    s = sub.add_parser("credits", help="查询积分明细（余额+过期时间）；支持 workbuddy / trae / monkeycode_credit / qodercn")
+    s = sub.add_parser("credits", help="查询积分明细（余额+过期时间）；支持 workbuddy / trae / monkeycode_credit / qodercn / autoclaw")
     s.add_argument("account", nargs="?", default="workbuddy", help="账户 id，默认 workbuddy")
     s.add_argument("--all", action="store_true", help="包含已用完/已过期的条目")
+    s.add_argument("--ledger", action="store_true",
+                   help="对账 JSON（credits_command 约定，autoclaw 用）")
+    s.add_argument("--allow-stale", action="store_true",
+                   help="autoclaw：允许旧采集（仅查看，不登记）")
     s.add_argument("--json", action="store_true", help="输出全量 JSON")
     s.add_argument("--line", action="store_true",
                    help='输出一行 JSON：{"balance": N, "claimed_today": bool}')
@@ -536,6 +631,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("show", help="某个账户的 JSON 详情")
     s.add_argument("account")
+    s.add_argument("--remaining", action="store_true",
+                   help="只打印余额数字（给脚本取数用，免去解析带中文的 JSON）")
     s.set_defaults(func=cmd_show)
 
     s = sub.add_parser("dispatch", help="把任务派给本机其它 agent（单机串行，按 providers.yaml 优先级）")

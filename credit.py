@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
+import os
 import sys
+
+# 自举：AutoClaw2 自带的 vendored python 是 ._pth 完全隔离模式，
+# 连脚本目录都不进 sys.path（2026-11-10 实测），任何解释器都先显式加上。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agent_credit.cli import main
 

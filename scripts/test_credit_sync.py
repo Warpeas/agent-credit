@@ -191,9 +191,9 @@ check("SKIP_EXTERNAL 连带跳过", checkin.sync(only="workbuddy", data=data, on
 del os.environ["AGENT_CREDIT_SKIP_EXTERNAL"]
 
 data = fresh()
-# ⚠️ 这里必须挑一个**真的没配**对账命令的账户：2026-10-24 MiniMax 接通了
-# /credit/details 真值通道，已经不是「无对账命令」的例子了，用它会真联网。
-check("无对账命令的账户返回空", checkin.sync(only="autoclaw", data=data, on=ON), [])
+# ⚠️ 这里必须挑一个**真的没配**对账命令的账户：MiniMax（10-24 接通真值）、
+# AutoClaw（11-10 接通 UI 采集）都已经不是「无对账命令」的例子了，用它们会真联网/真开客户端。
+check("无对账命令的账户返回空", checkin.sync(only="dumate", data=data, on=ON), [])
 check("无对账命令时不动账本", ledger.remaining(data, "workbuddy", ON), 0)
 
 # ---------- sync() 端到端（monkeypatch trace.stream，不真联网） ----------

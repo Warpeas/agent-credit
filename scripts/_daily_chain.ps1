@@ -20,6 +20,22 @@ param([switch]$Unattended)
 
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
+$chainStart = Get-Date
+
+# 阶段心跳：计划任务只显示 Running，看不出是在等键鼠空闲还是真在干活。
+# credit.py status 会读这份文件，把「等待中 / 执行中」区分开（15 分钟内的才认）。
+function Set-ChainPhase([string]$phase, [string]$note) {
+    try {
+        $path = Join-Path $root "logs\chain_state.json"
+        @{
+            date  = (Get-Date -Format "yyyy-MM-dd")
+            at    = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+            pid   = $PID
+            phase = $phase
+            note  = $note
+        } | ConvertTo-Json -Compress | Set-Content -Path $path -Encoding UTF8
+    } catch { }
+}
 
 $isTaskHost = $false
 $parentName = ""
@@ -77,8 +93,16 @@ while ($null -eq $lockStream) {
 }
 # 子进程（credit checkin）看到这个变量就不再抢锁，否则会自己把自己锁在门外。
 $env:AGENT_CREDIT_LOCK_HELD = "1"
+Set-ChainPhase "checkin" "全量签到开始（UI 组可能先等键鼠空闲）"
 
 try {
+    # 2026-10-31：领取前记下 Qoder 余额，签完后用余额自检「真的到账了吗」。
+    # UI 的 granted/already 都只是像素/OCR 信号，最终只认服务端对账后的余额。
+    $qoderBefore = $null
+    try {
+        $qoderBefore = [int](& $py -u "$root\credit.py" show qodercn --remaining 2>$null)
+    } catch { $qoderBefore = $null }
+
     & $py -u "$root\credit.py" checkin
 
     # 启动闸门（agent_credit/gate.py）：主人按 N/Esc 就跳过今天会弹窗的后续步骤，
@@ -120,6 +144,84 @@ try {
     }
     $fallbackRan = $false
 
+    # 主人在用电脑时 checkin 会把 UI 组整组让位（快照里 deferred=true）。
+    # 这里最多补两轮：先等键鼠连续空闲，再按账户续跑；主人一直在用就留给下一次
+    # 触发（00:00 / 登录 +5min 各一次），绝不硬抢前台。总时长受 $resumeDeadline 约束，
+    # 不会顶穿计划任务的 30 分钟 ExecutionTimeLimit。
+    $deferredIds = New-Object System.Collections.ArrayList
+    try {
+        $snap0 = Get-Content -Raw -Encoding UTF8 $resFile | ConvertFrom-Json
+        if ($snap0.accounts) {
+            foreach ($p in $snap0.accounts.PSObject.Properties) {
+                # deferred=UI 组让位；sync_deferred=领取正常但客户端正在使用、对账跳过
+                if ($p.Value.deferred -eq $true -or $p.Value.sync_deferred -eq $true) {
+                    [void]$deferredIds.Add($p.Name)
+                }
+            }
+        }
+    } catch { }
+    if ($deferredIds.Count -gt 0) {
+        Write-Host ("本轮让位：" + ($deferredIds -join ",") + "；等空闲后自动续跑")
+        # 整条链最多 22 分钟（计划任务上限 30 分钟，留给最后几次客户端启动）。
+        $resumeDeadline = $chainStart.AddMinutes(22)
+        # 外层已经确认过一次连续空闲；续跑的账户级闸门只再等 90s，
+        # 避免 5 家 × 300s 把一轮拖过 22 分钟上限（2026-11-11 复盘）。
+        $prevIdleWait = $env:AGENT_CREDIT_UI_IDLE_WAIT
+        $env:AGENT_CREDIT_UI_IDLE_WAIT = "90"
+        try {
+            for ($round = 1; $round -le 2 -and $deferredIds.Count -gt 0; $round++) {
+                if ((Get-Date) -ge $resumeDeadline) { break }
+                $idleUntil = (Get-Date).AddSeconds(300).ToString("HH:mm:ss")
+                Set-ChainPhase "waiting_idle" ("等键鼠连续空闲 60s（最晚 " + $idleUntil + "）")
+                & $py -u "$root\credit.py" idle --threshold 60 --max 300 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "主人仍在操作，UI 签到留到下一次触发（或手动 credit checkin）"
+                    break
+                }
+                $still = New-Object System.Collections.ArrayList
+                $ids = @($deferredIds)
+                for ($i = 0; $i -lt $ids.Count; $i++) {
+                    if ((Get-Date) -ge $resumeDeadline) {
+                        for ($j = $i; $j -lt $ids.Count; $j++) { [void]$still.Add($ids[$j]) }
+                        break
+                    }
+                    $id = $ids[$i]
+                    Write-Host ("续跑 " + $id + " …")
+                    Set-ChainPhase "resume" ("续跑 " + $id)
+                    & $py -u "$root\credit.py" checkin --only $id
+                    $one = $null
+                    $isDeferred = $false
+                    try {
+                        $one = (Get-Content -Raw -Encoding UTF8 $resFile | ConvertFrom-Json).accounts.$id
+                        if ($one -and ($one.deferred -eq $true -or $one.sync_deferred -eq $true)) {
+                            $isDeferred = $true
+                        }
+                    } catch { }
+                    if ($isDeferred) {
+                        [void]$still.Add($id)
+                        if ($one -and $one.deferred -eq $true) {
+                            # 主人回来了：后面每个账户都会再等满一次闸门，没意义。
+                            # 剩余账户原样留给下一次触发，不再逐个空等。
+                            for ($j = $i + 1; $j -lt $ids.Count; $j++) { [void]$still.Add($ids[$j]) }
+                            break
+                        }
+                    }
+                }
+                $deferredIds = $still
+                if ($deferredIds.Count -gt 0) { Start-Sleep -Seconds 120 }
+            }
+        } finally {
+            if ($null -eq $prevIdleWait) {
+                Remove-Item Env:\AGENT_CREDIT_UI_IDLE_WAIT -ErrorAction SilentlyContinue
+            } else {
+                $env:AGENT_CREDIT_UI_IDLE_WAIT = $prevIdleWait
+            }
+        }
+        if ($deferredIds.Count -eq 0) { Write-Host "UI 组续跑完成" }
+        else { Write-Host ("仍让位：" + ($deferredIds -join ",") + "（下一轮触发再试）") }
+    }
+
+    Set-ChainPhase "sync" "对账与补采（Trae / Qoder / AutoClaw）"
     # Trae：checkin 里「领取 + 明细同步」已经合并做过（领取成功后趁客户端还开着开
     # IDE 窗、等扩展 dump、登记），这里先对账；只有 dump 不是今天的才补开一次 IDE 窗。
     & $py -u "$root\credit.py" sync --only trae
@@ -146,11 +248,46 @@ try {
             & $py -u "$root\credit.py" sync --only qodercn
         }
     }
+    # 到这里 LASTEXITCODE 是 Qoder 最后一次对账的结果；board 会覆盖它，先记下。
+    $qoderSyncOk = ($LASTEXITCODE -eq 0)
 
     # 看板：checkin 末尾已经刷过一次（含上面同样的对账数据）。只有补拉真的跑过、
     # 数据可能变了，才再刷一次。
     if ($fallbackRan) { & $py -u "$root\credit.py" board }
+
+    # 2026-10-31：Qoder 到账自检。凌晨这轮无论报 ok 还是 already，都以余额变化为准；
+    # 结论落 logs\qodercn_verify.log，第二天直接看这一行就知道有没有真的签上。
+    try {
+        $qoderAfter = $null
+        $qoderAfter = [int](& $py -u "$root\credit.py" show qodercn --remaining 2>$null)
+        if ($null -ne $qoderBefore -and $null -ne $qoderAfter) {
+            $qstat = if ($statusOf.ContainsKey('qodercn')) { $statusOf['qodercn'] } else { '?' }
+            $delta = $qoderAfter - $qoderBefore
+            $verdict = if (-not $qoderSyncOk) { "无法核验(对账失败)" }
+                       elseif ($delta -ge 100) { "到账(+$delta)" }
+                       else { "未到账(delta=$delta)" }
+            $line = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") +
+                    " status=$qstat sync=$qoderSyncOk before=$qoderBefore after=$qoderAfter delta=$delta " + $verdict
+            Add-Content -Path (Join-Path $root "logs\qodercn_verify.log") -Encoding UTF8 -Value $line
+            Write-Host ("Qoder CN 到账自检：" + $line)
+        }
+    } catch {
+        Write-Host ("Qoder CN 到账自检失败：" + $_.Exception.Message)
+    }
+
+    # AutoClaw 积分明细（2026-11-10 新增）：checkin 已把客户端杀掉，这里冷启动
+    # 采集积分明细页（只读 UI 路线，只点余额数字/获得/加载更多/返回），再对账
+    # 登记逐条到期时间。checkin 末尾的自动对账会因为没有当天采集先报一次失败——
+    # 预期行为，不影响退出码；这一步才是真正的登记。
+    & $py -u "$root\scripts\autoclaw_credits_ui_capture2.py"
+    if ($LASTEXITCODE -eq 0) {
+        $fallbackRan = $true
+        & $py -u "$root\credit.py" sync --only autoclaw
+    } else {
+        Write-Host ("AutoClaw 积分明细采集失败（rc=" + $LASTEXITCODE + "），本轮不登记")
+    }
 } finally {
+    Set-ChainPhase "done" ("本轮链路结束，耗时 " + [int]((Get-Date) - $chainStart).TotalSeconds + "s")
     if ($lockStream) {
         $lockStream.Close()
         $lockStream = $null

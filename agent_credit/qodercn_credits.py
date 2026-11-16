@@ -92,10 +92,17 @@ def _log_roots() -> list[Path]:
 
 
 def usage_log_files() -> list[Path]:
-    """所有 main.log，按修改时间从新到旧。"""
+    """所有 main*.log（含轮转的 main.1.log/main.2.log），按修改时间从新到旧。
+
+    客户端日志按 10MB 轮转：聊天面板一忙，当天的「用量响应摘要」几分钟内就会
+    被挤进 main.1.log/main.2.log。只 glob main.log 会直接看不见当天记录
+    （2026-10-31 实踩：记录在 main.2.log，查询却报「记录不是今天的」）。
+    """
     files: list[Path] = []
     for root in _log_roots():
-        files.extend((root / "logs").glob("*/main.log"))
+        logs = root / "logs"
+        files.extend(logs.glob("*/main.log"))
+        files.extend(logs.glob("*/main.[0-9]*.log"))
     return sorted((f for f in files if f.is_file()),
                   key=lambda f: f.stat().st_mtime, reverse=True)
 
@@ -195,13 +202,22 @@ def normalize_usage(usage: dict[str, Any], when: datetime | None,
 
 
 def find_usage_record() -> dict[str, Any]:
-    """取最新一条用量记录（新会话优先，会话内从行尾往前找）。"""
+    """取最新一条用量记录（按日志行时间戳取最晚，文件按 mtime 从新到旧扫）。"""
     files = usage_log_files()
     if not files:
         raise CreditQueryError(
-            f"找不到 Qoder CN 的日志（%APPDATA%\\{APP_DATA_DIRNAME}\\logs\\*/main.log）")
+            f"找不到 Qoder CN 的日志（%APPDATA%\\{APP_DATA_DIRNAME}\\logs\\*/main*.log）")
     scanned = 0
+    best: dict[str, Any] | None = None
+    best_ts: datetime | None = None
     for path in files:
+        # 文件按 mtime 降序；一旦某个文件比已找到的记录还旧，后面的只会更旧
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+        except OSError:
+            continue
+        if best_ts and mtime < best_ts:
+            break
         scanned += 1
         for line in reversed(_read_tail(path)):
             pos = line.find(USAGE_MARK)
@@ -211,11 +227,17 @@ def find_usage_record() -> dict[str, Any]:
             usage = payload.get("qoderUsage") if payload else None
             if not isinstance(usage, dict):
                 continue
-            record = normalize_usage(usage, _line_ts(line), path.parent.name)
+            ts = _line_ts(line)
+            if best_ts and ts and ts <= best_ts:
+                break
+            record = normalize_usage(usage, ts, path.parent.name)
             record["scanned_files"] = scanned
-            return record
+            best, best_ts = record, ts
+            break  # 同一文件里从行尾往前，第一条就是最新的
+    if best:
+        return best
     raise CreditQueryError(
-        f"翻过 {scanned} 个会话的 main.log，没有一条「用量响应摘要」——"
+        f"翻过 {scanned} 个会话的 main*.log，没有一条「用量响应摘要」——"
         "用量请求只在打开「我的用量」面板时发出：点开一次再来")
 
 

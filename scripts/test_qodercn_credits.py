@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -143,6 +144,23 @@ nested.mkdir(parents=True, exist_ok=True)
 newest = qc.find_usage_record()
 check("新会话优先于旧会话", newest["user_type"], "pro")
 check("会话出处", "20261020-000000.000-1-bbbb" in newest["origin"], True)
+
+# ---------- 轮转日志：记录被挤进 main.1.log 也要读得到（2026-10-31 实踩）----------
+rot = tmp / "logs" / "20261031-000000.000-9-cccc"
+rot.mkdir(parents=True, exist_ok=True)
+(rot / "main.log").write_text("[2026-10-31T00:01:00.000Z] [Auth] 普通日志\n",
+                              encoding="utf-8")
+rotated = rot / "main.1.log"
+rotated.write_text(
+    "[2026-10-31T00:07:06.000Z] [Auth] [AccountUsage] 用量响应摘要 "
+    '{"qoderUsage":{"userType":"rotated","userQuota":{"total":0,"used":0,"remaining":0},'
+    '"addOnQuota":{"total":1600,"used":307,"remaining":1293}}}', encoding="utf-8")
+now = datetime.now().timestamp()
+os.utime(rot / "main.log", (now - 120, now - 120))
+os.utime(rotated, (now + 5, now + 5))
+rot_rec = qc.find_usage_record()
+check("轮转文件里的记录也能读到", qc.total_remaining(rot_rec), 1293)
+check("轮转记录带出会话出处", rot_rec["origin"], "20261031-000000.000-9-cccc")
 
 # ---------- 签到态（[Campaign] claimable）----------
 check("无活动下发 -> 未知", qc.claimed_today({"show_campaign": False, "claimable": False}), None)

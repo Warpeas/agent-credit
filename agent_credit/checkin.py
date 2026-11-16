@@ -369,6 +369,14 @@ def checkin(
 
     # 签到结束后对账：配了 credits_command / status_command 的账户，
     # 用服务端真实余额校正台账（含今天这笔是否到账）。失败不影响签到退出码。
+    #
+    # 2026-11-05：本轮真领到货时，把领取时刻告诉对账通道（字面量与
+    # trae_credits.CLAIM_AFTER_ENV 同值，这里不做 import 以免 checkin 依赖单家模块）。
+    # Trae 的余额来自客户端扩展异步导出的 dump：09:30:19 领完，09:32:54 对账读到的
+    # 还是领之前的那份（remaining 2950，真值 3050.37），reconcile 当场把刚记的 100
+    # 冲回 2950。日粒度闸门看不出「当天内的旧快照」，所以额外要求 dump 晚于领取。
+    if any(r.status == "ok" for r in results):
+        os.environ["AGENT_CREDIT_CLAIM_AFTER"] = str(time.time())
     sync_results = sync(only=only, data=data, on=on)
     sync_deferred = {s["account_id"] for s in sync_results if s.get("deferred")}
     for r in results:

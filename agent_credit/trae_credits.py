@@ -21,6 +21,10 @@ creditsUsage / checkinSnapshot），不碰凭据、不解密、无注入——
 登记，会把当天签到后的真实余额覆盖成旧值。判定看 beijingDayKey；
 不是今天的 dump 直接退出非 0（对账记失败、不动账本）。
 
+第二道闸门（2026-11-05 补）：checkin 本轮领过货时会设 AGENT_CREDIT_CLAIM_AFTER，
+这时 dump 的 fetched_at 还必须晚于领取时刻——扩展导出是异步的，「当天内的旧快照」
+同样会把刚到账的 100 冲掉（11-05 09:32 实锤，手工重跑 sync 才补回来）。
+
 用法：
     python -m agent_credit.trae_credits            # 人类可读
     python -m agent_credit.trae_credits --json     # 账本对账载荷（sync 消费）
@@ -30,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -43,6 +48,9 @@ DUMP_PATH = LOG_DIR / "trae_credit_detail.json"
 # 结构化通道没有 user_entitlement_pack_list 时，用它补逐包口径。
 USAGE_PATH = LOG_DIR / "trae_usage.json"
 ACCOUNT = "trae"
+# 本轮领取的时刻（epoch 秒）。checkin 在签成之后、对账之前写入；空 = 没领过，
+# 只按日粒度判新鲜。见 freshness_refusal。
+CLAIM_AFTER_ENV = "AGENT_CREDIT_CLAIM_AFTER"
 
 
 class CreditQueryError(Exception):
@@ -161,10 +169,55 @@ def dump_date(parsed: dict[str, Any]) -> date | None:
     return None
 
 
-def is_fresh(parsed: dict[str, Any], on: date | None = None) -> bool:
-    """当天的 dump 才算新鲜。昨天的旧 dump 会把今天的真实余额覆盖成旧值。"""
+def dump_time(parsed: dict[str, Any]) -> datetime | None:
+    """dump 自己的抓取时刻（带时区）；没有或解析不了返回 None，不猜。"""
+    fetched = parsed.get("fetched_at") or ""
+    if not fetched:
+        return None
+    try:
+        return datetime.fromisoformat(fetched.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return None
+
+
+def freshness_refusal(parsed: dict[str, Any], on: date | None = None) -> str:
+    """这份 dump 能不能拿去登记。可以 -> ''；不行 -> 原因（main 直接打印）。
+
+    两道闸门：
+      1) 日粒度：昨天的旧 dump 会把今天的真实余额覆盖成旧值（2026-10-20 定的）。
+      2) 时刻粒度（2026-11-05 补）：本轮刚领完就对账时，dump 必须晚于领取时刻。
+         实况：09:30:19 领取成功，09:32:54 对账读的是 09:11 抓的 dump
+         （remaining 2950，真值 3050.37），reconcile 把台账从 3050 拉回 2950——
+         刚到账的 100 被自家对账冲掉了。日粒度看不出这种「当天内的旧快照」。
+    """
     on = on or date.today()
-    return dump_date(parsed) == on
+    if dump_date(parsed) != on:
+        return (
+            f"dump 不是今天的（{parsed.get('day_key') or parsed.get('fetched_at') or '未知'}），"
+            "拒绝登记：旧 dump 会把签到后的真实余额覆盖成旧值"
+        )
+    raw = (os.environ.get(CLAIM_AFTER_ENV) or "").strip()
+    if not raw:
+        return ""
+    try:
+        claim_ts = float(raw)
+    except ValueError:
+        return ""
+    stamp = dump_time(parsed)
+    if stamp is None:
+        return "本轮已领取，但 dump 没有可解析的 fetched_at，无法证明它晚于领取，拒绝登记"
+    if stamp.timestamp() + 1.0 < claim_ts:
+        return (
+            f"dump 抓于 {stamp:%H:%M:%S}，早于本轮领取 "
+            f"{datetime.fromtimestamp(claim_ts):%H:%M:%S}，拒绝登记："
+            "当天内的旧快照会把刚到账的额度冲掉"
+        )
+    return ""
+
+
+def is_fresh(parsed: dict[str, Any], on: date | None = None) -> bool:
+    """当天的 dump 才算新鲜；本轮领过货时还得更晚（见 freshness_refusal）。"""
+    return not freshness_refusal(parsed, on)
 
 
 def build_grants(parsed: dict[str, Any]) -> list[dict[str, Any]]:
@@ -369,9 +422,9 @@ def main(argv: list[str] | None = None) -> int:
     except CreditQueryError as exc:
         print(f"查询失败：{exc}", file=sys.stderr)
         return 1
-    if not is_fresh(parsed) and not args.force:
-        print(f"dump 不是今天的（{parsed.get('day_key') or parsed.get('fetched_at') or '未知'}），"
-              "拒绝登记：旧 dump 会把签到后的真实余额覆盖成旧值", file=sys.stderr)
+    refusal = "" if args.force else freshness_refusal(parsed)
+    if refusal:
+        print(refusal, file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(payload(parsed), ensure_ascii=True))

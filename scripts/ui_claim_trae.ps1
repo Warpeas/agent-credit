@@ -468,15 +468,27 @@ function Select-CodeModeWindow {
         $texts = Get-QuickOcrText $c.H
         $joined = ($texts -join " ")
         $score = 0
-        if ($joined -match '每日领') { $score += 10 }
-        if ($joined -match '用户\s*\d+') { $score += 5 }
-        if ($joined -match '免费') { $score += 3 }
-        if ($joined -match '签到') { $score += 2 }
-        if ($joined -match 'SOLO') { $score += 8 }
-        if ($joined -match '轻松应对') { $score += 6 }
-        if ($joined -match '和智能体对话|开始你的第一个任务') { $score += 5 }
+        $hits = @()
+        # 权重（2026-11-05 重排）：目标窗口 = **带签到入口/账户条的那个窗口**，
+        # SOLO/IDE 模式特征只当平手时的 tiebreak，不许再盖过入口特征。
+        # 依据两轮实况：
+        #   11-04 01:20 签成：胜出窗口 score=24，靠的是账户条特征（每日领/用户N/免费），
+        #     切过去后点 @50,1073 直接命中「每日领（可领 100）」。
+        #   11-05 09:11 失败：SOLO 首页窗 score=21 > 账户条窗 10，选中的窗口左下角根本没有
+        #     账户条，候选点 @59,1089 点在空白上 → 「未找到签到入口」。旧权重里
+        #     SOLO(8)+轻松应对(6)+首页引导(5) 就能压过 用户N(5)+免费(3)，方向是反的。
+        if ($joined -match '每日领') { $score += 40; $hits += '每日领' }
+        if ($joined -match '用户\s*\d+') { $score += 20; $hits += '用户N' }
+        if ($joined -match '免费') { $score += 12; $hits += '免费' }
+        # 裸「签到」会被任务标题污染（今天 SOLO 窗里的「检查今日签…」就是白送 +2 的），
+        # 只认签到入口的固定搭配。
+        if ($joined -match '每日签到|立即签到|签到领|签到得') { $score += 10; $hits += '签到入口' }
+        if ($joined -match 'SOLO') { $score += 3; $hits += 'SOLO' }
+        if ($joined -match '轻松应对') { $score += 2; $hits += '轻松应对' }
+        if ($joined -match '和智能体对话|开始你的第一个任务') { $score += 2; $hits += '首页引导' }
         $preview = if ($joined.Length -gt 80) { $joined.Substring(0, 80) } else { $joined }
-        Log ("window-scan hwnd=" + $c.H + " area=" + $c.Area + " score=" + $score + " text=" + $preview) | Out-Null
+        Log ("window-scan hwnd=" + $c.H + " area=" + $c.Area + " score=" + $score +
+             " hits=[" + ($hits -join ",") + "] text=" + $preview) | Out-Null
         if ($score -gt $bestScore) { $bestScore = $score; $bestH = $c.H }
     }
     if ($bestH -ne [IntPtr]::Zero) { return $bestH }

@@ -107,6 +107,27 @@ check("dump 日期取 beijingDayKey",
       trae_credits.dump_date(trae_credits.parse_dump(make_dump(day_key="2026-10-19"))),
       date(2026, 10, 19))
 
+# ---------- 新鲜度闸门第二道：本轮领取之后 dump 必须更晚（2026-11-05） ----------
+# 实况：09:30:19 领取成功，09:32:54 对账读的是 09:11 抓的 dump（2950，真值 3050.37），
+# 日粒度闸门放行，reconcile 把刚记的 100 当场冲掉。
+_parsed_today = trae_credits.parse_dump(make_dump())
+_dump_ts = trae_credits.dump_time(_parsed_today).timestamp()
+check("没设领取时刻时只按日粒度判",
+      trae_credits.is_fresh(_parsed_today, on=ON), True)
+os.environ[trae_credits.CLAIM_AFTER_ENV] = str(_dump_ts + 60)   # 领取比 dump 晚 1 分钟
+check("当天内但早于本轮领取的 dump 被拒",
+      trae_credits.is_fresh(trae_credits.parse_dump(make_dump()), on=ON), False)
+check("拒绝原因点名领取时刻",
+      "早于本轮领取" in trae_credits.freshness_refusal(
+          trae_credits.parse_dump(make_dump()), on=ON), True)
+os.environ[trae_credits.CLAIM_AFTER_ENV] = str(_dump_ts - 60)   # dump 是领取之后重抓的
+check("领取之后重抓的 dump 放行",
+      trae_credits.is_fresh(trae_credits.parse_dump(make_dump()), on=ON), True)
+os.environ[trae_credits.CLAIM_AFTER_ENV] = "not-a-number"
+check("领取时刻写坏了不拦（宁可不改行为）",
+      trae_credits.is_fresh(trae_credits.parse_dump(make_dump()), on=ON), True)
+os.environ.pop(trae_credits.CLAIM_AFTER_ENV, None)
+
 # dump 缺失 → 抛错而不是静默返回 0 余额
 try:
     trae_credits.load_dump(tmp / "not-there.json")

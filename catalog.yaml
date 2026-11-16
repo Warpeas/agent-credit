@@ -303,27 +303,22 @@ accounts:
     aliases: [todesk]
     vendor: ToDesk
     unit: credit
-    grant_type: accumulating
-    daily_amount: 100
-    validity_days: 30
-    cap: 0
+    grant_type: daily_expire
+    daily_amount: 500
+    validity_days: 0
+    cap: null
     claim_policy: below_threshold
     claim_mode: manual
     command: ""
-    streak:
-      cycle_days: 7
-      bonus_on: [7]
-      bonus_amount: 600
-      mode: extra
     capabilities: [remote, coding, office]
     open_when_needed: false
-    notes: "有领取上限。cap 未测出前不自动领。"
+    notes: "【2026-11-16 主人确认】改为 500/天、当天过期；原 100/天·30 天·7 天连签+600 旧规则作废。"
     models_note: "GLM-5V-Turbo / Qwen3.5-Plus / Kimi-K2.5 / 豆包 / DeepSeek / MiniMax / Step 约 7 款可切换 + 自定义 API【2026-10-22 官网+社区实测，具体型号以客户端为准】"
     rating:
       value: 2
       capability: 3
       automation: 1
-      review: "100/天 + 7 天连签 600，额度一般且同样卡在 cap 未测出。2026 已升级为独立桌面 Agent（V3.0）：7 款三方模型可切（GLM-5V-Turbo/Kimi-K2.5 等）+ 键鼠执行 + 定时任务，不再只是远控附加，但和编码主力场景重叠度仍低。"
+      review: "500/天但当天过期、不可累积（2026-11-16 主人确认改版）。2026 已升级为独立桌面 Agent（V3.0）：7 款三方模型可切（GLM-5V-Turbo/Kimi-K2.5 等）+ 键鼠执行 + 定时任务，不再只是远控附加，但和编码主力场景重叠度仍低。"
       best_for: "远程协助场景，顺手领"
       owner_note: ""
 
@@ -439,12 +434,15 @@ accounts:
     cap: null
     claim_policy: always
     claim_mode: ui
+    # 本机未装客户端时自动跳过：checkin/sync 会探测 requires 里的本地路径，
+    # 任一缺失即 skip（不报错、不入账）；装回客户端自动恢复，无需改任何配置。
+    requires: ["%LOCALAPPDATA%\\MonkeyCode\\monkeycode-desktop.exe"]
     command: "python {REPO}\\scripts\\ui_claim_monkeycode.py --idle-wait 0 --no-idle-gate"
     status_command: set PYTHONPATH={REPO}&& python -m agent_credit.mc_credits --line
     credits_command: set PYTHONPATH={REPO}&& python -m agent_credit.mc_credits --ledger
     capabilities: [coding]
     open_when_needed: false
-    notes: "【2026-10-26 会话过期→面板卡 other】本地唯一 cookie monkeycode_ai_session 于 10-25 11:33（北京）过期：00:04 签到 pre-check 与对账都 401，客户端启动时没有续期，点开设置后 UIA 停在 other（有「账号」导航、无签到按钮），旧逻辑连点 10 次「账号」空转 40s 报 pending。当天 22:29 主人在账号页点绿色「连接」后客户端回写 cookies.json、API 立刻恢复 200，22:46 补签成功（576→676）。修法：probe 识别 ^(重新)?连接$ 按钮（排除「断开连接」），uia_claim_flow 在 other 态先点一次「连接」再试账号页，失败文案改为「登录态失效，请在客户端点绿色连接授权」，不再空转。⚠️ 连接后若仍无签到入口，说明需要人工完成浏览器授权，不要继续盲点。【2026-10-25 空闲闸门自杀】catalog 命令带 --idle-wait 0（意图是「共享闸门已等过，不再重复等」），但脚本的 --idle-wait 0 仍会做一次 idle 检查，活跃就 pending。10-24/10-25 都是共享闸门通过后，脚本自己读到 idle=4s（其中一部分还是前面 Trae/BringBack 的合成鼠标把 GetLastInputInfo 归零）→ 未启动客户端直接中止，却被 checkin 报成「外部命令失败且无 UI 路径可回落」。修法：checkin 已统一等过一次空闲，单账户命令加 --no-idle-gate，把闸门只留给手动单跑；--no-idle-gate 同时关掉 uia_click 里的「点击前再查空闲」——实测 MonkeyCode 客户端一启动就会自己注入一次输入事件（Popen 后 idle 立即归零），per-click 闸门 100% 拒绝点击，10-24/10-25 的「UIA 找到设置按钮但点击被遮挡或用户活跃」就是这么来的。【2026-10-25 最大化窗口坐标漂移】客户端被主人最大化过（rect -13,-13 3866x2090）；屏外停放后 SetForegroundWindow 会触发 Windows/Electron 还原成 normal rect（2426x1615 @294,294），UIA 探针按最大化布局给的坐标立刻失效（按钮 y=2038 → 实际点 y=2332，屏幕外）。修法：park 前先 SW_RESTORE 并把正常态 rect 存进 PARK_RECT（重复 park 不覆盖），bringback 用 PARK_RECT；点击点按工作区钳制（允许标题栏暂时移出屏幕上缘）；点击前临时 TOPMOST（SWP_NOACTIVATE），不再用 ensure_foreground 的 Alt 技巧（本机实测会拉起 Windows 壳层 Shell_SystemDim 遮罩，导致反遮挡检查永远失败）。【环境坑】Windows 安全中心 PickerHost 残留的 Shell_SystemDim 会盖住所有窗口；同日验证时杀 PickerHost 后立刻恢复，属系统弹窗不是脚本问题。claim_mode=ui 但实际走的是这个 Python UI 脚本（不在 ui_claim.py 的 UI_ROUTE_IDS 里），所以 external 失败时不会二次回落——这是报错文案误导，不是第二条路。【2026-10-10 恢复自动，claim_mode=ui】根因是掉登录不是改版：主人点「连接 MonkeyCode 云端」重连后，① 积分卡片原位回归（入口没挪，「签到 +100」仍在积分卡片下方，坐标与 10-04 一致）；② cookies.json 被客户端回写（重连动作才回写，平时确实不回写），external 幂等闸门与复核通道随之恢复（GET wallet/checkin 200）。脚本升级为状态驱动导航：点「设置」前先检测账号页绿色特征（x∈[0.48,0.70]W、y∈[0.40,0.70]H 区域绿像素>15，实测弹层开=111~120、主界面=0），弹层残留开着时不再点设置——「设置」是 toggle，10-10 凌晨实测弹层开着时点它会关掉弹层、后续点击全部落空（toggle 类教训第二次出现，另见 LobsterAI 用户栏）。结果判定以接口为准，复核失败报 pending 不入账。历史存档：【2026-10-10 早】00:05 轮按旧坐标点击落在空白处报 ok 虚记 100（已回滚，备份 data/_ledger_backup_20261010_monkey_rollback.json）。【2026-10-04 balance 定案，2026-10-20 校正】/api/v1/users/wallet 的 balance 与签到积分同步，但是毫积分（界面积分=balance//1000；10-04 界面 195 vs API 195267，领+100 后界面 295 vs API 295267）。不要把 raw balance 直接 set-balance。【2026-10-20 对账】只读 GET /users/wallet + /wallet/checkin。无逐条 grant、无过期字段；subscription 只返回会员 plan=basic。credits_command 同步一条总量（expires=null），checkin 末尾自动跑并刷新看板。【external 直签不可行】POST checkin → 10701 需验证码；captcha 链路 c/s/d 恒 50/32/3 固定规格图形码，成本远高于 UI。【坐标体系】Tauri(webview2)，截图 PNG 真实像素==窗口 rect，lx/ly 用 1088 宽缩略图坐标、scale=w/1088 换算加窗口原点。同 pid 有 tray_icon_app 与桌宠分层窗口，find_main 按 class+标题双重排除。PrintWindow 抓不到 webview 内容，必须屏幕捕获。【2026-10-23 屏外模式】claim 默认先把窗口停到屏外条带（留 48px），UIA 探针用 -AllowOffscreen；只有真正点击时短暂 bringback，结束恢复原 rect/前台。checkin 的 UI 共享闸门通过后脚本内部闸门默认 0 等待（活跃就 pending），不再单独等 120s。"
+    notes: "【2026-11-15 主人确认】网页端也可签到（主人实测）——客户端路线（UIA+本地 cookies）之外多一条网页路线。本机未装客户端时目前靠 requires 的 exe 探测自动跳过；若将来接网页签，需先定浏览器登录态方案（Chrome cookie 解密被 SAFETY 规则 1 禁止，剩余路线：人工登录一次的项目内浏览器 profile / 或仍走客户端），方案未定前不动 requires。【2026-10-26 会话过期→面板卡 other】本地唯一 cookie monkeycode_ai_session 于 10-25 11:33（北京）过期：00:04 签到 pre-check 与对账都 401，客户端启动时没有续期，点开设置后 UIA 停在 other（有「账号」导航、无签到按钮），旧逻辑连点 10 次「账号」空转 40s 报 pending。当天 22:29 主人在账号页点绿色「连接」后客户端回写 cookies.json、API 立刻恢复 200，22:46 补签成功（576→676）。修法：probe 识别 ^(重新)?连接$ 按钮（排除「断开连接」），uia_claim_flow 在 other 态先点一次「连接」再试账号页，失败文案改为「登录态失效，请在客户端点绿色连接授权」，不再空转。⚠️ 连接后若仍无签到入口，说明需要人工完成浏览器授权，不要继续盲点。【2026-10-25 空闲闸门自杀】catalog 命令带 --idle-wait 0（意图是「共享闸门已等过，不再重复等」），但脚本的 --idle-wait 0 仍会做一次 idle 检查，活跃就 pending。10-24/10-25 都是共享闸门通过后，脚本自己读到 idle=4s（其中一部分还是前面 Trae/BringBack 的合成鼠标把 GetLastInputInfo 归零）→ 未启动客户端直接中止，却被 checkin 报成「外部命令失败且无 UI 路径可回落」。修法：checkin 已统一等过一次空闲，单账户命令加 --no-idle-gate，把闸门只留给手动单跑；--no-idle-gate 同时关掉 uia_click 里的「点击前再查空闲」——实测 MonkeyCode 客户端一启动就会自己注入一次输入事件（Popen 后 idle 立即归零），per-click 闸门 100% 拒绝点击，10-24/10-25 的「UIA 找到设置按钮但点击被遮挡或用户活跃」就是这么来的。【2026-10-25 最大化窗口坐标漂移】客户端被主人最大化过（rect -13,-13 3866x2090）；屏外停放后 SetForegroundWindow 会触发 Windows/Electron 还原成 normal rect（2426x1615 @294,294），UIA 探针按最大化布局给的坐标立刻失效（按钮 y=2038 → 实际点 y=2332，屏幕外）。修法：park 前先 SW_RESTORE 并把正常态 rect 存进 PARK_RECT（重复 park 不覆盖），bringback 用 PARK_RECT；点击点按工作区钳制（允许标题栏暂时移出屏幕上缘）；点击前临时 TOPMOST（SWP_NOACTIVATE），不再用 ensure_foreground 的 Alt 技巧（本机实测会拉起 Windows 壳层 Shell_SystemDim 遮罩，导致反遮挡检查永远失败）。【环境坑】Windows 安全中心 PickerHost 残留的 Shell_SystemDim 会盖住所有窗口；同日验证时杀 PickerHost 后立刻恢复，属系统弹窗不是脚本问题。claim_mode=ui 但实际走的是这个 Python UI 脚本（不在 ui_claim.py 的 UI_ROUTE_IDS 里），所以 external 失败时不会二次回落——这是报错文案误导，不是第二条路。【2026-10-10 恢复自动，claim_mode=ui】根因是掉登录不是改版：主人点「连接 MonkeyCode 云端」重连后，① 积分卡片原位回归（入口没挪，「签到 +100」仍在积分卡片下方，坐标与 10-04 一致）；② cookies.json 被客户端回写（重连动作才回写，平时确实不回写），external 幂等闸门与复核通道随之恢复（GET wallet/checkin 200）。脚本升级为状态驱动导航：点「设置」前先检测账号页绿色特征（x∈[0.48,0.70]W、y∈[0.40,0.70]H 区域绿像素>15，实测弹层开=111~120、主界面=0），弹层残留开着时不再点设置——「设置」是 toggle，10-10 凌晨实测弹层开着时点它会关掉弹层、后续点击全部落空（toggle 类教训第二次出现，另见 LobsterAI 用户栏）。结果判定以接口为准，复核失败报 pending 不入账。历史存档：【2026-10-10 早】00:05 轮按旧坐标点击落在空白处报 ok 虚记 100（已回滚，备份 data/_ledger_backup_20261010_monkey_rollback.json）。【2026-10-04 balance 定案，2026-10-20 校正】/api/v1/users/wallet 的 balance 与签到积分同步，但是毫积分（界面积分=balance//1000；10-04 界面 195 vs API 195267，领+100 后界面 295 vs API 295267）。不要把 raw balance 直接 set-balance。【2026-10-20 对账】只读 GET /users/wallet + /wallet/checkin。无逐条 grant、无过期字段；subscription 只返回会员 plan=basic。credits_command 同步一条总量（expires=null），checkin 末尾自动跑并刷新看板。【external 直签不可行】POST checkin → 10701 需验证码；captcha 链路 c/s/d 恒 50/32/3 固定规格图形码，成本远高于 UI。【坐标体系】Tauri(webview2)，截图 PNG 真实像素==窗口 rect，lx/ly 用 1088 宽缩略图坐标、scale=w/1088 换算加窗口原点。同 pid 有 tray_icon_app 与桌宠分层窗口，find_main 按 class+标题双重排除。PrintWindow 抓不到 webview 内容，必须屏幕捕获。【2026-10-23 屏外模式】claim 默认先把窗口停到屏外条带（留 48px），UIA 探针用 -AllowOffscreen；只有真正点击时短暂 bringback，结束恢复原 rect/前台。checkin 的 UI 共享闸门通过后脚本内部闸门默认 0 等待（活跃就 pending），不再单独等 120s。"
     models_note: "模型无关（BYOK），可使用 GPT / Claude / DeepSeek / GLM / Kimi / Qwen / 豆包及本地模型【2026-10-22 官网】"
     rating:
       value: 1
@@ -469,7 +467,7 @@ accounts:
     command: ""
     capabilities: [office, search, docs]
     open_when_needed: true
-    notes: "每日 5000 当日清零；另有永久 6500。用时再开。有手机客户端，但似乎不能同步任务（主人 2026-10-23 更新）。"
+    notes: "每日 5000 当日清零；另有永久 6500。用时再开。有手机客户端，但似乎不能同步任务（主人 2026-10-23 更新）。【2026-11-15 飞书远控通道受限（confirmed）】按官方文档配飞书机器人：WS 长连接、消息接收全通，但 Loomy 换 tenant_access_token 被平台拒（21001 Access denied due to platform policy）→ 远控双向全断（不回话/不派生会话/出站 400）。根因为飞书 2026-10-13 起对个人（豆包）账号自建应用的策略限制：收消息可以、API 调用不行（AstrBot#10802、larksuite/cli#2815，AstrBot 维护者 11-04 定性为官方平台策略非 bug）。配置侧已排除：版本已启用、免审批、权限齐全、长连接健康；诊断中本机验证：消息事件到达并注册上下文，spawn 因 token 失败留孤儿 diff（会话不入库）。绕行路线：①改用「个人组织」账号重建应用并完成组织认证（社区实测方向）②换 QQ/微信/钉钉远控通道③维持手动+定时触发。失效条件：飞书放开个人账号 API 资格后，重发一条消息即可复测。"
     mobile: true
     mobile_note: "有手机客户端，但似乎不能同步任务"
     models_note: "DeepSeek / MiniMax / 豆包 / 千问可切换 + 讯飞星火 X2.5/X2.6（API Key）；端侧星火 X2.5-4B【2026-10-22 官网+媒体：已扩为通用桌面 Agent，接入飞书/企微/钉钉】"
@@ -514,14 +512,24 @@ accounts:
     unit: credit
     grant_type: daily_expire
     daily_amount: 300
-    validity_days: null
+    # 【2026-11-15 主人确认】官方规则原话：「每日积分每天 00:00 发放，默认当日
+    # 24:00 清零，当天登录后有效期延长至 7 天」——只要当天登录/签到，这批积分
+    # 即变 7 天有效，不再是当日清零；300/天×7 天可滚动攒（约 2100）。
+    validity_days: 7
     cap: null
-    claim_policy: never_auto
-    claim_mode: never
-    command: ""
+    claim_policy: always
+    claim_mode: external
+    # 网页签（2026-11-16 接入实测跑通）：登录态在项目内持久 profile
+    # data\webprofiles\xiaohuanxiong\，cookie 由 Edge 自己保管，本脚本不读
+    # 不解密（SAFETY 规则 1）。小浣熊「签到」= 当天带着登录态打开页面，
+    # 无领取按钮；脚本验证今日 00:00 的 +300 发放条目后 [granted] 300 入账。
+    # 登录态失效时脚本 exit 2 → pending，人工在弹窗登录一次即恢复。
+    requires: ["%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe"]
+    command: '"%USERPROFILE%\.workbuddy\binaries\python\versions\3.13.12\python.exe" -u "{REPO}\scripts\web_claim_xiaohuanxiong.py"'
+    command_timeout: 120
     capabilities: [office, docs]
     open_when_needed: true
-    notes: "【2026-10-02 更新】每日积分改为**网页登录即领**（不是客户端），有效期为若干天（具体天数待主人确认，故 validity_days 置空）——原记「当日清零」可能有误。无手机客户端。"
+    notes: "【2026-11-16 已接入网页签】claim_policy never_auto→always、claim_mode→external、command=scripts/web_claim_xiaohuanxiong.py（playwright 驱动系统 Edge + 项目内持久 profile）。面板结构实测：账户卡积分按钮(account-card-points)→积分面板（积分构成/赚取积分按钮）→明细区直接显示官方规则原话与逐日发放记录；无领取按钮，登录即完成。2026-11-16 实测脚本输出 [granted] 300、明细有效期至 11-22（7 天延长生效）。requires 指 workbuddy python（playwright 装在它里面）——顺带让虚拟化 AppData 会话自动跳过（其 %USERPROFILE% 展开为虚拟化路径、解释器不存在）。失效条件：account-card-points 类名改版 / 明细文案「每日积分发放」改版 / 规则原话变更。【2026-11-15 主人确认】网页端可签（主人实测）；有效期规则确认（原话见 validity_days 注释）：当天登录后 7 天有效。300/天 7 天可攒，价值评估上调。【2026-10-02 更新】每日积分改为**网页登录即领**（不是客户端），有效期为若干天（具体天数待主人确认，故 validity_days 置空）——原记「当日清零」可能有误。无手机客户端。"
     mobile: false
     models_note: "日日新 SenseNova U1 / U1.5（原生统一多模态）【2026-10-22 官网：办公/代码小浣熊已合并为统一品牌】"
     rating:

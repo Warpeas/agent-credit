@@ -15,6 +15,11 @@ _EXIT_NOTES = {
     64: "参数错误（缺 -Prompt）",
 }
 
+# 其中 3 / 64 与契约表冲突（3 = 疑似额度/限流、64 = 没有可用候选），
+# 派单时归一到契约码，lobster.cmd 的原始码留在 note 里；2（路由被拒）按
+# "适配器判定失败"记 1。
+_CONTRACT_CODES = {2: 1, 3: 126, 64: 1}
+
 
 class LobsterAIProvider(Provider):
     """LobsterAI 本地网关（lobster.cmd）。
@@ -92,7 +97,7 @@ class LobsterAIProvider(Provider):
             note = f"exit={proc.returncode}（{_EXIT_NOTES[proc.returncode]}）"
         return Result(
             ok=ok,
-            exit_code=proc.returncode,
+            exit_code=_CONTRACT_CODES.get(proc.returncode, proc.returncode),
             text=text,
             duration_s=duration,
             note=note,

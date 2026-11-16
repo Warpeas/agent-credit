@@ -1,4 +1,4 @@
-# One-shot: run trae_credit_sync.ps1 via scheduled task (interactive desktop).
+﻿# One-shot: run trae_credit_sync.ps1 via scheduled task (interactive desktop).
 # Same pattern as _task_trae_claim.ps1 — the sandboxed session cannot drive GUI.
 #
 # Usage:

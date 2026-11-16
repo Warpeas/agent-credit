@@ -13,7 +13,7 @@
   所以：可见 + class==Chrome_WidgetWin_1 + 标题非空 + 面积最大。
 
 用法：
-    python scripts/_capture_window.py <ProcessName> <out.png> [--title-like Agent]
+    python scripts/forensics_window_capture.py <ProcessName> <out.png> [--title-like Agent]
 输出一行 JSON：{"hwnd":..,"rect":[x,y,w,h],"png":"..","title":".."}
 """
 from __future__ import annotations

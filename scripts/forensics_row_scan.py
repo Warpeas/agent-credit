@@ -5,7 +5,7 @@
 "暗色"（真按钮只有 38~44px），需要看清那一行到底有什么，才能改判定条件。
 
 用法：
-    python scripts/_scan_darkrows.py <png> <y0> <y1> [--x0 0] [--x1 900] [--step 6]
+    python scripts/forensics_row_scan.py <png> <y0> <y1> [--x0 0] [--x1 900] [--step 6]
 """
 from __future__ import annotations
 

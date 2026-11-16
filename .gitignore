@@ -29,3 +29,19 @@ logs/
 #   - 账本/日志/截图    → 用 .gitignore 排除（按内容性质，不按文件名）
 #   - 技术判断与踩坑记录（.workbuddy/memory/*.md）→ **入库**，
 #     它们等价于 research/answers：记录「为什么这么判断」，比结论更值钱
+
+# 本机运行期数据，整目录排除：账本与账本锁、各家派单任务箱（loomy / codebuddy /
+# todesk 的任务正文与结果）、签到脚本的浏览器用户配置（Cookies、Login Data、
+# History 等登录态）、codebuddy 直连用的隔离配置目录（插件市场 / traces / 会话 jsonl）、
+# 沙箱冷却与唤醒状态。目前 data/ 下没有任何被跟踪的文件，逐条列会漏一个就出事。
+data/
+
+# 本机探针与一次性脚本：UIA 控件树探测、剪贴板自测、冒烟用 providers 配置、
+# 中间产物（providers.staged.yaml / commitmsg.txt）。换台机器重跑一遍更快，不留占位。
+.probe/
+
+# 其它 agent 客户端落在这个仓库里的本地状态（与上面 .ohmyagent/ 同类，跟项目无关）
+.dumate/
+.opencode/
+.loomy-attachments/
+exec-approvals.json

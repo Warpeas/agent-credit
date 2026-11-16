@@ -212,7 +212,7 @@ def _process_running() -> bool:
 
 
 class ToDeskProvider(Provider):
-    """ToDesk AI 桌面客户端（GUI 键鼠通道）。
+    r"""ToDesk AI 桌面客户端（GUI 键鼠通道）。
 
     为什么不是 CLI/HTTP：客户端没有对外接口（rag 知识库里也没有开放平台），
     内部 127.0.0.1:8909 只回 404（私有 RPC），凭据在 Program Files 的 config.ini 里——
@@ -227,6 +227,10 @@ class ToDeskProvider(Provider):
 
     额度：按积分计费（catalog.yaml 记 500/天、当天过期），客户端不返回 token/credits，
     也没有查询接口，所以 supports_balance=False、usage 一律 failed（契约 §7.2 允许）。
+
+    自检工具：scripts\smoke_todesk_dispatch.py 跑一单真活（会抢焦点、消耗积分，临时关掉
+    require_idle_s）；scripts\test_todesk_clip.py 只验本文件里那套 ctypes 剪贴板实现，
+    不碰窗口；scripts\probe_todesk_ui.py 用来重新确认界面到底能不能被 UIA 定位。
     """
 
     name = "todesk"

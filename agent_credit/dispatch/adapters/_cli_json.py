@@ -179,13 +179,31 @@ def parse_usage_detail(stdout: str) -> dict:
     if credits:
         usage["credits"] = round(sum(credits), 4)
 
+    quota_seen: dict | None = None
     for raw in reversed(raws):
         quota = raw.get("quota")
         if not isinstance(quota, dict):
             continue
-        usage["remaining_percent"] = _num(quota.get("percent"))
-        usage["reset_at"] = _reset_at(quota.get("reset_at"))
-        break
+        if quota_seen is None:
+            quota_seen = quota
+        percent = _num(quota.get("percent"))
+        reset_at = _reset_at(quota.get("reset_at"))
+        if percent is not None:
+            usage["remaining_percent"] = percent
+        if reset_at is not None:
+            usage["reset_at"] = reset_at
+        # 只有两项都拿到才停：某些轮次的 quota 只带 model，提前 break 会把
+        # 前面那轮的真实值丢掉（2026-11-17 实测过长回合）。
+        if percent is not None and reset_at is not None:
+            break
+
+    if quota_seen is None:
+        # 整次调用压根没返回 quota 字段，不是"额度为 0"，要能区分开
+        usage["quota_state"] = "absent"
+    elif usage["remaining_percent"] is None and usage["reset_at"] is None:
+        # 返回了 quota 但两项都空：原样留证，方便判断是格式变了还是真的用尽
+        usage["quota_state"] = "null"
+        usage["quota_raw"] = quota_seen
 
     model = next((p.get("model") for p in reversed(payloads) if p.get("model")), None)
     if not model:
@@ -217,6 +235,8 @@ def format_usage_summary(usage: dict) -> str:
             parts.append(f"{label}={usage[key]}")
     if usage.get("reset_at"):
         parts.append(f"reset={usage['reset_at']}")
+    if usage.get("quota_state"):
+        parts.append(f"quota={usage['quota_state']}")
     if usage.get("error"):
         parts.append(f"error={usage['error']}")
     return ", ".join(parts)

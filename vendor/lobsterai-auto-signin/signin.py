@@ -57,7 +57,14 @@ def client_version() -> str:
             tree = json.loads(fh.read(header_size).decode("utf-8", "replace"))
             entry = tree["files"]["package.json"]
             fh.seek(16 + header_size + int(entry["offset"]))
-            _version_cache = str(json.loads(fh.read(int(entry["size"])).decode("utf-8", "replace"))["version"])
+            # 2026.10.30 起 app.asar 的 payload 带 NUL 对齐前缀；直接 json.loads
+            # 会失败并静默退回 0.0.0，服务端随即返回 slotState=empty（假“无活动”）。
+            raw = fh.read(int(entry["size"]) + 16).lstrip(b"\x00")
+            start = raw.find(b"{")
+            if start < 0:
+                return "0.0.0"
+            payload, _ = json.JSONDecoder().raw_decode(raw[start:].decode("utf-8", "replace"))
+            _version_cache = str(payload.get("version") or "0.0.0")
             return _version_cache
     except Exception:  # noqa: BLE001
         return "0.0.0"

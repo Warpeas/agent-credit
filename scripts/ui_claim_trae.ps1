@@ -44,6 +44,14 @@ $ErrorActionPreference = "Stop"
 trap {
     # 方案甲：FATAL 也不能把窗口留在屏外（A5），尽力恢复后再退出
     try { if ($script:OriginalRect) { Restore-OriginalRect } } catch { }
+    # 异常路径也要走完整收尾：只关本次拉起的 PID、把前台还给原窗口。
+    # 漏了这两步，FATAL 后桌面上会多留一个客户端并顶掉用户的焦点。
+    try {
+        if (-not $DryRun -and ($script:LaunchedByUs -or $CloseAfter) -and $script:LaunchedPid -gt 0) {
+            taskkill /PID $script:LaunchedPid /T /F 2>$null | Out-Null
+        }
+    } catch { }
+    try { Restore-Foreground } catch { }
     try {
         $m = "FATAL: " + $_.Exception.Message + " @ " + $_.InvocationInfo.PositionMessage
         $p = "$PSScriptRoot\..\logs\trae_claim.json"
@@ -145,11 +153,17 @@ function Restore-OriginalRect {
             return
         }
         $r = $script:OriginalRect
-        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top, 0, 0, 0x0015) | Out-Null
+        # 2026-11-11：位置和尺寸都还原（只回位置会让被钳过/改过的尺寸留下）。
+        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top,
+            ($r.Right - $r.Left), ($r.Bottom - $r.Top), 0x0014) | Out-Null
         $chk = New-Object Cap32+RECT
         [Cap32]::GetWindowRect($hwnd, [ref]$chk) | Out-Null
         # A3 断言：关闭前 rect == 启动 rect
-        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " (expect " + $r.Left + "," + $r.Top + ")")
+        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " " + ($chk.Right-$chk.Left) + "x" + ($chk.Bottom-$chk.Top) + " (expect " + $r.Left + "," + $r.Top + " " + ($r.Right-$r.Left) + "x" + ($r.Bottom-$r.Top) + ")")
+        if ($script:WasMinimized) {
+            [Cap32]::ShowWindow($hwnd, 6) | Out-Null   # SW_MINIMIZE：原来最小化就还它最小化
+            Log "restore-rect: minimized (was iconic)"
+        }
     } catch { try { Log ("restore-rect failed: " + $_.Exception.Message) } catch { } }
 }
 function Save-Foreground {
@@ -161,6 +175,8 @@ function Save-Foreground {
 function Restore-Foreground {
     try {
         if ($script:SavedForeground -ne [IntPtr]::Zero) {
+            # 用户已经切走并在操作时不要再抢回来。
+            if ((Get-IdleMs) -lt 8000) { [void](Log "restore-foreground: 用户正在操作，跳过抢回前台"); return }
             [Cap32]::SetForegroundWindow($script:SavedForeground) | Out-Null
         }
     } catch { }
@@ -240,9 +256,13 @@ function Out-Json([string]$status, [string]$detail, [int]$Amount = 0) {
     # $CloseAfter：客户端由调用方冷启动（本脚本启动前进程已存在），调用方显式
     # 告知「该关」的场景，见参数注释（2026-10-14 修复）。
     if (-not $DryRun -and ($script:LaunchedByUs -or $CloseAfter)) {
-        # 同样别写死名字（2026-10-11 客户端从 TRAE SOLO CN 换成 Trae CN）。
-        taskkill /IM "$ProcessName.exe" /F 2>$null | Out-Null
-        $detail = $detail + "；已关闭本次启动的客户端"
+        # 只关本次拉起的进程树：按镜像名 /IM 会把用户中途自己打开的实例一起杀掉。
+        if ($script:LaunchedPid -gt 0) {
+            taskkill /PID $script:LaunchedPid /T /F 2>$null | Out-Null
+            $detail = $detail + "；已关闭本次启动的客户端"
+        } else {
+            [void](Log "cleanup: launched pid unknown, skip closing to avoid killing user's instance")
+        }
     }
     Restore-Foreground
     # $Amount>0 时同时给两个出口：detail 里的 `[granted] N` 标记走
@@ -332,6 +352,11 @@ function Find-TargetWindow {
     $script:BestArea = 0
     $script:HiddenCands = New-Object System.Collections.ArrayList
     $script:WinProbe = New-Object System.Collections.ArrayList
+    # 2026-11-03：Trae CN 冷启动会同时拉起 Agent(SOLO) 和 Code 两个主窗口，
+    # 签到主流程锚点为 Agent 窗口（SOLO Lite）设计。面积相同时「先枚举到」会随机
+    # 命中 IDE 窗口。
+    # 这里把所有合格主窗口收集下来，由 Select-CodeModeWindow 按 OCR 内容挑选。
+    $script:MainCandidates = New-Object System.Collections.ArrayList
     $pidSet = @{}
     Get-Process -Name $ProcessName -ErrorAction SilentlyContinue | ForEach-Object { $pidSet[[uint32]$_.Id] = $true }
     if ($pidSet.Count -eq 0) { return [IntPtr]::Zero }
@@ -354,6 +379,7 @@ function Find-TargetWindow {
             }
             # 三条硬条件，缺一不可。黑窗/推广浮层因此永远不入选。
             if ($vis -and $big -and $cls -ne 'Chrome_WidgetWin_0' -and $title -and $title.Trim()) {
+                [void]$script:MainCandidates.Add([pscustomobject]@{ H = $h; Area = ($w * $hh) })
                 if (($w * $hh) -gt $script:BestArea) {
                     $script:BestHwnd = $h
                     $script:BestArea = $w * $hh
@@ -369,6 +395,7 @@ function Find-TargetWindow {
         return $true
     }
     [Cap32]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+    $script:MainCandidates = @($script:MainCandidates | Sort-Object Area -Descending)
     return $script:BestHwnd
 }
 
@@ -385,20 +412,98 @@ function Restore-HiddenTraeWindow {
     return $best.H
 }
 
+# 2026-11-03：多窗口场景（Agent + Code 同时拉起）需要对每个候选窗口做
+# 轻量 OCR 来区分模式。Get-QuickOcrText 不依赖全局 $hwnd/$winW，
+# 只对传入句柄做一次 PrintWindow + OCR，返回文本行数组（已去空白）。
+function Get-QuickOcrText([IntPtr]$h) {
+    if ($h -eq [IntPtr]::Zero) { return @() }
+    $r = New-Object Cap32+RECT
+    [Cap32]::GetWindowRect($h, [ref]$r) | Out-Null
+    $w = $r.Right - $r.Left
+    $hgt = $r.Bottom - $r.Top
+    if ($w -le 0 -or $hgt -le 0) { return @() }
+    $bmp = New-Object System.Drawing.Bitmap($w, $hgt)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $g.GetHdc()
+    [Cap32]::PrintWindow($h, $hdc, 2) | Out-Null
+    $g.ReleaseHdc($hdc)
+    $g.Dispose()
+    $ms = New-Object System.IO.MemoryStream
+    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    $stream = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
+    $writer = New-Object Windows.Storage.Streams.DataWriter($stream.GetOutputStreamAt(0))
+    $writer.WriteBytes($ms.ToArray())
+    $ms.Dispose()
+    Await ($writer.StoreAsync()) ([uint32]) | Out-Null
+    Await ($writer.FlushAsync()) ([bool]) | Out-Null
+    $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $softBmp = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new("zh-Hans-CN"))
+    if (-not $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
+    if (-not $engine) { return @() }
+    $result = Await ($engine.RecognizeAsync($softBmp)) ([Windows.Media.Ocr.OcrResult])
+    $lines = @()
+    foreach ($line in $result.Lines) {
+        $text = ($line.Text -replace "\s", "")
+        if (-not [string]::IsNullOrWhiteSpace($text)) { $lines += $text }
+    }
+    return $lines
+}
+
+function Select-CodeModeWindow {
+    # 2026-11-03：Trae CN 冷启动会同时拉起两个主窗口，同尺寸时按面积选窗会随机命中。
+    # 当日晚间实测纠正（用户指正 + computer-use 实签验证）：
+    #   Agent 窗口（SOLO Lite，OCR 特征「SOLO / 轻松应对 / 和智能体对话」）才是主流程
+    #     目标——签到入口在左下角头像菜单/左侧栏签到卡，本脚本的全套锚点都为它设计。
+    #   IDE/Code 窗口（文件菜单/资源管理器）：没有左侧栏签到卡和左下账户条，头像在
+    #     窗口上栏（IDE 模式贴右上，距右缘约 245px），主流程锚点在这里全找不到。
+    # 所以打分【奖励】SOLO 首页特征——与 00:43 初版方向相反（初版误把它当废窗口）。
+    if (-not $script:MainCandidates -or $script:MainCandidates.Count -le 1) {
+        return $hwnd
+    }
+    $bestH = [IntPtr]::Zero
+    $bestScore = -9999
+    foreach ($c in $script:MainCandidates) {
+        $texts = Get-QuickOcrText $c.H
+        $joined = ($texts -join " ")
+        $score = 0
+        if ($joined -match '每日领') { $score += 10 }
+        if ($joined -match '用户\s*\d+') { $score += 5 }
+        if ($joined -match '免费') { $score += 3 }
+        if ($joined -match '签到') { $score += 2 }
+        if ($joined -match 'SOLO') { $score += 8 }
+        if ($joined -match '轻松应对') { $score += 6 }
+        if ($joined -match '和智能体对话|开始你的第一个任务') { $score += 5 }
+        $preview = if ($joined.Length -gt 80) { $joined.Substring(0, 80) } else { $joined }
+        Log ("window-scan hwnd=" + $c.H + " area=" + $c.Area + " score=" + $score + " text=" + $preview) | Out-Null
+        if ($score -gt $bestScore) { $bestScore = $score; $bestH = $c.H }
+    }
+    if ($bestH -ne [IntPtr]::Zero) { return $bestH }
+    return $hwnd
+}
+
 # 前台补签的空闲闸门：在枚举/移动窗口之前，用户活跃就留 pending。
 if (-not (Wait-ForegroundIdle)) {
     Out-Json "pending" ("用户正在使用电脑（空闲 < " + $IdleThresholdSec + "s），已取消前台补签；未枚举/移动/点击窗口，等空闲后再试")
 }
 
 $script:LaunchedByUs = $false
+$script:LaunchedPid = 0
 $preexistingApp = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
 $hwnd = Find-TargetWindow
+$script:WasMinimized = ($hwnd -ne [IntPtr]::Zero) -and [Cap32]::IsIconic($hwnd)
 # 把「同 pid 且够大」的全部候选窗口落盘。选窗出问题时（比如又选中了推广黑窗）
 # 这份清单是第一手证据，不用再重新写一遍枚举脚本。
 try {
     $pick = if ($hwnd -ne [IntPtr]::Zero) { "PICK hwnd=$hwnd area=$($script:BestArea)" } else { "PICK none" }
+    $candInfo = ""
+    if ($script:MainCandidates -and $script:MainCandidates.Count -gt 0) {
+        $candInfo = "  candidates=" + (($script:MainCandidates | ForEach-Object { "$($_.H)(area=$($_.Area))" }) -join ",") + "`n"
+    }
     [System.IO.File]::AppendAllText("$root\logs\_trae_windows.txt",
         ("[{0}] {1} {2}`n" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $ProcessName, $pick) +
+        $candInfo +
         (($script:WinProbe | ForEach-Object { "  $_" }) -join "`n") + "`n")
 } catch { }
 
@@ -422,13 +527,16 @@ if ($hwnd -eq [IntPtr]::Zero) {
     # and start fresh -- but ONLY when the client was not already running for the
     # user. Killing an instance the human had open is never acceptable.
     if ($preexistingApp.Count -eq 0) {
-        if (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue) {
-            # 按 $ProcessName 派生，别写死名字：客户端改版换名过一次
-            # （TRAE SOLO CN -> Trae CN），写死会拿去杀一个不存在的进程。
-            taskkill /IM "$ProcessName.exe" /F 2>$null | Out-Null
-            Start-Sleep -Seconds 3
+        # 只清「没有主窗口」的后台残留；用户中途自己开的正常实例有窗口，不动它。
+        # 按镜像名 /IM 全杀会把那种实例一起带走（2026-11-11 审计）。
+        $stale = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -eq 0 })
+        foreach ($p in $stale) { taskkill /PID $p.Id /T /F 2>$null | Out-Null }
+        if ($stale.Count -gt 0) { Start-Sleep -Seconds 3 }
+        if (Test-Path $exe) {
+            $proc = Start-Process $exe -PassThru
+            $script:LaunchedByUs = $true
+            $script:LaunchedPid = [int]$proc.Id
         }
-        if (Test-Path $exe) { Start-Process $exe; $script:LaunchedByUs = $true }
     }
     $dl = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $dl) {
@@ -437,6 +545,17 @@ if ($hwnd -eq [IntPtr]::Zero) {
         if ($hwnd -ne [IntPtr]::Zero) { break }
     }
     if ($hwnd -eq [IntPtr]::Zero) { Out-Json "notfound" "$ProcessName 启动后 60s 内未出现主窗口（本环境冷启动该客户端会失败，请手动打开后重跑）" }
+}
+
+# 2026-11-03：多窗口（Agent + IDE）甄别。冷启动刚出窗时内容可能未画完，
+# 给 3s 让首帧渲染，再对每个候选窗口做轻量 OCR 选 Agent 窗口（主流程目标）。
+if ($script:MainCandidates -and $script:MainCandidates.Count -gt 1) {
+    if ($script:LaunchedByUs) { Start-Sleep -Seconds 3 }
+    $picked = Select-CodeModeWindow
+    if ($picked -ne [IntPtr]::Zero -and $picked -ne $hwnd) {
+        Log ("multi-window: switching from hwnd=" + $hwnd + " to agent-window hwnd=" + $picked)
+        $hwnd = $picked
+    }
 }
 
 # Foreground helpers: OCR is only trustworthy when $ProcessName is really in front.
@@ -1056,22 +1175,34 @@ function BringBack-Click([int]$ax, [int]$ay) {
     # 激活），账户条因此点不开——00:57 前台/屏外两种模式都实测过：点击坐标正确、
     # 但菜单没出现。TOPMOST 只解决遮挡，不解决激活；这里在点击前显式抢一次前台，
     # 点完立刻把前台还给主人（Save/Restore-Foreground）。
+    # 2026-11-11：先等主人停手、再抢前台；等到超时仍活跃就放弃，避免按键/点击
+    # 落到主人当前所在的窗口。
+    if (-not (Wait-InputQuiet 320 20000)) {
+        [void](Log "bringback: 用户持续操作，放弃本次真实点击")
+        [Cap32]::SetWindowPos($hwnd, $script:HWND_NOTOPMOST, 0, 0, 0, 0, 0x0013) | Out-Null
+        Move-OffscreenNow
+        return
+    }
     Save-Foreground
     try { [void](Ensure-Foreground) } catch { }
     Start-Sleep -Milliseconds 150
-    # 2026-10-30：等主人停手再点；hover 的 120ms 里光标被挪走就不盲点，重试一次。
-    [void](Wait-InputQuiet 320 20000)
     $saved = [Cap32+POINT]::new()
     [Cap32]::GetCursorPos([ref]$saved) | Out-Null
     $clicked = $false
     try {
         for ($attempt = 1; $attempt -le 2 -and -not $clicked; $attempt++) {
-            if ($attempt -gt 1) { [void](Wait-InputQuiet 320 20000) }
+            if ($attempt -gt 1) {
+                if (-not (Wait-InputQuiet 320 20000)) { [void](Log "bringback: 用户持续操作，放弃重试"); break }
+            }
             [Cap32]::SetCursorPos($cx, $cy) | Out-Null
             Start-Sleep -Milliseconds 120
             if (-not (Test-CursorAt $cx $cy)) {
                 [void](Log ("bringback: 光标被挪走（attempt " + $attempt + "），不盲点"))
                 continue
+            }
+            if ([Cap32]::GetForegroundWindow() -ne $hwnd) {
+                [void](Log ("bringback: 前台已被切走（attempt " + $attempt + "），不盲点"))
+                break
             }
             [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
             [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
@@ -1400,6 +1531,36 @@ if (-not $entry) {
         }
         Start-Sleep -Milliseconds 600
         $ci++
+    }
+}
+
+# 2026-11-03 兜底：IDE/Code 窗口没有左下角账户条，头像在窗口上栏右侧（IDE 模式
+# 实测：绿色头像 icon 距右缘约 245px、距顶约 20px，1500x900 与 1350x900 两种宽度
+# 下偏移一致；当日晚间 computer-use 实签走的就是这条路）。左下流程全军覆没时点这里
+# 开同一个头像菜单（菜单内容各窗口一致：每日领100积分 + 签到按钮）。
+if (-not $entry -and -not (Test-MenuOpen $lines)) {
+    $tx = $winW - 245
+    $ty = 20
+    Log ("step: 左下账户条未开菜单，兜底点上栏头像 @$tx,$ty（IDE 窗口上栏头像入口）")
+    Click-At $tx $ty -SkipSynth
+    foreach ($sub in 1..2) {
+        Start-Sleep -Seconds 2
+        $lines = Get-OcrLines
+        Dump-Ocr $lines ("trae-topbar-" + $sub)
+        if ($sub -eq 1) { Save-Shot "03-topbar" }
+        $entry = Find-EntryWord $lines $clickWords
+        $claimed = Find-AnyLine $lines $claimWords ([int]($winW * 0.3))
+        if ($entry -or (Test-MenuOpen $lines)) { break }
+    }
+    if (-not $entry -and -not (Test-MenuOpen $lines)) {
+        # 没点开就收掉可能的浮层，别把菜单留给下一轮误判
+        if ($Offscreen) {
+            Send-SynthEsc
+        } else {
+            [Cap32]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero) | Out-Null
+            [Cap32]::keybd_event(0x1B, 0, 2, [UIntPtr]::Zero) | Out-Null
+        }
+        Start-Sleep -Milliseconds 600
     }
 }
 

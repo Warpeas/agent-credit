@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -366,6 +367,82 @@ def sync_grants(
         })
         written += 1
     return {"before": before, "after": remaining(data, account_id, on), "entries": written}
+
+
+def sync_detail(
+    data: dict[str, Any],
+    account_id: str,
+    details: list[dict[str, Any]],
+    on: date | None = None,
+) -> dict[str, Any]:
+    """用服务端逐条发放明细整体替换账本条目。
+
+    与 sync_grants 的区别：服务端给了原始 amount、已用/剩余和状态时用这个，
+    不会把 amount 压成 remaining，也保留 0 余额/已过期条目作为发放历史。
+    `remaining` 仍按账本的整数粒度四舍五入（精确余额看 --line/--json）。
+
+    details: [{"amount": 100, "remaining": 92.46, "granted_at": "YYYY-MM-DD",
+               "expires_at": "YYYY-MM-DD", "status": "active", "type": "campaign"}]
+    `source`/`expires_at_time` 是可选扩展（2026-11-10 为 Trae 逐包明细加的）：
+    source 保留「这笔从哪来」（如 每日签到/每月登录赠送），别让逐包明细全塌成
+    一个 "sync"；expires_at_time 保留页面上的精确到期时刻，而 expires_at 仍只存
+    日期，看板与 FEFO 排序依赖它的长度。
+    返回 {"before", "after", "entries"}，entries 只数仍有余额的活条目。
+    """
+    on = on or today()
+    st = state(data, account_id)
+    before = remaining(data, account_id, on)
+    entries: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        try:
+            amount = int(round(float(item.get("amount") or 0)))
+        except (TypeError, ValueError):
+            continue
+        if amount <= 0:
+            continue
+        try:
+            remain = int(round(float(item.get("remaining") or 0)))
+        except (TypeError, ValueError):
+            remain = 0
+        remain = max(0, min(amount, remain))
+        granted_on = parse_date(item.get("granted_at")) or on
+        expires = item.get("expires_at")
+        expires_on = None
+        if isinstance(expires, str) and expires:
+            try:
+                expires_on = parse_date(expires)
+            except ValueError:
+                expires_on = None
+        # 到期日进指纹：同一来源同一金额的逐日积分包很多，不带上到期日会撞 id
+        fingerprint = "|".join(str(item.get(k) or "") for k in
+                                ("type", "earned_at", "granted_at", "amount", "expires_at"))
+        digest = hashlib.sha1(f"{account_id}|{fingerprint}".encode("utf-8")).hexdigest()[:10]
+        entry_id = f"{account_id}-{granted_on.isoformat()}-detail-{digest}"
+        if entry_id in used_ids:
+            entry_id = f"{entry_id}-{len(used_ids) + 1}"
+        used_ids.add(entry_id)
+        entry = {
+            "id": entry_id,
+            "amount": amount,
+            "remaining": remain,
+            "granted_at": granted_on.isoformat(),
+            "expires_at": fmt(expires_on),
+            "source": str(item.get("source") or item.get("type") or "sync"),
+            "expiry_basis": str(item.get("expiry_basis") or "server"),
+            "status": str(item.get("status") or ("active" if remain > 0 else "used")),
+            "used": amount - remain,
+        }
+        exact = item.get("expires_at_time")
+        if isinstance(exact, str) and exact:
+            entry["expires_at_time"] = exact
+        entries.append(entry)
+    st["entries"] = entries
+    active = sum(1 for e in entries if int(e["remaining"]) > 0
+                 and (not e["expires_at"] or parse_date(e["expires_at"]) >= on))
+    return {"before": before, "after": remaining(data, account_id, on), "entries": active}
 
 
 def reconcile_total(

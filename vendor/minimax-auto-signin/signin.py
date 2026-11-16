@@ -242,12 +242,13 @@ def warm_token() -> bool:
     print(f"[warm] token 剩余 {left:.0f}s → "
           f"{'客户端已在运行，等它续期' if preexisting else '临时拉起客户端续期'}")
 
+    warmup_proc = None
     if not preexisting:
         if not Path(APP_EXE).exists():
             print(f"[warm] 客户端不存在: {APP_EXE}")
             return left > 60
         try:
-            subprocess.Popen([APP_EXE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            warmup_proc = subprocess.Popen([APP_EXE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:  # noqa: BLE001
             print(f"[warm] 拉起失败: {e}")
             return left > 60
@@ -266,8 +267,9 @@ def warm_token() -> bool:
             renewed = True
             break
 
-    if not preexisting:
-        subprocess.run(["taskkill", "/F", "/IM", APP_PROC, "/T"], capture_output=True)
+    if warmup_proc is not None:
+        # 只关本次拉起的进程树：/IM 会连用户中途自己打开的同名客户端一起杀。
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(warmup_proc.pid)], capture_output=True)
         print("[warm] 已关闭本次拉起的客户端")
     elif not renewed:
         print("[warm] 等待超时：客户端未续期")

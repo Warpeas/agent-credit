@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import ctypes
+import csv
+import io
 import json
 import os
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import qodercn_credits
 from . import trace
 from .apps import find_exe, launch
 from .paths import LOG_DIR
@@ -254,6 +258,8 @@ def _claim_trae() -> tuple[bool, str]:
     # 空值（10-12 00:01 那轮就是这样 —— 客户端没拉起，白等 90s 后报 pending）。
     exe = find_exe("trae")
     exe_path = str(exe) if exe else ""
+    # 只关本次新拉起的进程：签到前把 PID 记下来，收尾只杀差集。
+    trae_pids_before = _proc_pids([TRAE_PROCESS])
     ok, note = _launch_via_limited_task(TASK_TRAE_LAUNCHER,
                                         process_name=TRAE_PROCESS, exe_path=exe_path)
     if not ok:
@@ -281,12 +287,10 @@ def _claim_trae() -> tuple[bool, str]:
         detail += ("；积分明细已拉取（随本次对账登记）" if sync_ok
                    else f"；积分明细未拉取（{sync_detail}）")
     if cold_started:
-        try:
-            subprocess.run(["taskkill", "/IM", TRAE_PROCESS + ".exe", "/F"],
-                           capture_output=True, timeout=20)
+        launched = _proc_pids([TRAE_PROCESS]) - trae_pids_before
+        if launched:
+            _kill_tree(launched)
             detail += "；已关闭本次启动的客户端"
-        except (subprocess.SubprocessError, OSError):
-            pass
     if not ok:
         return False, f"{detail}（启动日志: {note}）"
     return True, detail
@@ -353,6 +357,100 @@ def _wait_for_user_idle(timeout: int, threshold: int, label: str) -> bool:
 QODER_IDLE_WAIT_SEC = 300
 QODER_IDLE_THRESHOLD_SEC = 60
 
+# 自动化启动过 Qoder、但因 pending/failed 留在桌面的标记。下一轮复用同一实例
+# 签成功后要靠它认领并关窗；不能只靠「本次运行新拉起的 PID」。
+QODER_LAUNCH_STATE = LOG_DIR / "qodercn_launch.json"
+QODER_LAUNCH_TTL_SEC = 6 * 3600
+
+
+def _read_qoder_launch_state() -> dict[str, Any] | None:
+    try:
+        payload = json.loads(QODER_LAUNCH_STATE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        at = datetime.strptime(str(payload.get("at") or ""), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+    if (datetime.now() - at).total_seconds() > QODER_LAUNCH_TTL_SEC:
+        return None
+    return payload
+
+
+def _write_qoder_launch_state(pids: set[int]) -> None:
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        QODER_LAUNCH_STATE.write_text(json.dumps({
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "started_pids": sorted(pids),
+        }, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        trace.note(f"Qoder CN 启动标记写入失败：{exc}")
+
+
+def _clear_qoder_launch_state() -> None:
+    try:
+        QODER_LAUNCH_STATE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _read_status(result_path: Path) -> str:
+    """只取 ps1 结果文件里的 status（ok/already/pending/...）。"""
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("status") or "") if isinstance(payload, dict) else ""
+
+
+QODERCN_CAMPAIGN_FRESH_SEC = 900
+
+
+def _qodercn_claimable_fresh() -> dict[str, Any] | None:
+    """客户端最近 15 分钟内的活动态，且 claimable=True 才返回。
+
+    用途：ps1 的「已领取」是 OCR 文本判定，聊天面板常年有这些词（2026-10-31
+    实锤：服务端 claimable=true，脚本却返回 already、整轮没点）。客户端自己的
+    [Campaign] 日志是独立信号，两者打架时以「还能领」为准，宁可不记账。
+    """
+    try:
+        camp = qodercn_credits.find_campaign_state()
+    except Exception:
+        return None
+    if not camp or not camp.get("claimable"):
+        return None
+    try:
+        when = datetime.strptime(str(camp.get("recorded_at")), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+    if (datetime.now() - when).total_seconds() > QODERCN_CAMPAIGN_FRESH_SEC:
+        return None
+    return camp
+
+
+def _qodercn_usage_fresh(after: float | None = None) -> bool:
+    """客户端日志里已有当天（且不早于 after）的用量记录。
+
+    有就不必再点开「我的用量」：那一步要搬一次窗口、等面板渲染，
+    实测 30–40s；记录已经是今天的最新值，对账直接可读。
+    """
+    try:
+        record = qodercn_credits.find_usage_record()
+    except Exception:
+        return False
+    if not qodercn_credits.is_fresh(record):
+        return False
+    if after is None:
+        return True
+    try:
+        when = datetime.strptime(str(record.get("recorded_at")), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return True
+    return when.timestamp() >= after - 5
+
 
 def _claim_qodercn() -> tuple[bool, str]:
     """Qoder CN route: raise the client window, then click 「领取」 in the daily
@@ -382,14 +480,38 @@ def _claim_qodercn() -> tuple[bool, str]:
         _wait_for_user_idle(QODER_IDLE_WAIT_SEC, QODER_IDLE_THRESHOLD_SEC, "Qoder CN")
     # 客户端没在跑就先拉起（os.startfile 尽力而为；计划任务上下文里若起不来，
     # ps1 会以 notfound 退出，checkin 退化为 pending，不会误记账）。
+    # 2026-11-11：存在性按「进程」判断，不按主窗口。托盘/最小化时
+    # MainWindowHandle 可能为 0，旧逻辑会误判成没开、再拉一个实例，
+    # 收尾时两个一起关掉——用户原本那个就没了。
+    # 上一轮自动化启动、因 pending/failed 留在桌面的实例：本轮复用并负责收尾。
+    # 没有这个标记时，重试签成功也不会关窗（2026-11-13 00:29 实况）。
+    prior_state = _read_qoder_launch_state()
+    pids_before = _proc_pids([QODERCN_PROCESS])
+    had_process = bool(pids_before)
     had_window = _has_main_window([QODERCN_PROCESS])
+    inherited = bool(prior_state)
+    if prior_state and had_process:
+        started = set(prior_state.get("started_pids") or [])
+        if started and not (pids_before & started):
+            trace.note("Qoder CN 现有实例不是上一轮自动化启动的，按主人实例处理")
+            inherited = False
+    # 只有「干净启动」或「复用上一轮自动化启动的实例」才由我们收尾；
+    # 启动前就有窗口的，那是主人的实例，绝不关。
+    owned_by_us = inherited
+    if inherited and (had_process or had_window):
+        trace.note("Qoder CN 复用上一轮自动化启动的实例，签完一并关闭")
     launched_by_us = False
-    if not had_window:
+    if not had_process:
         try:
             launch("qodercn")
         except FileNotFoundError:
             return False, "未找到 Qoder CN 客户端，请手动打开后签到"
         launched_by_us = True
+        # 启动前没有窗口、也没有遗留标记，才确认「这个实例是我们的」；
+        # 有窗口说明是主人（或上一轮）开着的，不能凭 PID 差集去关。
+        if not had_window and not prior_state:
+            _write_qoder_launch_state(_proc_pids([QODERCN_PROCESS]))
+            owned_by_us = True
         # 2026-10-30：这里原来等 90s，ps1 里再等 90s，最坏 180s 白等（10-30 00:03
         # 那轮就是这么耗掉的）。Python 侧只等进程/窗口「起来」——30s 足够冷启动冒头，
         # 真正的等待交给 ps1 一次做完；心跳日志避免黑框看起来卡死。
@@ -403,34 +525,67 @@ def _claim_qodercn() -> tuple[bool, str]:
                 trace.note("Qoder CN 等待主窗口 … 最多 30s")
                 next_beat = time.time() + 10
             time.sleep(3)
+    elif not had_window:
+        trace.note("Qoder CN 进程已在但暂无主窗口，复用现有实例（不再拉第二个）")
     else:
         trace.note("Qoder CN 主窗口已在，跳过冷启动等待")
 
     # 2026-10-22 方案甲：窗口停屏外 + PrintWindow + BringBack 点击，链路比旧版长；
     # 空闲等待已在上面做过，ps1 不再等（-IdleWaitSec 0），超时放宽到 300s。
     # 2026-10-30：窗口已在时把 ps1 的等待降到 20s；本次冷启动才给满 90s。
+    claim_at = time.time()
     ok, detail = _run_ps1(SCRIPT_QODERCN_OCR, LOG_DIR / "qodercn_claim.json",
                           timeout=300, process_name=QODERCN_PROCESS, exe_path=exe_path,
                           extra_args=["-IdleWaitSec", "0",
                                       "-WindowWaitSec", "20" if had_window else "60"])
+    # 2026-10-31：OCR 判「已领取」与客户端活动态打架时不认 already、不记 +100。
+    # 宁可 pending 让主人确认，也不把没到账的奖励写进台账（连签会虚高）。
+    if ok and _read_status(LOG_DIR / "qodercn_claim.json") == "already":
+        camp = _qodercn_claimable_fresh()
+        if camp:
+            trace.note(
+                f"Qoder CN：客户端活动态仍 claimable（{camp.get('recorded_at')}，"
+                f"{camp.get('source')}），脚本却判「已领取」；本轮按 pending 处理")
+            return False, (
+                f"客户端活动态仍 claimable（{camp.get('recorded_at')}），但脚本判了「已领取」；"
+                f"本轮不记 +100，请在权益中心确认后手动领取。原始结果：{detail}"
+            )
     # 2026-10-29：领取成功后趁窗口还开着，立刻点开一次「我的用量」，让客户端把当天
     # 用量写进自己的日志。以前这一步由每日链路单独再开一次 Qoder 来做（实测多花
     # 2–4 分钟：冷启动 + 120s 空闲闸门）。失败只记一笔，不改领取结果；链路兜底会再点。
     if ok:
-        usage_ok, usage_detail = _run_ps1(
-            SCRIPT_QODERCN_OCR, LOG_DIR / "qodercn_usage.json",
-            timeout=150, process_name=QODERCN_PROCESS, exe_path=exe_path,
-            extra_args=["-Usage", "-IdleWaitSec", "0", "-WindowWaitSec", "20"])
-        detail += "；已点开「我的用量」" if usage_ok else f"；用量面板未打开（{usage_detail}）"
+        # 压缩：客户端日志里已经有「本次领取之后」的今日用量，就直接复用，
+        # 不再点开「我的用量」（省 30–40s，也少一次搬窗口/抢焦点）。
+        claim_status = _read_status(LOG_DIR / "qodercn_claim.json")
+        if _qodercn_usage_fresh(claim_at if claim_status == "ok" else None):
+            detail += "；用量记录已是今日最新，跳过「我的用量」"
+            trace.note("Qoder CN：客户端日志已有今日用量，跳过打开「我的用量」")
+        else:
+            usage_ok, usage_detail = _run_ps1(
+                SCRIPT_QODERCN_OCR, LOG_DIR / "qodercn_usage.json",
+                timeout=150, process_name=QODERCN_PROCESS, exe_path=exe_path,
+                extra_args=["-Usage", "-IdleWaitSec", "0", "-WindowWaitSec", "20"])
+            detail += "；已点开「我的用量」" if usage_ok else f"；用量面板未打开（{usage_detail}）"
     # 本次冷启动的实例签成功就关掉（与 Trae/LobsterAI/MonkeyCode 一致）；
     # pending/failed 时保留窗口，方便主人接手手动点启动弹窗。
-    if ok and launched_by_us:
-        try:
-            subprocess.run(["taskkill", "/IM", QODERCN_PROCESS + ".exe", "/F"],
-                           capture_output=True, timeout=20)
+    # 2026-11-13：首轮 pending、下一轮复用同一实例时也要能收尾，否则窗口
+    # 会一直挂在桌面上；归属以启动标记为准，不靠「本轮是否新拉起」。
+    if ok and owned_by_us:
+        launched = _proc_pids([QODERCN_PROCESS])
+        if launched_by_us:
+            launched -= pids_before
+        killed = False
+        if launched:
+            _kill_tree(launched)
+            killed = True
+        elif _read_qoder_launch_state():
+            # 枚举失败时不能凭空集判断「没进程」：标记说明实例是自动化启动的，
+            # 退回旧实现按映像名收尾。
+            killed = _kill_by_image(QODERCN_PROCESS)
+        if killed:
             detail += "；已关闭本次启动的客户端"
-        except (subprocess.SubprocessError, OSError):
-            pass
+        # 已签成功就不再保留标记：即使收尾失败，下一轮也不会再认领这个窗口。
+        _clear_qoder_launch_state()
     return ok, detail
 
 
@@ -521,6 +676,79 @@ def claim(account_id: str) -> tuple[bool, str]:
     return False, detail
 
 
+def _tasklist_pids(process_names: list[str]) -> set[int] | None:
+    """tasklist 兜底（不依赖 PowerShell）。枚举失败返回 None。"""
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+            errors="replace", timeout=15)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    wanted = [name.lower() for name in process_names]
+    pids: set[int] = set()
+    for row in csv.reader(io.StringIO(out)):
+        if len(row) < 2:
+            continue
+        image = row[0].strip().lower()
+        if image.endswith(".exe"):
+            image = image[:-4]
+        if any(image.startswith(name) for name in wanted) and row[1].isdigit():
+            pids.add(int(row[1]))
+    return pids
+
+
+def _proc_pids(process_names: list[str]) -> set[int]:
+    """当前同名进程的 PID 集合（用于只关本次新拉起的实例）。
+
+    2026-11-13：整表 `Get-Process | Where-Object` 在隐藏任务上下文里会超时
+    （当天 Qoder 签完没关窗就是这么来的）。改为按名字过滤，再加 tasklist 兜底；
+    失败必须留日志——静默返回空集会让调用方误判「没有进程」。
+    """
+    if not process_names:
+        return set()
+    names = ",".join(
+        "(Get-Process -Name '%s*' -ErrorAction SilentlyContinue | "
+        "ForEach-Object { $_.Id })" % name.replace("'", "''")
+        for name in process_names)
+    script = "(@(%s) | Sort-Object -Unique) -join ','" % names
+    try:
+        out = subprocess.check_output(
+            PS + ["-NonInteractive", "-Command", script],
+            stdin=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", timeout=15)
+        return {int(x) for x in (out or "").split(",") if x.strip().isdigit()}
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            FileNotFoundError, ValueError) as exc:
+        trace.note(f"进程枚举（PowerShell）失败：{type(exc).__name__}，改用 tasklist")
+    pids = _tasklist_pids(process_names)
+    if pids is None:
+        trace.note("进程枚举（tasklist）也不可用，本轮按「没有进程」处理")
+        return set()
+    return pids
+
+
+def _kill_by_image(process_name: str) -> bool:
+    """按映像名收尾：进程枚举不可用时的兜底（旧实现的做法）。"""
+    try:
+        result = subprocess.run(
+            ["taskkill", "/IM", process_name + ".exe", "/F"],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _kill_tree(pids: set[int]) -> None:
+    """只结束指定 PID 及其子进程；用户原本开着的实例不动。"""
+    for pid in pids:
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=20)
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+
 def _has_main_window(process_names: list[str]) -> bool:
     """True if any matching process currently owns a visible main window.
 
@@ -533,10 +761,12 @@ def _has_main_window(process_names: list[str]) -> bool:
                 [
                     "powershell",
                     "-NoProfile",
+                    "-NonInteractive",
                     "-Command",
                     "(Get-Process -Name '" + name + "*' -ErrorAction SilentlyContinue | "
                     "Where-Object { $_.MainWindowHandle -ne 0 } | Measure-Object).Count",
                 ],
+                stdin=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",

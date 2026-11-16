@@ -55,6 +55,7 @@ using System; using System.Runtime.InteropServices; using System.Text;
 public static class L32 {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
@@ -128,7 +129,13 @@ function Save-Foreground {
     }
 }
 function Restore-Foreground {
-    try{ if($script:SavedForeground -ne [IntPtr]::Zero){ [void][L32]::SetForegroundWindow($script:SavedForeground) } }catch{}
+    try{
+        if($script:SavedForeground -ne [IntPtr]::Zero){
+            # 用户已经切走并在操作时不要再抢回来。
+            if ([L32]::IdleMs() -lt 8000) { [void](Log "restore-foreground: 用户正在操作，跳过抢回前台"); return }
+            [void][L32]::SetForegroundWindow($script:SavedForeground)
+        }
+    }catch{}
 }
 
 # 方案甲 M1/M4 必须定义在任何调用点之前（本脚本函数是顺序生效的：
@@ -152,11 +159,17 @@ function Restore-OriginalRect {
     if ($hwnd -eq [IntPtr]::Zero) { return }
     try {
         $r = $script:OriginalRect
-        [void][L32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top, 0, 0, 0x0015)
+        # 位置和尺寸都还原；只回位置会让 Reset-WindowRect 改过的尺寸永久留下。
+        [void][L32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top,
+            ($r.Right - $r.Left), ($r.Bottom - $r.Top), 0x0014)
         $chk = New-Object L32+RECT
         [L32]::GetWindowRect($hwnd, [ref]$chk) | Out-Null
         # A3 断言：关闭前 rect == 启动 rect
-        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " (expect " + $r.Left + "," + $r.Top + ")")
+        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " " + ($chk.Right-$chk.Left) + "x" + ($chk.Bottom-$chk.Top) + " (expect " + $r.Left + "," + $r.Top + " " + ($r.Right-$r.Left) + "x" + ($r.Bottom-$r.Top) + ")")
+        if ($script:WasMinimized) {
+            [void][L32]::ShowWindow($hwnd, 6)   # SW_MINIMIZE：原来最小化就还它最小化
+            Log "restore-rect: minimized (was iconic)"
+        }
         $script:OriginalRect = $null
     } catch { try { Log ("restore-rect failed: " + $_.Exception.Message) } catch { } }
 }
@@ -167,15 +180,19 @@ function Close-LaunchedApp {
     # 与是否关闭无关：不关闭也得还回用户可见位置。
     Restore-OriginalRect
     if (-not $script:LaunchedByUs) { Log "cleanup: skipped (was already running)"; return }
-    Log "closing the client we launched"
+    # 只关本次拉起的进程树：按进程名枚举会把用户中途自己打开的实例一起关掉。
+    if ($script:LaunchedPid -le 0) {
+        Log "cleanup: launched pid unknown, skip closing to avoid killing user's instance"
+        return
+    }
+    Log ("closing the client we launched (pid=" + $script:LaunchedPid + ")")
     Start-Sleep -Seconds 2
-    foreach($p in @(Get-Process $AppProcess -ErrorAction SilentlyContinue)){
+    $mine = @(Get-Process -Id $script:LaunchedPid -ErrorAction SilentlyContinue)
+    foreach($p in $mine){
         try { $p.CloseMainWindow() | Out-Null } catch { }
     }
     Start-Sleep -Seconds 5
-    foreach($p in @(Get-Process $AppProcess -ErrorAction SilentlyContinue)){
-        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
-    }
+    try { taskkill /PID $script:LaunchedPid /T /F 2>$null | Out-Null } catch { }
 }
 # 运行结束一律恢复现场：关掉本次自己拉起的实例（签到前就开着的保留），
 # 并把前台还给运行前那个窗口。失败也不留窗口——无人值守跑完桌面不该堆着客户端。
@@ -270,6 +287,7 @@ function Restore-HiddenAppWindow($pids) {
 
 $pidSet = Get-PidSet
 $script:LaunchedByUs = $false
+$script:LaunchedPid = 0
 Log ("preexisting procs="+$pidSet.Count)
 $hwnd=[IntPtr]::Zero
 if($pidSet.Count -gt 0){ $hwnd = Find-AppWindow $pidSet; Log ("existing window="+$hwnd) }
@@ -286,8 +304,14 @@ if($hwnd -eq [IntPtr]::Zero -and $NoLaunch){
     Restore-Scene; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"notfound","detail":"app not running (run the launcher first)"}',(New-Object System.Text.UTF8Encoding($false))) }
     exit 1
 }
-if($hwnd -eq [IntPtr]::Zero){
-    if(Test-Path $exe){ Log "launching LobsterAI"; Start-Process $exe; $script:LaunchedByUs = $true } else { Log "EXE MISSING" }
+if($hwnd -eq [IntPtr]::Zero -and $pidSet.Count -eq 0){
+    if(Test-Path $exe){
+        Log "launching LobsterAI"
+        $proc = Start-Process $exe -PassThru
+        $script:LaunchedByUs = $true
+        $script:LaunchedPid = [int]$proc.Id
+        Log ("launched pid="+$script:LaunchedPid)
+    } else { Log "EXE MISSING" }
     $dl=(Get-Date).AddSeconds(70)
     while((Get-Date) -lt $dl){
         Start-Sleep -Seconds 2
@@ -317,6 +341,7 @@ function Reset-WindowRect {
     return $true
 }
 
+$script:WasMinimized = [L32]::IsIconic($hwnd)
 [void][L32]::ShowWindow($hwnd,9); Start-Sleep -Milliseconds 400
 [void](Reset-WindowRect $hwnd)
 # 屏外模式下抢前台无收益且打扰用户焦点（方案甲），直接跳过
@@ -556,15 +581,19 @@ function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1) {
     }
     $saved = [L32+POINT]::new()
     [L32]::GetCursorPos([ref]$saved) | Out-Null
+    # 2026-11-11：先等静默、再抢前台；等到超时仍活跃就放弃本次真实点击。
+    if (-not (Wait-InputQuiet 320 20000)) {
+        Log "bringback: 用户持续操作，放弃本次真实点击"
+        [void][L32]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x0013)
+        Move-OffscreenNow
+        return
+    }
     # 2026-10-25：与 Trae 同一坑——窗口未激活时 Chromium/React 可能吞掉第一次真实
     # 点击（只完成激活）。chip / 用户栏都是动作入口，点击前显式抢一次前台，
     # 点完 Restore-Foreground 还给主人。
     Save-Foreground
     try { [void](Ensure-Foreground) } catch { }
     Start-Sleep -Milliseconds 150
-    # 2026-10-30：等主人停手再点。hover 的 120ms 里光标若被挪走就放弃这一下，
-    # 重新过闸门再试；绝不按着旧坐标盲点（会点进主人当前所在的窗口）。
-    [void](Wait-InputQuiet 320 20000)
     $clicked = $false
     try {
         for ($attempt = 1; $attempt -le 2 -and -not $clicked; $attempt++) {
@@ -574,6 +603,10 @@ function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1) {
             if (-not (Test-CursorAt $cx $cy)) {
                 [void](Log ("bringback: 光标被挪走（attempt " + $attempt + "），不盲点"))
                 continue
+            }
+            if ([L32]::GetForegroundWindow() -ne $hwnd) {
+                [void](Log ("bringback: 前台已被切走（attempt " + $attempt + "），不盲点"))
+                break
             }
             # 2026-11-16：Chromium 首击只完成焦点切换是 AutoClaw/Trae 实证过的坑
             # （面板菜单行单真点 3 帧无变化）；$Clicks=2 时 180ms 间隔连点两下，
@@ -1073,7 +1106,10 @@ Log "no claim path worked"
 Restore-Scene; if($OutFile){ [System.IO.File]::WriteAllText($OutFile,'{"status":"pending","detail":"no claim path worked"}',(New-Object System.Text.UTF8Encoding($false))) }
 exit 2
 } catch {
-    # 方案甲：异常路径也不能把窗口留在屏外（A5），尽力恢复后再退出
-    try { Restore-OriginalRect } catch { }
+    # 方案甲：异常路径也不能把窗口留在屏外（A5），尽力恢复后再退出。
+    # Close-LaunchedApp 自带 Restore-OriginalRect + 只关本次拉起的 PID；
+    # 再补一次 Restore-Foreground，避免失败后焦点还停在被自己挪过的窗口上。
+    try { Close-LaunchedApp } catch { try { Restore-OriginalRect } catch { } }
+    try { Restore-Foreground } catch { }
     Log ("ERROR: "+$_.Exception.Message)
 }

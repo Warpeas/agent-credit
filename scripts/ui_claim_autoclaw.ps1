@@ -48,6 +48,14 @@ $ErrorActionPreference = "Stop"
 trap {
     # 方案甲：FATAL 也不能把窗口留在屏外（A5），尽力恢复后再退出
     try { if ($script:OriginalRect) { Restore-OriginalRect } } catch { }
+    # 异常路径也要走完整收尾：只关本次拉起的 PID、把前台还给原窗口。
+    # 漏了这两步，FATAL 后桌面上会多留一个客户端并顶掉用户的焦点。
+    try {
+        if (-not $DryRun -and $script:LaunchedByUs -and $script:LaunchedPid -gt 0) {
+            taskkill /PID $script:LaunchedPid /T /F 2>$null | Out-Null
+        }
+    } catch { }
+    try { Restore-Foreground } catch { }
     try {
         $m = "FATAL: " + $_.Exception.Message + " @ " + $_.InvocationInfo.PositionMessage
         $p = "$PSScriptRoot\..\logs\autoclaw_claim.json"
@@ -143,11 +151,17 @@ function Restore-OriginalRect {
     if ($hwnd -eq [IntPtr]::Zero) { return }
     try {
         $r = $script:OriginalRect
-        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top, 0, 0, 0x0015) | Out-Null
+        # 位置和尺寸都还原；只回位置会让被改过尺寸的窗口永久变形。
+        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top,
+            ($r.Right - $r.Left), ($r.Bottom - $r.Top), 0x0014) | Out-Null
         $chk = New-Object Cap32+RECT
         [Cap32]::GetWindowRect($hwnd, [ref]$chk) | Out-Null
         # A3 断言：关闭前 rect == 启动 rect
-        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " (expect " + $r.Left + "," + $r.Top + ")")
+        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " " + ($chk.Right-$chk.Left) + "x" + ($chk.Bottom-$chk.Top) + " (expect " + $r.Left + "," + $r.Top + " " + ($r.Right-$r.Left) + "x" + ($r.Bottom-$r.Top) + ")")
+        if ($script:WasMinimized) {
+            [void][Cap32]::ShowWindow($hwnd, 6)   # SW_MINIMIZE：原来最小化就还它最小化
+            Log "restore-rect: minimized (was iconic)"
+        }
     } catch { try { Log ("restore-rect failed: " + $_.Exception.Message) } catch { } }
 }
 
@@ -177,6 +191,11 @@ function Save-Foreground {
 function Restore-Foreground {
     try {
         if ($script:SavedForeground -ne [IntPtr]::Zero) {
+            # 用户已经切走并在操作时不要再抢回来（二次打断比不还原更烦）。
+            if ([Cap32]::IdleMs() -lt 8000) {
+                [void](Log "restore-foreground: 用户正在操作，跳过抢回前台")
+                return
+            }
             [Cap32]::SetForegroundWindow($script:SavedForeground) | Out-Null
         }
     } catch { }
@@ -191,8 +210,13 @@ function Out-Json([string]$status, [string]$detail) {
     #   2) 把前台还给运行前的窗口。
     # 失败时也不留窗口：无人值守跑完桌面不该堆着客户端，诊断信息已落日志+台账。
     if (-not $DryRun -and $script:LaunchedByUs) {
-        taskkill /IM AutoClaw.exe /F 2>$null | Out-Null
-        $detail = $detail + "；已关闭本次启动的客户端"
+        # 只关本次拉起的进程树：按镜像名 /IM 会把用户中途自己打开的实例一起杀掉。
+        if ($script:LaunchedPid -gt 0) {
+            taskkill /PID $script:LaunchedPid /T /F 2>$null | Out-Null
+            $detail = $detail + "；已关闭本次启动的客户端"
+        } else {
+            Log "cleanup: launched pid unknown, skip closing to avoid killing user's instance"
+        }
     }
     Restore-Foreground
     $payload = @{ status = $status; detail = $detail } | ConvertTo-Json -Compress
@@ -308,8 +332,14 @@ function Restore-HiddenAutoClawWindow {
 }
 
 $script:LaunchedByUs = $false
+$script:LaunchedPid = 0
+$script:WasMinimized = $false
 $preexistingApp = @(Get-Process AutoClaw -ErrorAction SilentlyContinue)
 $hwnd = Find-AutoClawWindow
+if ($hwnd -ne [IntPtr]::Zero) {
+    # 主人可能把窗口最小化在任务栏：记下来，收尾时原样放回去。
+    $script:WasMinimized = [Cap32]::IsIconic($hwnd)
+}
 if ($hwnd -eq [IntPtr]::Zero) {
     # 2026-10-29：先试托盘还原；还原成功就直接用，不必再等 60 秒。
     $restored = Restore-HiddenAutoClawWindow
@@ -324,11 +354,17 @@ if ($hwnd -eq [IntPtr]::Zero) {
     # and start fresh -- but ONLY when the client was not already running for the
     # user. Killing an instance the human had open is never acceptable.
     if ($preexistingApp.Count -eq 0) {
-        if (Get-Process AutoClaw -ErrorAction SilentlyContinue) {
-            taskkill /IM AutoClaw.exe /F 2>$null | Out-Null
-            Start-Sleep -Seconds 3
+        # 只清「没有主窗口」的后台残留；用户中途自己开的正常实例有窗口，不动它。
+        # 按镜像名 /IM 全杀会把那种实例一起带走（2026-11-11 审计）。
+        $stale = @(Get-Process AutoClaw -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -eq 0 })
+        foreach ($p in $stale) { taskkill /PID $p.Id /T /F 2>$null | Out-Null }
+        if ($stale.Count -gt 0) { Start-Sleep -Seconds 3 }
+        if (Test-Path $exe) {
+            $proc = Start-Process $exe -PassThru
+            $script:LaunchedByUs = $true
+            $script:LaunchedPid = [int]$proc.Id
+            Log ("launched pid=" + $script:LaunchedPid)
         }
-        if (Test-Path $exe) { Start-Process $exe; $script:LaunchedByUs = $true }
     }
     $dl = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $dl) {
@@ -461,7 +497,7 @@ function Get-OcrLines {
         }
         $g.Dispose()
         if ($tryN -lt $maxTry) {
-            if ($tryN -eq 1) { Log "step: 屏外捕获空白帧，2s 间隔重试（backgroundThrottling 容忍）" }
+            if ($tryN -eq 1) { Log "step: 屏外捕获空白帧，2s 间隔重试（backgroundThrottling 容忍）" | Out-Null }
             $bmp.Dispose()
             Start-Sleep -Seconds 2
         }
@@ -505,7 +541,7 @@ function Get-OcrLines {
 
 function Find-Line($lines, [string]$needle) {
     foreach ($l in $lines) {
-        if ($l.text.Contains($needle)) { return $l }
+        if ($l.text -and $l.text.Contains($needle)) { return $l }
     }
     return $null
 }
@@ -515,7 +551,7 @@ function Find-Line($lines, [string]$needle) {
 function Find-WordHit($lines, [string]$needle) {
     foreach ($l in $lines) {
         if (-not $l.words) { continue }
-        if (-not $l.text.Contains($needle)) { continue }
+        if (-not $l.text -or -not $l.text.Contains($needle)) { continue }
         # 先试单词直接命中
         foreach ($w in $l.words) {
             if ($w.text.Contains($needle)) {
@@ -549,7 +585,7 @@ function Find-CheckinAnchor($lines) {
         if ($l.text -eq "每日签到") { return $l }
     }
     foreach ($l in $lines) {
-        if ($l.text.StartsWith("每日签到") -and $l.text -notmatch "赚|积分|得|领") { return $l }
+        if ($l.text -and $l.text.StartsWith("每日签到") -and $l.text -notmatch "赚|积分|得|领") { return $l }
     }
     return $null
 }
@@ -709,6 +745,14 @@ function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1, [int]$IntervalMs 
     }
     $saved = [Cap32+POINT]::new()
     [Cap32]::GetCursorPos([ref]$saved) | Out-Null
+    # 2026-11-11：先等主人停手，再抢前台。旧顺序是「抢前台 → 等 20s → 超时照点」，
+    # 用户正好回来时按键会落进客户端、点击也可能打到别的窗口。
+    if (-not (Wait-InputQuiet 320 20000)) {
+        [void](Log "bringback: 用户持续操作，放弃本次真实点击")
+        [Cap32]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x0013) | Out-Null
+        Move-OffscreenNow
+        return
+    }
     # 2026-10-25：与 Trae/LobsterAI 同一坑——窗口未激活时 CEF/React 可能吞掉第一次
     # 真实点击（只完成激活）。点击前显式抢前台，点完 Restore-Foreground 归还。
     Save-Foreground
@@ -718,8 +762,6 @@ function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1, [int]$IntervalMs 
     [Cap32]::GetWindowRect($hwnd, [ref]$chk) | Out-Null
     Log ("bringback: ensure-foreground=" + $fgOk + " rect=" + $chk.Left + "," + $chk.Top + " click=" + $cx + "," + $cy)
     Start-Sleep -Milliseconds 150
-    # 2026-10-30：等主人停手再点；hover/连点间隔里光标被挪走就停手，不盲点。
-    [void](Wait-InputQuiet 320 20000)
     try {
         # 2026-10-25：首击常被 CEF/React 的焦点切换吞掉。调用方可要求短间隔连点
         # （AutoClaw 签到按钮用 2 连击、180ms），全部点完再统一恢复光标/前台/屏外。
@@ -728,6 +770,11 @@ function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1, [int]$IntervalMs 
             Start-Sleep -Milliseconds 120
             if (-not (Test-CursorAt $cx $cy)) {
                 [void](Log ("bringback: 光标被挪走（click " + $ci + "），不盲点"))
+                break
+            }
+            # 注入前最后一道复核：前台已不是目标窗口就放弃，别打到别人窗口。
+            if ([Cap32]::GetForegroundWindow() -ne $hwnd) {
+                [void](Log ("bringback: 前台已被切走（click " + $ci + "），不盲点"))
                 break
             }
             [Cap32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)

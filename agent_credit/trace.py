@@ -157,8 +157,18 @@ def stream(
     while proc.poll() is None:
         if deadline and time.time() > deadline:
             timed_out = True
-            proc.kill()
-            note("子进程超时（%ss），已终止" % int(timeout or 0), label=label)
+            # shell=True 时直接子进程是 cmd.exe，只 kill 它的话，真正的
+            # python / powershell 及其拉起的客户端会继续搬窗口、点击。
+            # Windows 上用 taskkill /T 收掉整棵树，其它平台退回 kill()。
+            if os.name == "nt":
+                try:
+                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                   capture_output=True, timeout=20)
+                except (subprocess.SubprocessError, OSError):
+                    proc.kill()
+            else:
+                proc.kill()
+            note("子进程超时（%ss），已终止整棵进程树" % int(timeout or 0), label=label)
             break
         time.sleep(0.4)
     t.join(timeout=5)

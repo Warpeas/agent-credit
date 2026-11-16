@@ -9,12 +9,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from . import interaction
 from . import ledger
 from . import trace
 from . import board
 from .catalog import accounts, find_account, threshold_ratio
 from .gate import Decision, run_gate
-from .ui_claim import claim as ui_claim, has_ui_route, skip_ui, _wait_for_user_idle
+from .ui_claim import claim as ui_claim, has_ui_route, skip_ui
 
 # Repo root, so catalog.yaml never has to hardcode a checkout path.
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -22,9 +23,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # 对账开关：SKIP_SYNC 只关对账；SKIP_EXTERNAL（测试用）连带关——
 # 对账命令同样是 external 命令，测试里不该真联网。
 SYNC_SKIP_ENV = "AGENT_CREDIT_SKIP_SYNC"
+# 对账命令用这个退出码表示「客户端正在使用中，主动让位」——不是失败。
+SYNC_DEFERRED_EXIT = 4
 # UI 签到组只共享一次用户空闲闸门：通过后 Qoder/MonkeyCode 的内部等待跳过。
 # Trae/AutoClaw/LobsterAI 本来没有重复等待，但同属这组，活跃时一起留 pending。
 UI_IDLE_ACCOUNTS = {"trae", "autoclaw", "lobsterai", "qodercn", "monkeycode_credit"}
+# 兼容旧调用：checkin 内部已改用 interaction 的空闲闸门，这两个常量仅保留给
+# 历史脚本/测试引用，不再参与判定。
 SHARED_UI_IDLE_WAIT_SEC = 300
 SHARED_UI_IDLE_THRESHOLD_SEC = 60
 SHARED_IDLE_DONE_ENV = "AGENT_CREDIT_SHARED_IDLE_DONE"
@@ -42,6 +47,10 @@ class CheckinResult:
     amount: int = 0
     # 结果产生时刻：汇总打印时能看出这一条是在第几秒落定的
     at: float = field(default_factory=time.time)
+    # 因为主人在用电脑而让位、等空闲后可以自动续跑（_daily_chain 读这个标记）
+    deferred: bool = False
+    # 领取正常但本轮对账被主动跳过（客户端正在使用中），同样等后续补齐
+    sync_deferred: bool = False
 
 
 def _missing_requires(acc: dict[str, Any]) -> str:
@@ -86,6 +95,28 @@ def _should_claim(acc: dict[str, Any], data: dict[str, Any], on: date) -> tuple[
 
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
+def _chain_state(phase: str, note: str = "") -> None:
+    """给计划任务链留阶段心跳：区分「等键鼠空闲」和「正在执行」。
+
+    计划任务只会显示 Running，等 5 分钟和卡死看起来一模一样；写一份带
+    时间戳的 phase，`credit.py status` 就能说清楚现在到底在等还是在跑。
+    """
+    try:
+        path = REPO_ROOT / "logs" / "chain_state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({
+            "date": time.strftime("%Y-%m-%d"),
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "pid": os.getpid(),
+            "phase": phase,
+            "note": note,
+        }, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def _run_external(acc: dict[str, Any]) -> tuple[bool, str, str]:
@@ -159,6 +190,7 @@ def checkin(
     trace.note(f"开始签到 {on.isoformat()}，共 {len(targets)} 个账户")
 
     shared_ui_idle: bool | None = None
+    ui_yielded = False
     os.environ.pop(SHARED_IDLE_DONE_ENV, None)
 
     # 启动闸门只问一次，且只在今天确实有 UI 账户要签时才问。
@@ -173,6 +205,17 @@ def checkin(
                         ui_names=[acc["name"] for acc in ui_due])
         last_gate = gate
 
+    # 开跑前记住主人原来的前台窗口/光标；UI 组结束后安全还回去
+    # （用户仍在操作时 restore() 会主动放弃，绝不抢焦点）。
+    guard = interaction.ForegroundGuard() if ui_due else None
+    if guard:
+        guard.capture()
+    idle_threshold, idle_wait, yield_wait = interaction.ui_idle_settings()
+    # 只有无人值守才需要「等主人离开键鼠」：交互式（按 Y / 倒计时结束）主人
+    # 就在旁边，直接开始并保留原来的立即执行体验。
+    unattended = (os.environ.get("AGENT_CREDIT_GATE_UNATTENDED") == "1"
+                  or (gate is not None and gate.source == "unattended"))
+
     for i, acc in enumerate(targets, 1):
         tag = f"{i}/{len(targets)} {acc['id']}"
         should, reason = _should_claim(acc, data, on)
@@ -181,29 +224,64 @@ def checkin(
             trace.note(f"{acc['name']} 跳过：{reason}", label=tag)
             continue
 
-        # UI 签到组只等一次：启动闸门已给出结论时按它走（Y/超时=直接开始，
-        # N=今天整组跳过）；只有 legacy 模式（AGENT_CREDIT_GATE=legacy）才回到
-        # 「等主人空闲」的老路。仍活跃就把本组全部留 pending，避免逐个客户端重试。
+        # UI 签到组只等一次：主人按 Y/Enter 已明确授权就直接开始；N=今天整组
+        # 跳过；其余情况（无人值守 / 倒计时超时 / legacy）统一等键鼠连续空闲，
+        # 避免 00:00 到点时主人正在用电脑被抢前台。等不到就把整组让位。
         if acc["id"] in UI_IDLE_ACCOUNTS:
             if shared_ui_idle is None:
-                if gate is not None and gate.start_now:
+                if gate is not None and gate.skip_ui:
+                    shared_ui_idle = False
+                elif gate is not None and gate.start_now and gate.source == "key":
                     shared_ui_idle = True
                     os.environ[SHARED_IDLE_DONE_ENV] = "1"
-                    trace.note("UI 空闲闸门：启动闸门已放行，不再等待")
-                elif gate is not None and gate.skip_ui:
-                    shared_ui_idle = False
-                else:
-                    shared_ui_idle = _wait_for_user_idle(
-                        SHARED_UI_IDLE_WAIT_SEC, SHARED_UI_IDLE_THRESHOLD_SEC, "UI 签到")
+                    trace.note("UI 空闲闸门：主人已确认，直接开始")
+                elif unattended:
+                    _chain_state(
+                        "waiting_idle",
+                        f"等键鼠连续空闲 {int(idle_threshold)}s（最多 {int(idle_wait)}s）")
+                    decided = interaction.wait_for_idle(
+                        idle_threshold, idle_wait, label="UI 签到")
+                    shared_ui_idle = decided.ok
                     if shared_ui_idle:
+                        _chain_state("running_ui", "UI 签到执行中")
                         os.environ[SHARED_IDLE_DONE_ENV] = "1"
-            if not shared_ui_idle:
-                if gate is not None and gate.skip_ui:
-                    pending_reason = "主人按 N/Esc 跳过今天的 UI 签到；本次未启动客户端、未点击"
+                        trace.note(
+                            f"UI 空闲闸门：已连续 {decided.idle:.0f}s 无输入，"
+                            f"等待 {decided.waited:.0f}s 后开始")
+                    else:
+                        _chain_state("deferred", "主人仍在操作，UI 组让位")
+                        trace.note(
+                            f"UI 空闲闸门：等待 {decided.waited:.0f}s 仍活跃，"
+                            f"UI 组让位（等空闲后自动续跑）")
                 else:
-                    pending_reason = "用户活跃，UI 签到已推迟；本次未启动客户端、未点击"
+                    shared_ui_idle = True
+                    os.environ[SHARED_IDLE_DONE_ENV] = "1"
+                    trace.note("UI 空闲闸门：交互式运行，直接开始")
+            # 组内每开一家前再复查：主人中途回来就先让 yield_wait 秒，
+            # 仍活跃则本轮剩余 UI 账户全部让位，绝不在主人眼皮底下继续搬窗口。
+            if unattended and shared_ui_idle and not ui_yielded and not interaction.user_is_quiet(5.0):
+                _chain_state("waiting_idle", f"{acc['name']} 开跑前复查空闲")
+                settled = interaction.wait_for_idle(
+                    5.0, yield_wait, label=f"UI/{acc['id']}")
+                if not settled.ok:
+                    _chain_state("deferred", f"{acc['name']} 让位，剩余 UI 组留待续跑")
+                    ui_yielded = True
+                    trace.note(
+                        f"{acc['name']} 开跑前检测到主人回来操作，"
+                        f"剩余 UI 签到全部让位（稍后自动续跑）")
+            if not shared_ui_idle or ui_yielded:
+                skip_by_owner = gate is not None and gate.skip_ui
+                if skip_by_owner:
+                    pending_reason = "主人按 N/Esc 跳过今天的 UI 签到；本次未启动客户端、未点击"
+                elif shared_ui_idle:
+                    pending_reason = ("主人正在使用电脑，已让出前台；"
+                                      "本轮未启动客户端，等空闲后自动续跑")
+                else:
+                    pending_reason = ("主人持续在用电脑，UI 签到已推迟；"
+                                      "本轮未启动客户端，等空闲后自动续跑")
                 results.append(CheckinResult(
-                    acc["id"], acc["name"], "pending", pending_reason))
+                    acc["id"], acc["name"], "pending", pending_reason,
+                    deferred=not skip_by_owner))
                 trace.note(f"{acc['name']} 跳过：{pending_reason}", label=tag)
                 continue
 
@@ -285,9 +363,22 @@ def checkin(
 
         results.append(CheckinResult(acc["id"], acc["name"], "skipped", f"claim_mode={mode}"))
 
+    # UI 组收尾：把前台/光标还给主人开跑前的窗口（仍在操作则自动放弃）。
+    if guard:
+        trace.note(f"UI 收尾：前台保还 {guard.restore()}")
+
     # 签到结束后对账：配了 credits_command / status_command 的账户，
     # 用服务端真实余额校正台账（含今天这笔是否到账）。失败不影响签到退出码。
-    sync(only=only, data=data, on=on)
+    sync_results = sync(only=only, data=data, on=on)
+    sync_deferred = {s["account_id"] for s in sync_results if s.get("deferred")}
+    for r in results:
+        if r.account_id in sync_deferred:
+            r.sync_deferred = True
+            # 领取没问题、只是对账让位：状态标 pending，汇总里能看出这笔还没对齐，
+            # 下一轮/下一次空闲续跑时会自动补上。
+            if r.status in ("ok", "skipped"):
+                r.status = "pending"
+                r.detail = (r.detail + "；对账延后（客户端正在使用中），稍后自动补齐").lstrip("；")
 
     ledger.save(data)
     trace.note("台账已写回 " + str(ledger.LEDGER_PATH))
@@ -312,7 +403,9 @@ def _write_last_results(
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "only": only,
         "accounts": {
-            r.account_id: {"status": r.status, "detail": r.detail}
+            r.account_id: {"status": r.status, "detail": r.detail,
+                           "deferred": bool(r.deferred),
+                           "sync_deferred": bool(r.sync_deferred)}
             for r in results
         },
     }
@@ -491,6 +584,9 @@ def _apply_sync_payload(
 
     credits_command: {"grants": [{"remain": N, "expires": "YYYY-MM-DD"}],
                      "total": N} → 逐条写入（ledger.sync_grants），保留每条过期时间
+    credits_command: {"detail": [{"amount": N, "remaining": M,
+                     "granted_at": ..., "expires_at": ...}]} → 服务端给了
+                     原始发放额/剩余/状态时整体镜像（ledger.sync_detail）
     credits_command: {"total": N, "reconcile": "fifo"} → 服务端只给总量时用它
                      （ledger.reconcile_total）：拿真值校正总数，但**不抹掉**台账里
                      逐日领取的批次与各自过期时间
@@ -498,6 +594,15 @@ def _apply_sync_payload(
     """
     if not isinstance(payload, dict):
         raise ValueError("对账输出不是 JSON 对象")
+    # 账期口径随载荷落账：服务端的 expireTime 是账期边界，不等于每笔的到期日
+    # （2026-11-10 Trae 实测：账期 11-30，但 27 笔签到积分实际在 11-12~12-11 间到期）。
+    # 存下来供看板/排查区分「边界」与「真值」，不参与余额计算。
+    for key in ("billing_cycle", "granularity"):
+        if payload.get(key):
+            ledger.state(data, acc["id"])[key] = payload[key]
+    if isinstance(payload.get("detail"), list):
+        result = ledger.sync_detail(data, acc["id"], payload["detail"], on)
+        return {**result, "mode": "detail"}
     if isinstance(payload.get("grants"), list):
         result = ledger.sync_grants(data, acc["id"], payload["grants"], on)
         return {**result, "mode": "grants"}
@@ -547,10 +652,28 @@ def sync(
                        label=acc["id"])
             continue
         command = command.replace("{REPO}", str(REPO_ROOT))
-        rc, out = trace.stream(command, shell=True, label=acc["id"], timeout=60)
+        # 对账命令的耗时差异很大（读日志 1s vs 冷启动 UI 采集 90s+），
+        # 允许 catalog 用 sync_timeout 单独指定；默认仍是 60s。
+        try:
+            sync_timeout = int(acc.get("sync_timeout") or 60)
+        except (TypeError, ValueError):
+            sync_timeout = 60
+        rc, out = trace.stream(command, shell=True, label=acc["id"], timeout=sync_timeout)
         item = {"account_id": acc["id"], "name": acc["name"]}
         if rc is None:
             results.append({**item, "ok": False, "detail": "对账命令超时"})
+            continue
+        if rc == SYNC_DEFERRED_EXIT:
+            # 客户端正在使用中：不是失败，是本轮主动让位。记下尝试时刻与原因，
+            # last_sync 保持上一次成功的时间，方便看板看出「几天没对上」。
+            tail = out.strip().splitlines()
+            last = tail[-1].removeprefix("[deferred] ").strip()[:200] if tail else ""
+            detail = last or "客户端正在使用中，本轮跳过对账"
+            state = ledger.state(data, acc["id"])
+            state["last_sync_attempt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            state["last_sync_skip"] = detail
+            results.append({**item, "ok": False, "deferred": True, "detail": detail})
+            trace.note(f"{acc['name']} 对账跳过：{detail}", label=acc["id"])
             continue
         if rc != 0:
             tail = out.strip().splitlines()
@@ -565,6 +688,7 @@ def sync(
             results.append({**item, "ok": False, "detail": str(exc)})
             continue
         ledger.mark_synced(data, acc["id"])
+        ledger.state(data, acc["id"]).pop("last_sync_skip", None)
         results.append({**item, "ok": True, **applied})
         trace.note(f"{acc['name']} 对账：{applied['before']} → {applied['after']} "
                    f"（{applied['mode']}，{applied['entries']} 条）", label=acc["id"])

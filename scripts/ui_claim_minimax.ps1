@@ -51,6 +51,9 @@ $ErrorActionPreference = "Stop"
 trap {
     # 方案甲：FATAL 也不能把窗口留在屏外（A5），尽力恢复后再退出
     try { if ($script:OriginalRect) { Restore-OriginalRect } } catch { }
+    # 异常路径也要收尾：只关本次拉起的 PID、把前台还给原窗口。
+    try { Stop-LaunchedApp } catch { }
+    try { Restore-Foreground } catch { }
     try {
         $m = "FATAL: " + $_.Exception.Message + " @ " + $_.InvocationInfo.PositionMessage
         $p = "$PSScriptRoot\..\logs\minimax_claim.json"
@@ -154,11 +157,17 @@ function Restore-OriginalRect {
     if ($hwnd -eq [IntPtr]::Zero) { return }
     try {
         $r = $script:OriginalRect
-        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top, 0, 0, 0x0015) | Out-Null
+        # 位置和尺寸都还原；只回位置会让被改过的尺寸永久留下。
+        [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top,
+            ($r.Right - $r.Left), ($r.Bottom - $r.Top), 0x0014) | Out-Null
         $chk = New-Object Cap32+RECT
         [Cap32]::GetWindowRect($hwnd, [ref]$chk) | Out-Null
         # A3 断言：关闭前 rect == 启动 rect
-        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " (expect " + $r.Left + "," + $r.Top + ")")
+        Log ("restore-rect: now " + $chk.Left + "," + $chk.Top + " " + ($chk.Right-$chk.Left) + "x" + ($chk.Bottom-$chk.Top) + " (expect " + $r.Left + "," + $r.Top + " " + ($r.Right-$r.Left) + "x" + ($r.Bottom-$r.Top) + ")")
+        if ($script:WasMinimized) {
+            [void][Cap32]::ShowWindow($hwnd, 6)
+            Log "restore-rect: minimized (was iconic)"
+        }
     } catch { try { Log ("restore-rect failed: " + $_.Exception.Message) } catch { } }
 }
 
@@ -189,6 +198,8 @@ function Save-Foreground {
 
 function Restore-Foreground {
     if ($script:SavedHwnd -eq [IntPtr]::Zero) { return }
+    # 用户已经切走并在操作时不要再抢回来（二次打断比不还原更烦）。
+    if ([Cap32]::IdleMs() -lt 8000) { Log "restore-foreground: 用户正在操作，跳过抢回前台"; return }
     $h = $script:SavedHwnd
     # Windows ignores SetForegroundWindow from a process that does not own the
     # foreground. Attach to the current foreground thread first, which is the
@@ -222,6 +233,16 @@ function Stop-LaunchedApp {
     # launch next time, which means another UAC prompt for the human.
     if ($NoClose) { return }
     if (-not $script:CloseAllowed) { return }
+
+    # 优先只关本次拉起的进程树：按进程名枚举会把用户中途自己打开的实例一起关掉。
+    if ($script:LaunchedPid -gt 0) {
+        Start-Sleep -Seconds 3
+        if (-not (Get-Process -Id $script:LaunchedPid -ErrorAction SilentlyContinue)) { return }
+        try { (Get-Process -Id $script:LaunchedPid -ErrorAction SilentlyContinue).CloseMainWindow() | Out-Null } catch { }
+        Start-Sleep -Seconds 8
+        try { taskkill /PID $script:LaunchedPid /T /F 2>$null | Out-Null } catch { }
+        return
+    }
 
     Start-Sleep -Seconds 3
     $procs = @(Get-Process -Name $AppProcess -ErrorAction SilentlyContinue)
@@ -270,6 +291,8 @@ $AppProcess = 'MiniMax Code'
 # is ours to shut down.
 $preexisting = @(Get-Process -Name $AppProcess -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 $script:CloseAllowed = ($preexisting.Count -eq 0)
+# 本次拉起的 PID：收尾只关它，避免把用户中途自己开的实例一起关掉。
+$script:LaunchedPid = 0
 
 function Test-WindowBlank($h, $w, $hh) {
     # A window can hold a perfectly good rect and still render nothing -- MiniMax
@@ -390,7 +413,10 @@ function Find-AppWindow {
 
 $hwnd = Find-AppWindow
 if ($hwnd -eq [IntPtr]::Zero) {
-    if (Test-Path $exe) { Start-Process $exe }
+    if (Test-Path $exe) {
+        $proc = Start-Process $exe -PassThru
+        if ($proc) { $script:LaunchedPid = [int]$proc.Id }
+    }
     $dl = (Get-Date).AddSeconds(90)
     while ((Get-Date) -lt $dl) {
         Start-Sleep -Seconds 2
@@ -417,6 +443,9 @@ function Wait-Foreground {
     # IsWindowVisible=false, yet IVirtualDesktopManager says it IS on the current
     # desktop -- so this is a hidden window, not a desktop issue.) Force it back
     # on screen before trusting any screenshot or click.
+    # 记住原来的最小化状态：ShowWindow(SW_RESTORE) 会把它弄没，收尾要还回去。
+    # 只在第一次（还没被还原前）记录，后续 Ensure-Foreground 不能覆盖成 false。
+    if ($null -eq $script:WasMinimized) { $script:WasMinimized = [Cap32]::IsIconic($hwnd) }
     [void][Cap32]::ShowWindow($hwnd, 9)
     Start-Sleep -Milliseconds 300
     if ([Cap32]::GetForegroundWindow() -eq $hwnd) { return $true }
@@ -471,6 +500,7 @@ $winW = $rect.Right - $rect.Left
 $winH = $rect.Bottom - $rect.Top
 $winX = $rect.Left
 $winY = $rect.Top
+if ($null -eq $script:WasMinimized) { $script:WasMinimized = $false }
 
 # --- 方案甲 M1：窗口整窗停到主屏左界外，识别全后台化 -------------------------
 # 窗口仍在默认桌面（DWM 正常合成，PrintWindow 可用），只是不可见、绝不激活。
@@ -771,7 +801,18 @@ function BringBack-Click([int]$ax, [int]$ay) {
         return
     }
     # 2026-10-30：等主人停手再点；hover 的 120ms 里光标被挪走就不盲点，重试一次。
-    [void](Wait-InputQuiet 320 20000)
+    # 2026-11-11：等到超时仍活跃就放弃，不再硬点。
+    if (-not (Wait-InputQuiet 320 20000)) {
+        Log "bringback: 用户持续操作，放弃本次真实点击"
+        Move-OffscreenNow
+        return
+    }
+    # 等待期间点击位可能被新窗口盖住：点前再验一次。
+    if (-not (Test-ClickVisible $cx $cy)) {
+        Log "bringback: 等待期间点击位被遮挡，放弃本次真实点击"
+        Move-OffscreenNow
+        return
+    }
     $saved = [Cap32+POINT]::new()
     [Cap32]::GetCursorPos([ref]$saved) | Out-Null
     $clicked = $false

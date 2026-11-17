@@ -632,8 +632,13 @@ function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1) {
                 continue
             }
             if ([L32]::GetForegroundWindow() -ne $hwnd) {
-                [void](Log ("bringback: 前台已被切走（attempt " + $attempt + "），不盲点"))
-                break
+                # 2026-11-17：不再 break。四轮"前台已被切走"实为 ForegroundLock
+                # 误报——计划任务后台进程 SetForegroundWindow 被系统前台锁定拒
+                # 绝（主人未动鼠标、探针证明光标零漂移），Ensure-Foreground 必
+                # 然失败。而 BringBack 已把窗口置 TOPMOST，z-order 顶端保证点击
+                # 落点在本窗口（且前置 R3 遮挡检查已排除被盖场景），前台归属不
+                # 影响点击命中，记录事实后继续点击。
+                [void](Log ("bringback: 前台不是本窗口（ForegroundLock？），TOPMOST 在位直接点击"))
             }
             # 2026-11-16：Chromium 首击只完成焦点切换是 AutoClaw/Trae 实证过的坑
             # （面板菜单行单真点 3 帧无变化）；$Clicks=2 时 180ms 间隔连点两下，
@@ -649,7 +654,9 @@ function BringBack-Click([int]$ax, [int]$ay, [int]$Clicks = 1) {
         # 点完立刻还原光标（旧版要等 finally，多占用主人鼠标几十毫秒）
         [void][L32]::SetCursorPos($saved.X, $saved.Y)
         if (-not $clicked) {
-            [void](Log ("bringback: 光标两次都被挪走，放弃本次点击 @ " + $cx + "," + $cy))
+            # 文案修正（2026-11-17）：这条日志曾覆盖所有失败路径——前台检查
+            # break 时也会打"光标两次都被挪走"，严重误导排查（光标其实没动）。
+            [void](Log ("bringback: 点击未完成（前台/光标检查未通过），放弃 @ " + $cx + "," + $cy))
         }
     } finally {
         # R4：任何异常路径都要恢复光标并重新停到屏外

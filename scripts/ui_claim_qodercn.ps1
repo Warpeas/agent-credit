@@ -488,6 +488,18 @@ function Find-MenuItem($words,$t,$uname,[string]$phrase) {
 # 活动弹窗标记（必须先确认弹窗在，再谈领取/幂等——否则聊天记录里的同名词会污染判定）
 function Test-CampaignPopup([string]$text){ return Test-Contains $text @('专属活动权益','立即查收','每天领') }
 function Test-Claimed([string]$text){ return Test-Contains $text @('已领取','领取成功','已到账','今日已领','不可领取') }
+# 2026-11-19：点击位局部裁决。新版 UI 点击「领取」后按钮置灰为「已领取」且无任何
+# 成功提示（04-after-click.png 实锤），复核两旧信号双双失效——Find-BlackPill 的
+# 黑块采样把置灰深色按钮误判为仍可点、claimedBefore 又被弹窗内往期「已领取」字样
+# 误置（多权益弹窗布局下防误判设计反噬）。本函数只在点击位附近（±110,±60px）找
+# 「已领取」，不受弹窗其他区域旧词污染。
+function Test-ClaimedAt([int]$ix, [int]$iy) {
+    foreach ($w in $script:words) {
+        if ($w.text -match "已领取" -and
+            [Math]::Abs($w.x - $ix) -lt 110 -and [Math]::Abs($w.y - $iy) -lt 60) { return $true }
+    }
+    return $false
+}
 # 「领取」按钮：黑底白字药丸。OCR 读不出黑底白字（实测），用「中央区高密度中性黑块」定位；
 # 要求中性黑是为了排除深绿「查看详情」。只在活动弹窗已确认可见时调用。
 # 2026-10-22 活动卡改版：移除了「限时福利/查看详情」，黑色「领取」从右侧小药丸变成
@@ -1028,8 +1040,8 @@ while ((Get-Date) -lt $winDeadline) {
     if (-not $script:SelfStarted -and $ExePath -and (Test-Path $ExePath)) {
         $procs = @(Get-Process | Where-Object { $_.ProcessName -like "*$ProcessName*" })
         if ($procs.Count -eq 0) {
-            Log "无进程，自愈启动 $ExePath"
-            Start-Process $ExePath
+            Log "无进程，自愈启动 $ExePath（explorer 代理降 Medium——本 ps1 为 High，直启的实例数据库初始化失败，2026-11-17 定案）"
+            Start-Process explorer.exe -ArgumentList "`"$ExePath`""
             $script:SelfStarted = $true
         }
     }
@@ -1295,6 +1307,13 @@ Save-Evidence "04-after-click"
 # 复核：以「黑药丸消失」为主信号。文案变化只在点击前没有已领词时才算数——
 # 否则聊天面板里的旧词会让每次点击都“成功”（2026-10-31 实锤 granted 可能空转）。
 $still = Find-BlackPill $script:bmp $t
+# 2026-11-19：点击位局部裁决优先——点击位出现「已领取」即成功（新版 UI 无成功
+# 提示、黑药丸采样被置灰按钮误命中、claimedBefore 被弹窗旧词误置，三坑齐发时
+# 只有这条位置判据可靠）。
+if (Test-ClaimedAt $claim.ix $claim.iy) {
+    $msg = "领取成功（点击位已变为「已领取」）"; if ($granted -gt 0) { $msg += " [granted] $granted" }
+    Out-Json "ok" $msg
+}
 if (-not $still) {
     $msg = "领取成功（黑药丸已消失）"; if ($granted -gt 0) { $msg += " [granted] $granted" }
     Out-Json "ok" $msg

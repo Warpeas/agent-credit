@@ -1,6 +1,6 @@
 from __future__ import annotations
-
 import os
+import subprocess
 from pathlib import Path
 
 _KNOWN_CLIENT_DIRS = ("WorkBuddy", "MiniMax Code", "TRAE SOLO CN", "Trae CN", "LobsterAI", "Qoder CN")
@@ -57,7 +57,16 @@ LAUNCH_CANDIDATES: dict[str, list[Path]] = {
     ],
     "lobsterai": [LOCAL_PROGRAMS / "LobsterAI" / "LobsterAI.exe"],
     # Qoder CN：exe 名带空格，进程名与目录名同为 "Qoder CN"。
-    "qodercn": [LOCAL_PROGRAMS / "Qoder CN" / "Qoder CN.exe"],
+    # 2026-11-17：Qoder 经 Launcher 自动更新（11/16 00:15，Launcher.exe 时间戳
+    # 实锤）后主程序数据库升到 schema 85，旧版 Programs\Qoder CN\Qoder CN.exe
+    # （0.1.3/schema64）从此打不开库——FutureDatabaseVersionError 错误页（
+    # 20261117-091507/20261118-101019/20261118-191203 三份证据截图）。开始菜单
+    # 快捷方式指向 Launcher（AppData\Local\Qoder CN\ 下，不在 Programs 里）。
+    # Launcher 路径排前 first-wins，旧版留作兜底。
+    "qodercn": [
+        Path(LOCAL_PROGRAMS).parent / "Qoder CN" / "Qoder CN Launcher" / "Qoder CN Launcher.exe",
+        LOCAL_PROGRAMS / "Qoder CN" / "Qoder CN.exe",
+    ],
     "dumate": [LOCAL_PROGRAMS / "DuMate" / "DuMate.exe"],
     "joycode": [LOCAL_PROGRAMS / "JoyCode" / "JoyCode.exe"],
     "kimi": [LOCAL_PROGRAMS / "Kimi" / "Kimi.exe"],
@@ -104,5 +113,14 @@ def launch(account_id: str) -> Path:
     exe = find_exe(account_id)
     if exe is None:
         raise FileNotFoundError(f"未找到 {account_id} 的客户端，请手动打开或在 apps.py 补路径")
-    os.startfile(str(exe))
+    if account_id == "qodercn":
+        # 2026-11-17：计划任务（HighestAvailable）拉起的客户端继承 High 完整性
+        # 令牌，Qoder 在 High 下数据库初始化失败（「本地数据库无法打开」错误页，
+        # 11/17-11/18 四轮全复现，20261118-101019 等证据截图在案）；主人 Medium
+        # 手动开一直正常。explorer 代理启动可把完整性降到 Medium（explorer 自身
+        # Medium，派生子进程继承），等效于开始菜单启动。仅限 qodercn——其他客户
+        # 端（LobsterAI/Trae/AutoClaw）在 High 下实测正常。
+        subprocess.Popen(["explorer.exe", str(exe)])
+    else:
+        os.startfile(str(exe))
     return exe

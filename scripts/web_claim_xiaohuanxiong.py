@@ -62,7 +62,24 @@ def main() -> int:
                 return 2
 
             log(f"登录态有效，打开积分面板（今日 {today}）")
-            page.query_selector("button.account-card-points").click()
+            # 2026-11-19：页面顶部公告弹窗（radix Dialog，Esc 可关）+ 左下角
+            # 广告浮层（MCP调研 banner，absolute 盖住账户卡、非 Dialog、Esc 无效）
+            # 都会拦截积分按钮点击。先 Esc 关 Dialog，再隐藏广告浮层（纯视觉
+            # 移除，广告不点不产生副作用），最后兜底 JS 直触发目标按钮 click。
+            page.keyboard.press("Escape")
+            time.sleep(1)
+            page.evaluate("""() => {
+                document.querySelectorAll('[data-exposure="advertising_exposure"]')
+                    .forEach(el => { el.style.display = 'none'; });
+            }""")
+            try:
+                page.query_selector("button.account-card-points").click(timeout=8000)
+            except Exception:
+                # 广告浮层隐藏后仍可能被其他元素遮挡——DOM click 直接触发
+                # React onClick，等价于用户点击的功能路径
+                page.evaluate(
+                    "document.querySelector('button.account-card-points').click()")
+                log("普通点击被拦，已用 DOM click 触发")
             ok_panel = False
             body = ""
             for _ in range(5):

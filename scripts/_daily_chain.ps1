@@ -7,9 +7,9 @@
 #                                      UI 组，15s 无输入自动开始（无人值守不弹、不等空闲）
 #   2. credit.py sync --only trae    —— checkin 领取成功时已顺带同步过明细；只有
 #      trae_credit_sync.ps1           dump 不是今天的、且本轮不是 pending/failed 才补开 IDE 窗
-#   3. credit.py sync --only qodercn —— 同理；本轮 pending/failed 不补点（同轮二次尝试只会
-#      ui_claim_qodercn.ps1 -Usage    再白等一次窗口，2026-10-30 00:06 实况）
-#   4. python credit.py board        —— 只有 2/3 的补拉真的跑过才再刷一次；checkin 末尾已刷过
+#   3. python credit.py board        —— 只有补拉真的跑过才再刷一次；checkin 末尾已刷过
+# （2026-11-19 起 Qoder CN 退出自动签到：签到活动不再发积分，原步骤「sync --only
+#  qodercn / ui_claim_qodercn.ps1 -Usage / 到账自检」一并移除，详见 catalog qodercn notes）
 # 补不补由 logs/checkin_last.json 决定（checkin 每轮都会写本轮各账户状态）。
 #
 # -Unattended：计划任务的 action 显式传入时直接按无人值守处理；
@@ -96,13 +96,6 @@ $env:AGENT_CREDIT_LOCK_HELD = "1"
 Set-ChainPhase "checkin" "全量签到开始（UI 组可能先等键鼠空闲）"
 
 try {
-    # 2026-10-31：领取前记下 Qoder 余额，签完后用余额自检「真的到账了吗」。
-    # UI 的 granted/already 都只是像素/OCR 信号，最终只认服务端对账后的余额。
-    $qoderBefore = $null
-    try {
-        $qoderBefore = [int](& $py -u "$root\credit.py" show qodercn --remaining 2>$null)
-    } catch { $qoderBefore = $null }
-
     & $py -u "$root\credit.py" checkin
 
     # 启动闸门（agent_credit/gate.py）：主人按 N/Esc 就跳过今天会弹窗的后续步骤，
@@ -122,7 +115,7 @@ try {
         } catch { }
     }
     if ($skipUi) {
-        Write-Host "启动闸门：主人按 N 跳过了今天的 UI 签到，跳过 Trae 明细同步与 Qoder 用量刷新。"
+        Write-Host "启动闸门：主人按 N 跳过了今天的 UI 签到，跳过 Trae 明细同步。"
         exit 0
     }
 
@@ -221,7 +214,7 @@ try {
         else { Write-Host ("仍让位：" + ($deferredIds -join ",") + "（下一轮触发再试）") }
     }
 
-    Set-ChainPhase "sync" "对账与补采（Trae / Qoder / AutoClaw）"
+    Set-ChainPhase "sync" "对账与补采（Trae / AutoClaw）"
     # Trae：checkin 里「领取 + 明细同步」已经合并做过（领取成功后趁客户端还开着开
     # IDE 窗、等扩展 dump、登记），这里先对账；只有 dump 不是今天的才补开一次 IDE 窗。
     & $py -u "$root\credit.py" sync --only trae
@@ -235,45 +228,9 @@ try {
         }
     }
 
-    # Qoder CN：同理，领取成功后已经在同一个客户端里点开过「我的用量」，先对账；
-    # 记录不新鲜才补点一次（这次不再等空闲，启动闸门早就拿到授权了）。
-    & $py -u "$root\credit.py" sync --only qodercn
-    if ($LASTEXITCODE -ne 0) {
-        if ($statusOf.ContainsKey('qodercn') -and ($statusOf['qodercn'] -eq 'pending' -or $statusOf['qodercn'] -eq 'failed')) {
-            Write-Host ("Qoder CN 本轮状态 " + $statusOf['qodercn'] + "，不补点用量（避免同轮二次白等）")
-        } else {
-            $fallbackRan = $true
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$root\scripts\ui_claim_qodercn.ps1" `
-                -Usage -IdleWaitSec 0 -WindowWaitSec 20 -ExePath "$env:LOCALAPPDATA\Programs\Qoder CN\Qoder CN.exe"
-            & $py -u "$root\credit.py" sync --only qodercn
-        }
-    }
-    # 到这里 LASTEXITCODE 是 Qoder 最后一次对账的结果；board 会覆盖它，先记下。
-    $qoderSyncOk = ($LASTEXITCODE -eq 0)
-
-    # 看板：checkin 末尾已经刷过一次（含上面同样的对账数据）。只有补拉真的跑过、
+    # 看板：checkin 末尾已经刷过一次（含同样的对账数据）。只有补拉真的跑过、
     # 数据可能变了，才再刷一次。
     if ($fallbackRan) { & $py -u "$root\credit.py" board }
-
-    # 2026-10-31：Qoder 到账自检。凌晨这轮无论报 ok 还是 already，都以余额变化为准；
-    # 结论落 logs\qodercn_verify.log，第二天直接看这一行就知道有没有真的签上。
-    try {
-        $qoderAfter = $null
-        $qoderAfter = [int](& $py -u "$root\credit.py" show qodercn --remaining 2>$null)
-        if ($null -ne $qoderBefore -and $null -ne $qoderAfter) {
-            $qstat = if ($statusOf.ContainsKey('qodercn')) { $statusOf['qodercn'] } else { '?' }
-            $delta = $qoderAfter - $qoderBefore
-            $verdict = if (-not $qoderSyncOk) { "无法核验(对账失败)" }
-                       elseif ($delta -ge 100) { "到账(+$delta)" }
-                       else { "未到账(delta=$delta)" }
-            $line = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") +
-                    " status=$qstat sync=$qoderSyncOk before=$qoderBefore after=$qoderAfter delta=$delta " + $verdict
-            Add-Content -Path (Join-Path $root "logs\qodercn_verify.log") -Encoding UTF8 -Value $line
-            Write-Host ("Qoder CN 到账自检：" + $line)
-        }
-    } catch {
-        Write-Host ("Qoder CN 到账自检失败：" + $_.Exception.Message)
-    }
 
     # AutoClaw 积分明细（2026-11-10 新增）：checkin 已把客户端杀掉，这里冷启动
     # 采集积分明细页（只读 UI 路线，只点余额数字/获得/加载更多/返回），再对账

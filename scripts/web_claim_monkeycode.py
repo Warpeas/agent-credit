@@ -31,7 +31,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    # 2026-11-21：解释器迁移（workbuddy 内置 → 系统 Python 3.12）后，site-packages
+    # 各机独立维护。缺依赖时报明确错误 + 安装命令，failed detail 一眼可读，
+    # 不再裸抛 ModuleNotFoundError。
+    print("[setup] 本解释器缺 playwright。请在对应解释器下执行：", flush=True)
+    print('  python -m pip install -r requirements.txt', flush=True)
+    sys.exit(3)
 
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "logs" / "webclaim_monkeycode"

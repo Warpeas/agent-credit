@@ -1,0 +1,7 @@
+# agent-credit 本机辅助脚本依赖（2026-11-18 起 web_claim_* 改用系统 Python 运行）。
+# 安装：python -m pip install -r requirements.txt
+# 浏览器走系统 Edge（脚本 channel="msedge"），无需 `playwright install` 下载。
+# 历史背景：此前 playwright 装在 WorkBuddy 内置 Python（3.13.12）里，其自更新
+# 会清空 site-packages（2026-11-18 实锤），故迁出为独立维护的这份清单。
+# 实测版本：1.65.2（2026-11-18）。
+playwright>=1.40

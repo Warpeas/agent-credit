@@ -1,12 +1,15 @@
 ﻿# Trae 积分余额/过期时间自动同步：签到后把最新明细登记进台账。
 #
-# 流程：
-#   1. 聚焦 SOLO(Agent) 窗口，发 Ctrl+Shift+N 开 IDE 窗口
-#      （bundle 实锤 newIDEWindow 内置快捷键 3116=Ctrl+Shift+N；
-#        SOLO 不加载用户扩展，只有 IDE 窗口里的 trae-credit-dump 扩展能出 dump）
-#   2. 等 logs/trae_credit_detail.json 出现新鲜 dump（扩展 startup 15s / focus 触发）
-#   3. python scripts/trae_credit_detail.py --record  ->  credit.py set-balance trae <n>
-#   4. 关掉本次拉开的 IDE 窗口（SOLO 窗口与既有 IDE 窗口不动）
+# 流程（2026-11-21 适配 Trae CN 3.4.20：dataFolderName .trae→.trae-cn、裸启动
+# 进项目选择欢迎页、Agent(SOLO) 主窗不再必然出现——三档降级找 dump 通道）：
+#   ① 有 Agent 窗（旧版 SOLO）：发 Ctrl+Shift+N 开 IDE 窗（旧路线）
+#   ② 无 Agent 窗但有其他有标题主窗（欢迎页/IDE 窗，均加载扩展宿主）：
+#      同样发键开新 IDE 窗（或聚焦触发 focus dump）
+#   ③ 一个窗都没有：`exe <agent-credit 路径>` 带项目直接启动——IDE 窗直出且
+#      加载用户扩展（装在 ~/.trae-cn/extensions），startup 15s 自动 dump
+#      （fix4 2026-11-21 实测 dump_fresh + record exit=0）
+#   之后统一：等 logs/trae_credit_detail.json 出现新鲜 dump（startup 15s / focus 触发）
+#   → trae_credit_detail.py --record 走标准对账登记 → 关掉本次拉开的窗口/实例
 #
 # 运行环境：每日计划任务 agent-credit-checkin 的第二个 action（HighestAvailable +
 # InteractiveToken），或手动经 _task_trae_credit_sync.ps1 一次性任务跑。
@@ -104,47 +107,83 @@ try {
     $result.steps += "windows_before=$($before.Count)"
     Log "sync start; trae windows before=$($before.Count)"
 
-    # 1+2a. 聚焦 SOLO(Agent) 窗口发 Ctrl+Shift+N 开 IDE 窗；没开成就重试，最多 3 轮
-    # （00:03 实测：锁屏/焦点未到位时单次 SendKeys 会被吞掉）
+    # 1+2a. 找「可触发 dump 的目标窗」，三档降级（2026-11-21 适配 3.4.20）：
+    #       ① Agent 窗（<=3.4.x SOLO 主窗标题）→ 发 Ctrl+Shift+N 开 IDE 窗（旧路线）
+    #       ② 其他有标题主窗（3.4.20 裸启动常只出项目选择欢迎页/已开 IDE 窗，
+    #          二者都加载扩展宿主）→ 聚焦触发 focus dump
+    #       ③ 一个窗都没有（客户端未运行/只剩无窗 headless）→ 带 agent-credit
+    #          项目路径直接启动——3.4.20 的 dataFolderName 已改 .trae-cn、扩展装在
+    #          ~/.trae-cn/extensions，`exe <路径>` 直接开出加载用户扩展的 IDE 窗，
+    #          扩展 startup 15s 自动 dump，无需发键（fix4 2026-11-21 实测
+    #          dump_fresh + record exit=0）
     $ideHwnd = [IntPtr]::Zero
-    for ($attempt = 1; $attempt -le 3 -and $ideHwnd -eq [IntPtr]::Zero; $attempt++) {
-        $agent = Get-AllTraeWindows | Where-Object { $_.Title -eq "Agent" } | Select-Object -First 1
-        if (-not $agent) {
-            Log "no Agent window found (attempt $attempt; client not running?)"
-            $result.steps += "no_agent_window"
-            break
-        }
+    $launchedBySync = $false
+    $target = Get-AllTraeWindows | Where-Object { $_.Title -eq "Agent" } | Select-Object -First 1
+    if (-not $target) {
+        $target = Get-AllTraeWindows | Where-Object { $_.Title -ne "Trae CN" } | Select-Object -First 1
+    }
+    if ($target) {
         # 2026-10-22：发键前必须核对前台。SetForegroundWindow 失败时 SendKeys 会落进
         # 当时前台的 Qoder，Ctrl+Shift+N 在那边的语义是新建窗口——当天 00:08:42 就是
         # 这么开出一个多余 Qoder 窗口的。拿不到前台就跳过本轮，绝不盲发。
-        if (-not [TraeWin]::EnsureForeground($agent.H)) {
-            Log "focus check failed; skip Ctrl+Shift+N (attempt $attempt)"
-            $result.steps += "focus_failed#$attempt"
-            Start-Sleep -Seconds 2
-            continue
-        }
-        Start-Sleep -Milliseconds 800
-        [System.Windows.Forms.SendKeys]::SendWait("^+n")
-        $result.steps += "sent_ctrl_shift_n#$attempt"
-        Log "sent Ctrl+Shift+N to Agent window (attempt $attempt)"
-        $t0 = Get-Date
-        while ($ideHwnd -eq [IntPtr]::Zero -and ((Get-Date) - $t0).TotalSeconds -lt 20) {
-            Start-Sleep -Seconds 2
-            foreach ($w in (Get-AllTraeWindows)) {
-                if (-not $before.ContainsKey($w.H.ToInt64())) { $ideHwnd = $w.H; break }
+        # （00:03 实测：锁屏/焦点未到位时单次 SendKeys 会被吞掉，故重试最多 3 轮）
+        for ($attempt = 1; $attempt -le 3 -and $ideHwnd -eq [IntPtr]::Zero; $attempt++) {
+            if (-not [TraeWin]::EnsureForeground($target.H)) {
+                Log "focus check failed; skip Ctrl+Shift+N (attempt $attempt)"
+                $result.steps += "focus_failed#$attempt"
+                Start-Sleep -Seconds 2
+                continue
+            }
+            Start-Sleep -Milliseconds 800
+            [System.Windows.Forms.SendKeys]::SendWait("^+n")
+            $result.steps += "sent_ctrl_shift_n#$attempt"
+            Log ("sent Ctrl+Shift+N to '" + $target.Title + "' window (attempt $attempt)")
+            $t0 = Get-Date
+            while ($ideHwnd -eq [IntPtr]::Zero -and ((Get-Date) - $t0).TotalSeconds -lt 20) {
+                Start-Sleep -Seconds 2
+                foreach ($w in (Get-AllTraeWindows)) {
+                    if (-not $before.ContainsKey($w.H.ToInt64())) { $ideHwnd = $w.H; break }
+                }
             }
         }
+        if ($ideHwnd -ne [IntPtr]::Zero) {
+            $result.steps += "ide_window_opened"
+            Log "new IDE window hwnd=$ideHwnd"
+        }
     }
-    if ($ideHwnd -ne [IntPtr]::Zero) {
-        $result.steps += "ide_window_opened"
-        Log "new IDE window hwnd=$ideHwnd"
-    } else {
-        # 2b. 没开成：复用既有非 Agent 窗口（用户之前开的 IDE 窗口，扩展 v0.0.2 聚焦即 dump）
+    if ($ideHwnd -eq [IntPtr]::Zero) {
+        # 2b. 复用既有非 Agent/Trae CN 窗口（用户之前开的 IDE 窗口，扩展 v0.0.2 聚焦即 dump）。
+        #     3.4.20 的欢迎页标题 "TRAE CN" 会被 -ne "Trae CN"（大小写不敏感）排除，
+        #     folder-arg 开出的 IDE 窗标题是 "agent-credit - TRAE CN"，不受影响。
         $existing = Get-AllTraeWindows | Where-Object { $_.Title -ne "Agent" -and $_.Title -ne "Trae CN" } | Select-Object -First 1
         if ($existing) {
             $ideHwnd = $existing.H
             $result.steps += "reuse_existing_ide"
             Log "reuse existing IDE-like window title=$($existing.Title)"
+        }
+    }
+    if ($ideHwnd -eq [IntPtr]::Zero -and -not $target) {
+        # 2d. 带项目路径启动（3.4.20 路线）：跳过欢迎页，IDE 窗直出且加载扩展
+        $exe = Join-Path $env:LOCALAPPDATA "Programs\Trae CN\Trae CN.exe"
+        if (-not (Test-Path $exe)) { $exe = Join-Path $env:USERPROFILE "AppData\Local\Programs\Trae CN\Trae CN.exe" }
+        if (Test-Path $exe) {
+            Start-Process -FilePath $exe -ArgumentList ('"' + $root + '"')
+            $launchedBySync = $true
+            $result.steps += "launched_with_repo_folder"
+            Log ("launched Trae with repo folder: " + $root)
+            $t0 = Get-Date
+            while ($ideHwnd -eq [IntPtr]::Zero -and ((Get-Date) - $t0).TotalSeconds -lt 60) {
+                Start-Sleep -Seconds 3
+                $w = Get-AllTraeWindows | Where-Object { $_.Title -ne "Trae CN" } | Select-Object -First 1
+                if ($w) { $ideHwnd = $w.H }
+            }
+            if ($ideHwnd -ne [IntPtr]::Zero) {
+                $result.steps += "ide_window_opened"
+                Log "new IDE window hwnd=$ideHwnd (folder-arg launch; startup dump in ~15s, no keystroke needed)"
+            }
+        } else {
+            Log ("exe missing, cannot folder-arg launch: " + $exe)
+            $result.steps += "exe_missing"
         }
     }
 
@@ -219,8 +258,14 @@ try {
         $result.steps += "skip_record_stale"
     }
 
-    # 4. 关掉本次拉开的 IDE 窗口
-    if ($result.steps -contains "ide_window_opened" -and $ideHwnd -ne [IntPtr]::Zero -and [TraeWin]::Alive($ideHwnd)) {
+    # 4. 关掉本次拉开的 IDE 窗口；launchedBySync 时整个实例都是本次拉的，全部关闭
+    if ($launchedBySync) {
+        foreach ($h in (Get-AllTraeWindows)) {
+            [TraeWin]::PostMessage($h.H, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_CLOSE
+        }
+        $result.steps += "launched_client_closed"
+        Log "WM_CLOSE sent to all Trae windows (instance launched by sync)"
+    } elseif ($result.steps -contains "ide_window_opened" -and $ideHwnd -ne [IntPtr]::Zero -and [TraeWin]::Alive($ideHwnd)) {
         [TraeWin]::PostMessage($ideHwnd, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_CLOSE
         $result.steps += "ide_window_closed"
         Log "closed opened IDE window"

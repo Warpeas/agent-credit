@@ -773,6 +773,9 @@ function Get-OcrLines {
 
 function Find-Line($lines, [string]$needle) {
     foreach ($l in $lines) {
+        # 2026-11-23：IDE 窗形态/最小化空白帧下 OCR 结果可能产出 text 为 null 的行，
+        # 裸 .Contains 会 FATAL 整个签到轮（11-22/11-23 两晨 pending 的直接原因）。
+        if (-not $l.text) { continue }
         if ($l.text.Contains($needle)) { return $l }
     }
     return $null
@@ -783,6 +786,7 @@ function Find-Line($lines, [string]$needle) {
 function Find-WordHit($lines, [string]$needle) {
     foreach ($l in $lines) {
         if (-not $l.words) { continue }
+        if (-not $l.text) { continue }
         if (-not $l.text.Contains($needle)) { continue }
         # 先试单词直接命中
         foreach ($w in $l.words) {

@@ -1814,12 +1814,13 @@ if ($entry.card) {
     $offsets = @(0)
     Log ("step: 卡片路线签到按钮已定位 @" + $bx + "," + $by)
 } elseif ($ideMenuVertical) {
-    # IDE 右侧菜单：纵向试探（按钮在入口行下方 ~108px 且右偏 ~51px，10-13 实测
-    # SOLO 布局「入口 @94,1514、按钮 @145,1622」同组件推断），跳过横向 offsets/
-    # 药丸扫描。菜单点关后本轮判据全落空会 pending，下一轮触发重试（幂等）。
-    $by = $by + 108
-    $offsets = @(51, 100, 0, -51)
-    Log ("step: IDE 右侧菜单纵向试探，第一击 @" + ($bx + 51) + "," + $by + "（入口行下方 108px、右偏 51px）")
+    # 2026-11-23 10:22 实锤：盲点菜单项误触「邀好友得积分+汉堡券」@1153,348（与
+    # 试探基线 377 仅差 29px），连开数个邀好友活动网页。「签到」黑钮坐标未像素定位
+    # 前禁用菜单盲点——防御性 pending，按钮位置由深夜探针（菜单开+截图）定位后恢复。
+    Log "step: IDE 菜单已展开但「签到」黑钮坐标未定位，禁用盲点（防误触邀好友链接）"
+    $peekM2 = ($lines | Select-Object -First 12 | ForEach-Object { $_.text }) -join "/"
+    Out-Json "pending" ("头像菜单已展开但「签到」黑钮坐标未定位（盲点已实锤误触邀好友链接，待像素定位后恢复）；页面: " + $peekM2)
+    exit 0
 } else {
     $btnLine = Find-SignButton $lines $entry.y
     if ($btnLine) {

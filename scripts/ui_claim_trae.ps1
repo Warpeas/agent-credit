@@ -152,6 +152,12 @@ function Restore-OriginalRect {
             Log "restore-rect: maximized (was zoomed)"
             return
         }
+        # 候选处理中可能被小窗 UIA「最大化」按钮改变状态。原窗不是最大化时，
+        # 先回普通态再按原 rect 落位，否则 SetWindowPos 会被系统忽略。
+        if (-not $script:WasZoomed -and [Cap32]::IsZoomed($hwnd)) {
+            [Cap32]::ShowWindow($hwnd, 9) | Out-Null
+            Start-Sleep -Milliseconds 300
+        }
         $r = $script:OriginalRect
         # 2026-11-11：位置和尺寸都还原（只回位置会让被钳过/改过的尺寸留下）。
         [Cap32]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.Left, $r.Top,
@@ -735,6 +741,9 @@ function Get-OcrLines {
 
 function Find-Line($lines, [string]$needle) {
     foreach ($l in $lines) {
+        # 2026-11-23：IDE 窗形态/最小化空白帧下 OCR 结果可能产出 text 为 null 的行，
+        # 裸 .Contains 会 FATAL 整个签到轮（11-22/11-23 两晨 pending 的直接原因）。
+        if (-not $l.text) { continue }
         if ($l.text.Contains($needle)) { return $l }
     }
     return $null
@@ -745,6 +754,7 @@ function Find-Line($lines, [string]$needle) {
 function Find-WordHit($lines, [string]$needle) {
     foreach ($l in $lines) {
         if (-not $l.words) { continue }
+        if (-not $l.text) { continue }
         if (-not $l.text.Contains($needle)) { continue }
         # 先试单词直接命中
         foreach ($w in $l.words) {
@@ -968,6 +978,9 @@ function Test-AlreadyCard($lines) {
 # 按 offset 连猜 4 次才碰中。改为按 OCR 短文本在入口行下方定位。
 function Find-SignButton($lines, [int]$entryY) {
     $xMax = [int]($winW * 0.35)
+    # 2026-11-23：menuOpen 右侧菜单场景（3.4.20 IDE 窗）menuRight 已按 0.75W 推算，
+    # 「签到」黑钮跟随菜单列（右对齐菜单内侧约 60px），xMax 随 menuRight 放宽。
+    if ($menuRight -gt 0) { $xMax = $menuRight + 100 }
     $best = $null
     foreach ($l in $lines) {
         if (-not $l.words) { continue }
@@ -981,6 +994,56 @@ function Find-SignButton($lines, [int]$entryY) {
         if (-not $best -or $l.y -lt $best.y) { $best = $l }
     }
     return $best
+}
+
+# ── 2026-11-23：3.4.20 IDE 窗「每日签到得 100 积分」卡片路线 ──────────────────
+# 背景：冷启动不再必然出现 SOLO(Agent) 窗（dataFolder 迁 .trae-cn 后记忆上次
+# IDE 会话），IDE 窗没有左下账户条与「每日领」入口，签到入口变成右上悬浮卡
+# （标题「每日签到得 100 积分」+ 左下深色「签到」按钮，实测 x 1480-1900、
+# y 80-460 @1920 宽）。webview 对 UIA 不可达（探针实测 13 元素全为框架），
+# 定位只能走 OCR/像素。判据：① granted「已获得N积分」（沿用 $RE_GRANTED，
+# 若新版沿用同款反馈文案）；② 右上标题栏积分数字差（Find-TopBalance，
+# IDE 窗余额可见，比 SOLO 时代更硬）。
+
+# 卡片「签到」按钮：标题「每日签到」行下方 420px 内的独立短词「签到」
+# （RE_SIGNBTN 同款），x 限定在标题行 ±0.25W 内（防其他区域同名词）。
+function Find-CardSignIn($lines) {
+    $cardY = -1
+    $cardX = -1
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        if ($l.text.Contains("每日签到")) {
+            $cardY = $l.y; $cardX = $l.x; break
+        }
+    }
+    if ($cardY -lt 0) { return $null }
+    $xSpan = [int]($winW * 0.25)
+    foreach ($l in $lines) {
+        if (-not $l.words) { continue }
+        if ($l.text.Length -gt 4) { continue }
+        if ($l.text -notmatch $RE_SIGNBTN) { continue }
+        if ($l.y -le $cardY) { continue }
+        if (($l.y - $cardY) -gt 420) { continue }
+        if ([Math]::Abs($l.x - $cardX) -gt $xSpan) { continue }
+        return @{ text = $l.text; x = $l.x; y = $l.y; w = $l.w; h = $l.h; card = $true }
+    }
+    return $null
+}
+
+# 右上标题栏积分（IDE 窗「✦ 1,477」）：千分位数字、y<100、x>0.6W。
+# 卡片弹层在 y>80 之外的部分可能有 6,000 之类数字，用 y<100 把它们隔在标题栏外。
+function Find-TopBalance($lines) {
+    $xMin = [int]($winW * 0.6)
+    $val = -1
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        if ($l.y -ge 100) { continue }
+        if ($l.x -lt $xMin) { continue }
+        foreach ($m in [regex]::Matches($l.text, '([0-9]{1,3}(?:[，,][0-9]{3})+)')) {
+            $val = [int]($m.Groups[1].Value -replace '[，,]', '')
+        }
+    }
+    return $val
 }
 
 # --- 方案甲：屏外点击的三级机制（M1/M4 的定义在文件头部，调用点更早） --------
@@ -1470,15 +1533,20 @@ function Test-MenuOpen($lines) {
 function Find-EntryWord($lines, [string[]]$needles) {
     $xMax = [int]($winW * 0.3)
     $menuOpen = Test-MenuOpen $lines
+    # 2026-11-23：3.4.20 IDE 窗头像在上栏右侧，菜单向右下垂（实测「每日领100积分」
+    # @1154、菜单列 x≈1153-1420 @1924 宽）——menuOpen 时 x 约束放宽为「左 30% 或
+    # 右 45%」，否则右侧菜单里的入口永远被拒（11-23 晨 pending 根因）。
+    $rightMin = [int]($winW * 0.45)
     # 2026-10-25：Find-WordHit 每个 needle 只返回**第一条**命中行。聊天区顶部的
     # 对话（「入口已找到每日领…」）在 OCR 顺序里先于左下菜单，x 检查把它 skip 后
     # 就再没机会看到菜单里的「每日领100积分」→ 菜单明明开了仍报「未找到入口」。
-    # 先把候选限定在左 30%（菜单/侧栏都在这里），再让 Find-WordHit 找。
-    $left = @($lines | Where-Object { $_.x -lt $xMax })
+    # 先把候选限定在左 30%（SOLO 菜单/侧栏）或右 45%（3.4.20 IDE 菜单），再让
+    # Find-WordHit 找。
+    $left = @($lines | Where-Object { $_.x -lt $xMax -or ($menuOpen -and $_.x -ge $rightMin) })
     foreach ($n in $needles) {
         $h = Find-WordHit $left $n
         if (-not $h) { continue }
-        if ($h.x -ge $xMax) { continue }
+        if ($h.x -ge $xMax -and -not ($menuOpen -and $h.x -ge $rightMin)) { continue }
         if ($h.text -match "多领|升级|会员|已") { continue }
         # 侧栏任务列表里的历史任务名（实测「配置Trae每日自动签到」@664,162、
         # 「查询签到入口与积分规则」@101,1100）同样含「签到」且落在 x<30%，
@@ -1550,6 +1618,28 @@ function Invoke-TraeWindowClaim {
             $winH = $rect.Bottom - $rect.Top
             $winX = $rect.Left
             $winY = $rect.Top
+        }
+        # 2026-11-23（远端 IDE 适配）：小窗装不下头像菜单/签到卡片，且客户端会跨
+        # 冷启动记住小窗。SW_MAXIMIZE 对该窗无效，改由标题栏 UIA「最大化」触发。
+        if ($winW -lt 1500) {
+            try {
+                Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction SilentlyContinue
+                $aeRoot = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+                $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, "最大化")
+                $btn = $aeRoot.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+                if ($btn) {
+                    [void](Log "step: 小窗触发 UIA Invoke「最大化」按钮")
+                    ($btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()
+                    Start-Sleep -Seconds 2
+                    [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+                    $winW = $rect.Right - $rect.Left
+                    $winH = $rect.Bottom - $rect.Top
+                    $winX = $rect.Left; $winY = $rect.Top
+                    [void](Log ("step: 最大化后窗口 " + $winW + "x" + $winH))
+                } else {
+                    [void](Log "step: 未找到「最大化」按钮（可能已最大化或标题语言不同），继续")
+                }
+            } catch { [void](Log ("step: 最大化尝试失败（不影响主流程）: " + $_.Exception.Message)) }
         }
         try { if (-not $Offscreen) { [void](Ensure-Foreground) } } catch { }
         if ($Offscreen) {
@@ -1687,14 +1777,41 @@ if (-not $entry) {
     }
 }
 
-# 2026-11-03 兜底：IDE/Code 窗口没有左下角账户条，头像在窗口上栏右侧（IDE 模式
-# 实测：绿色头像 icon 距右缘约 245px、距顶约 20px，1500x900 与 1350x900 两种宽度
-# 下偏移一致；当日晚间 computer-use 实签走的就是这条路）。左下流程全军覆没时点这里
-# 开同一个头像菜单（菜单内容各窗口一致：每日领100积分 + 签到按钮）。
+# 2026-11-03 兜底：IDE/Code 窗口没有左下角账户条。3.4.20 起两条路线（见上方
+# 卡片路线注释）：
+#   (A) 签到卡片已自动弹出（每日首次进入 IDE 窗时实测会弹）→ 直接找「签到」按钮；
+#   (B) 卡片未弹 → 点标题栏头像（OCR 右上积分数字定位：头像在数字右侧约 0.06W；
+#       找不到数字退回距右缘 0.22W 固定偏移——旧 245px 偏移在 3.4.20 里正好是
+#       「最小化」按钮，11-22/11-23 两晨都点到了它）→ 卡片弹出后再找按钮。
+# 菜单内容各窗口一致：每日领100积分 + 签到按钮（SOLO 形态旧路线原样保留）。
 if (-not $entry -and -not (Test-MenuOpen $lines)) {
-    $tx = $winW - 245
-    $ty = 20
-    [void](Log ("step: 左下账户条未开菜单，兜底点上栏头像 @$tx,$ty（IDE 窗口上栏头像入口）"))
+    $cardBtn = Find-CardSignIn $lines
+    if ($cardBtn) {
+        $entry = $cardBtn
+        [void](Log ("step: IDE 卡片已弹出，「签到」按钮 @" + $cardBtn.x + "," + $cardBtn.y))
+    }
+}
+if (-not $entry -and -not (Test-MenuOpen $lines)) {
+    # (B) 头像定位：OCR 右上积分数字（千分位含全角逗号「1，477」、y<130、x>0.6W），
+    #     头像 ≈ 数字右缘 + 0.02W（实测数字 @1430-1482、头像 ≈1501 @1924）；
+    #     找不到数字退回 0.78W 固定偏移（11-23 实测 0.78W 正中头像）。
+    $tx = -1; $ty = -1; $anchor = "fallback"
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        if ($l.y -ge 130) { continue }
+        if ($l.x -lt [int]($winW * 0.6)) { continue }
+        foreach ($w in $l.words) {
+            if ($w.text -match '^\d{1,3}([，,][0-9]{3})+$') {
+                $tx = $w.x + $w.w + [int]($winW * 0.02)
+                $ty = 20
+                $anchor = "ocr-balance:" + $w.text
+                break
+            }
+        }
+        if ($tx -ge 0) { break }
+    }
+    if ($tx -lt 0) { $tx = [int]($winW * 0.78); $ty = 20 }
+    [void](Log ("step: IDE 窗兜底点头像 @" + $tx + "," + $ty + "（" + $anchor + "）"))
     [void](Click-At $tx $ty -SkipSynth)
     foreach ($sub in 1..2) {
         Start-Sleep -Seconds 2
@@ -1703,6 +1820,10 @@ if (-not $entry -and -not (Test-MenuOpen $lines)) {
         if ($sub -eq 1) { Save-Shot "03-topbar" }
         $entry = Find-EntryWord $lines $clickWords
         $claimed = Find-AnyLine $lines $claimWords ([int]($winW * 0.3))
+        if (-not $entry) {
+            $cardBtn = Find-CardSignIn $lines
+            if ($cardBtn) { $entry = $cardBtn; [void](Log ("step: 点头像后卡片弹出，按钮 @" + $cardBtn.x + "," + $cardBtn.y)) }
+        }
         if ($entry -or (Test-MenuOpen $lines)) { break }
     }
     if (-not $entry -and -not (Test-MenuOpen $lines)) {
@@ -1715,6 +1836,13 @@ if (-not $entry -and -not (Test-MenuOpen $lines)) {
         }
         Start-Sleep -Milliseconds 600
     }
+}
+
+# 2026-11-23：menuOpen=true 但入口仍未命中时绝不盲点（旧路径会拿 null 坐标点标题栏）。
+# 防御性 pending：菜单已开、下轮触发重试即可（幂等，无副作用）。
+if (-not $entry -and (Test-MenuOpen $lines)) {
+    $peekM = ($lines | Select-Object -First 12 | ForEach-Object { $_.text }) -join "/"
+    return New-TraeClaimResult 'pending' ("头像菜单已展开但未命中「每日领」入口（右侧菜单适配中）；页面: " + $peekM)
 }
 
 if (-not $entry -and -not $claimed) {
@@ -1767,26 +1895,31 @@ if ($DryRun) {
 # 用菜单项的右边界推算——黑色「签到」按钮右对齐在菜单内侧约 60px 处。
 $offsets = @(380, 300, 450, 0)
 $menuRight = 0
+# 2026-11-23：menuOpen 必须在此**即时重算**——主作用域没有 $menuOpen 变量
+# （它只在 Find-EntryWord 函数内部局部存在），直接引用恒为 null/falsy，
+# 导致 IDE 右侧菜单的纵向试探与 0.75W 放宽从未生效（09:53 那轮实锤）。
+$menuOpenNow = Test-MenuOpen $lines
+# menuOpen 时菜单可能在右侧（IDE 窗头像菜单 x≈1153-1495 @1924），
+# menuXMax 从 0.35W 放宽到 0.75W，右侧菜单词也参与 menuRight 推算。
 $menuXMax = [int]($winW * 0.35)
+if ($menuOpenNow) { $menuXMax = [int]($winW * 0.75) }
 foreach ($l in $lines) {
     if (-not $l.text) { continue }
     # 2026-10-25：菜单只可能在左侧栏。聊天/文档区里同样会出现「消息」「每日领」
     # 等词，不限制 x 会把 menuRight 拉到窗口右侧，药丸扫描范围随之覆盖聊天区，
-    # 扫到的是对话内容而不是「签到」黑钮。
+    # 扫到的是对话内容而不是「签到」黑钮。（2026-11-23：menuOpen 时菜单可居右，
+    # 见上方注释——放宽后右侧菜单列照常参与。）
     if ($l.x -ge $menuXMax) { continue }
     if ($l.text -match "退出登录|管理账户|报告问题|升级权益|每日领|消息") {
         $r = $l.x + $l.w
         if ($r -gt $menuRight) { $menuRight = $r }
     }
 }
-if ($menuRight -gt 0) {
-    # PowerShell 5.1 会把 @($d, $d - 60, ...) 里的算术解析成数组运算而报错，
-    # 必须先算成独立变量再进数组。
-    $d  = [int]([int]$menuRight - 60 - [int]$bx)
-    $d1 = $d - 60
-    $d2 = $d + 60
-    $offsets = @($d, $d1, $d2, 0)
-}
+# 2026-11-23：IDE 右侧菜单场景（menuXMax>0.5W 即判定）——「签到」黑钮在入口行
+# **下方 ~108px**（10-13 实测布局），且 OCR 漏检黑底按钮、药丸扫描区间也失配。
+# 改纵向试探：by+108 起步、横向 ±50 抖动；余额判据切 Find-TopBalance（菜单开着
+# 时右上「✦ 1,477」仍可见——dump 实锤 @1430,108）。
+$ideMenuVertical = ($menuOpenNow -and $menuXMax -gt [int]($winW * 0.5))
 
 # 「签到」按钮 OCR 整行漏检，靠像素扫描在入口行右侧找对比色药丸，
 # 命中后以它为主点击点（比按偏移猜可靠得多）。
@@ -1810,40 +1943,56 @@ Start-Sleep -Milliseconds 800
 $null = Get-OcrLines
 # 点击前的余额：菜单重开后「今日已签」文案会消失，余额差才是唯一可靠的到账证据。
 # 2026-10-13 起新 UI 账户条不再显示余额，这里恒为 -1，降为备用判据。
-$bal0 = Find-Balance $lines
+# 2026-11-23：卡片路线（IDE 窗）/右侧菜单场景右上标题栏余额可见，bal 升为主判据之一。
+if ($entry.card -or $ideMenuVertical) { $bal0 = Find-TopBalance $lines } else { $bal0 = Find-Balance $lines }
 $offer = Find-OfferAmount $lines
 
 # 2026-10-13：优先按 OCR 短文本定位卡片下方的「签到」按钮。命中就只点一次，
 # 不再靠像素扫描药丸 + 4 个 offset 轮换去碰运气（新布局里药丸扫描会扫到背景
 # 深色块，实测 x=664 len=235，于是每次都要试满 4 个位置）。
-$btnLine = Find-SignButton $lines $entry.y
-if ($btnLine) {
-    $bx = $btnLine.x + [int]($btnLine.w / 2)
-    $by = $btnLine.y + [int]($btnLine.h / 2)
+if ($entry.card) {
+    # 卡片路线：按钮位置即 $entry 本身，直接单点，不走 SOLO 菜单的药丸扫描/offset 轮换
+    $bx = $entry.x + [int]($entry.w / 2)
+    $by = $entry.y + [int]($entry.h / 2)
     $offsets = @(0)
-    [void](Log ("step: 签到按钮按 OCR 定位 @" + $bx + "," + $by))
-    try {
-        $ln = "$(Get-Date -Format HH:mm:ss) btnOcr x=$bx y=$by text=$($btnLine.text) offer=$offer bal0=$bal0`n"
-        [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
-    } catch { }
-}
-else {
-    $btn = Find-ButtonPill $by ([int]([int]$bx + 40)) $x1
-    if ($btn) {
-        $d0 = [int]($btn.x - [int]$bx)
-        $dm = $d0 - 40
-        $dp = $d0 + 40
-        $offsets = @($d0, $dm, $dp, 0)
-        $by = $btn.y
+    [void](Log ("step: 卡片路线签到按钮已定位 @" + $bx + "," + $by))
+} elseif ($ideMenuVertical) {
+    # 2026-11-23 10:22 实锤：盲点菜单项误触「邀好友得积分+汉堡券」@1153,348（与
+    # 试探基线 377 仅差 29px），连开数个邀好友活动网页。「签到」黑钮坐标未像素定位
+    # 前禁用菜单盲点——防御性 pending，按钮位置由深夜探针（菜单开+截图）定位后恢复。
+    [void](Log "step: IDE 菜单已展开但「签到」黑钮坐标未定位，禁用盲点（防误触邀好友链接）")
+    $peekM2 = ($lines | Select-Object -First 12 | ForEach-Object { $_.text }) -join "/"
+    return New-TraeClaimResult 'pending' ("头像菜单已展开但「签到」黑钮坐标未定位（盲点已实锤误触邀好友链接，待像素定位后恢复）；页面: " + $peekM2)
+} else {
+    $btnLine = Find-SignButton $lines $entry.y
+    if ($btnLine) {
+        $bx = $btnLine.x + [int]($btnLine.w / 2)
+        $by = $btnLine.y + [int]($btnLine.h / 2)
+        $offsets = @(0)
+        [void](Log ("step: 签到按钮按 OCR 定位 @" + $bx + "," + $by))
         try {
-            $ln = "$(Get-Date -Format HH:mm:ss) buttonPill x=$($btn.x) y=$($btn.y) len=$($btn.len) bg=$($btn.bg) entryX=$bx bal0=$bal0 offsets=" + ($offsets -join ',') + "`n"
+            $ln = "$(Get-Date -Format HH:mm:ss) btnOcr x=$bx y=$by text=$($btnLine.text) offer=$offer bal0=$bal0`n"
             [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
         } catch { }
-    } else {
-        try {
-            $ln = "$(Get-Date -Format HH:mm:ss) btnNone entryX=$bx by=$by bal0=$bal0`n"
-            [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
-        } catch { }
+    }
+    else {
+        $btn = Find-ButtonPill $by ([int]([int]$bx + 40)) $x1
+        if ($btn) {
+            $d0 = [int]($btn.x - [int]$bx)
+            $dm = $d0 - 40
+            $dp = $d0 + 40
+            $offsets = @($d0, $dm, $dp, 0)
+            $by = $btn.y
+            try {
+                $ln = "$(Get-Date -Format HH:mm:ss) buttonPill x=$($btn.x) y=$($btn.y) len=$($btn.len) bg=$($btn.bg) entryX=$bx bal0=$bal0 offsets=" + ($offsets -join ',') + "`n"
+                [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
+            } catch { }
+        } else {
+            try {
+                $ln = "$(Get-Date -Format HH:mm:ss) btnNone entryX=$bx by=$by bal0=$bal0`n"
+                [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
+            } catch { }
+        }
     }
 }
 [void](Log ("step: 入口已找到 " + $entry.text + "（可领 " + $offer + "），准备点签到按钮"))
@@ -1866,8 +2015,9 @@ for ($i = 0; $i -lt $offsets.Count; $i++) {
             return New-TraeClaimResult 'ok' ("签到成功（已获得 " + $g + " 积分）[granted] " + $g) $g
         }
 
-        # ② 备用判据：余额差。新 UI 已无余额（bal0 恒 -1），保留以兼容再次改版。
-        $bal1 = Find-Balance $lines
+        # ② 备用判据：余额差。SOLO 形态下新 UI 已无余额（bal0 恒 -1）；卡片路线与
+        #    IDE 右侧菜单场景右上标题栏余额可见（Find-TopBalance），升为主判据之一。
+        if ($entry.card -or $ideMenuVertical) { $bal1 = Find-TopBalance $lines } else { $bal1 = Find-Balance $lines }
         [void](Log ("step: 复核 granted=" + $g + " 余额 " + $bal0 + " -> " + $bal1))
         if ($bal0 -ge 0 -and $bal1 -ge 0 -and $bal1 -gt $bal0) {
             $delta = $bal1 - $bal0

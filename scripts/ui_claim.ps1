@@ -2,10 +2,17 @@
 param(
     [Parameter(Mandatory = $true)][string]$ProcessMatch,
     [string]$ClickName = "",
+    # 可选的一级入口（如小浣熊「账户」）；打开并刷新 UIA 后再找签到按钮。
+    [string]$OpenName = "",
+    [string]$OpenNamePattern = "",
     [string]$AlreadyName = "",
     [string]$SuccessName = "",
     [string]$SendKeys = "",
-    [int]$WaitSeconds = 45
+    [int]$WaitSeconds = 45,
+    # 只读取 UIA 名称，不点击；用于新客户端首次适配，避免盲点。
+    [switch]$Explore,
+    # 配合 OpenName/Pattern：只打开一级面板再读取 UIA，不点击签到/领取。
+    [switch]$ExploreAfterOpen
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,6 +54,14 @@ function Test-ClickableName([string]$name, [string[]]$needles) {
     return $true
 }
 
+function Test-ExplicitStatus([string]$name, [string[]]$needles) {
+    # 状态文案必须短且不含规则/历史说明，避免把「签到规则」「昨日已签到」
+    # 之类的页面文本当成本日已领证据。
+    if ([string]::IsNullOrWhiteSpace($name) -or $name.Trim().Length -gt 24) { return $false }
+    if ($name -match "规则|记录|历史|日历|说明|帮助|昨日|明天|明日") { return $false }
+    return (Test-NameMatch $name.Trim() $needles)
+}
+
 function Out-Result([string]$status, [string]$detail) {
     $payload = @{ status = $status; detail = $detail } | ConvertTo-Json -Compress
     Write-Output $payload
@@ -68,6 +83,7 @@ $procPatterns = Split-Names $ProcessMatch
 $clickNames = Split-Names $ClickName
 $alreadyNames = Split-Names $AlreadyName
 $successNames = Split-Names $SuccessName
+$openNames = Split-Names $OpenName
 
 $deadline = (Get-Date).AddSeconds($WaitSeconds)
 $proc = $null
@@ -140,6 +156,44 @@ function Invoke-Element($el) {
 }
 
 $named = Get-NamedElements $root
+
+if ($Explore) {
+    $names = @($named | Select-Object -First 160 | ForEach-Object { $_.Name })
+    Out-Result "explore" ("UIA 名称 " + $named.Count + " 项: " + ($names -join " | "))
+}
+
+# 一级入口只接受完整名称（例如「账户」），不点击任务标题里的同名长文本。
+$opened = $false
+if ($openNames.Count -gt 0 -or $OpenNamePattern) {
+    foreach ($item in $named) {
+        $name = $item.Name.Trim()
+        $matched = ($openNames -contains $name)
+        if ($OpenNamePattern -and $name -match $OpenNamePattern) { $matched = $true }
+        if ($matched -and $item.El.Current.IsEnabled) {
+            if (Invoke-Element $item.El) {
+                $opened = $true
+                Start-Sleep -Seconds 3
+                $named = Get-NamedElements $root
+                break
+            }
+        }
+    }
+    if (-not $opened) { Out-Result "notfound" ("未找到一级入口: " + ($openNames -join "/") + $OpenNamePattern) }
+}
+if ($ExploreAfterOpen) {
+    $names = @($named | Select-Object -First 200 | ForEach-Object { $_.Name })
+    Out-Result "explore" ("一级面板 UIA 名称 " + $named.Count + " 项: " + ($names -join " | "))
+}
+
+# 先认明确的已签状态，避免点击已经失效的入口。不用「签到」二字做包含匹配，
+# 防止把规则说明/历史记录当成已领。
+foreach ($item in $named) {
+    if (Test-ExplicitStatus $item.Name $alreadyNames) {
+        $prefix = if ($opened) { "已打开「" + ($openNames -join "/") + "」；" } else { "" }
+        Out-Result "already" ($prefix + "界面已显示: " + $item.Name)
+    }
+}
+
 $clicked = $false
 $clickedName = ""
 foreach ($item in $named) {
@@ -156,11 +210,13 @@ if ($clicked) {
     Start-Sleep -Seconds 2
     $after = Get-NamedElements $root
     foreach ($item in $after) {
-        if (Test-NameMatch $item.Name ($successNames + $alreadyNames)) {
+        if (Test-ExplicitStatus $item.Name ($successNames + $alreadyNames)) {
             Out-Result "ok" ("已点击「" + $clickedName + "」，结果: " + $item.Name)
         }
     }
-    Out-Result "ok" ("已点击「" + $clickedName + "」")
+    # 点击动作本身不是签到成功证据。只有界面出现明确成功/已签状态才入账；
+    # 否则返回 pending，让上层保存失败，避免凭一次点击虚记积分。
+    Out-Result "pending" ("已点击「" + $clickedName + "」，但未确认签到状态")
 }
 
 if (-not [string]::IsNullOrWhiteSpace($SendKeys)) {
@@ -170,11 +226,11 @@ if (-not [string]::IsNullOrWhiteSpace($SendKeys)) {
     Start-Sleep -Seconds 2
     $after = Get-NamedElements $root
     foreach ($item in $after) {
-        if (Test-NameMatch $item.Name ($successNames + $alreadyNames)) {
+        if (Test-ExplicitStatus $item.Name ($successNames + $alreadyNames)) {
             Out-Result "ok" ("已发送快捷指令，结果: " + $item.Name)
         }
     }
-    Out-Result "ok" "已向窗口发送签到指令"
+    Out-Result "pending" "已发送快捷指令，但未确认签到状态"
 }
 
 Out-Result "notfound" "窗口内未找到签到按钮"

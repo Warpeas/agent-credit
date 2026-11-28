@@ -9,7 +9,8 @@
 
 登录态：data/webprofiles/monkeycode/（2026-11-16 手机验证码登录，
 Edge 自己保管 cookie，本脚本不读不导出——research/SAFETY.md 规则 1）。
-登录态失效 exit 2 报 NEED_LOGIN，主人在弹出窗口人工登录一次即恢复。
+登录态失效 exit 3 报 NEED_LOGIN；由 checkin 回落到本机已安装的 MonkeyCode
+桌面客户端 UIA 路线，不保留人工登录等待，也不阻塞其余账户继续签到。
 注意：登录页的微信二维码与短信验证码在自动化 profile 下都可能被长亭
 CAP 组件的 Worker timeout 卡住（已加 --disable-features=TrackingPrevention
 与 --disable-blink-features=AutomationControlled 规避，登录成功一次后
@@ -21,7 +22,7 @@ CAP 组件的 Worker timeout 卡住（已加 --disable-features=TrackingPreventi
   - 登录态失效模式变化
 
 跑法：python scripts/web_claim_monkeycode.py
-退出码：0=完成  2=待人工（登录态失效/页面异常）  其它=失败
+退出码：0=完成  2=待人工（页面异常）  3=未登录（转客户端兜底）  其它=失败
 """
 from __future__ import annotations
 
@@ -97,8 +98,8 @@ def main() -> int:
             if "/login" in page.url:
                 log("登录态失效：被重定向到登录页")
                 page.screenshot(path=str(OUT / f"nologin_{today}.png"))
-                print("NEED_LOGIN: 请在弹出窗口登录 MonkeyCode 后重跑", flush=True)
-                return 2
+                print("NEED_LOGIN: 网页登录态失效", flush=True)
+                return 3
 
             slug = datetime.now().strftime("%H%M%S")
             points_before = read_points(page)

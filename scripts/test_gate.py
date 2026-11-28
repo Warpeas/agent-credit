@@ -129,7 +129,15 @@ checkin.ui_claim = _no_ui
 checkin.run_gate = lambda *a, **k: gate.Decision("skip_ui", "key", 15)
 
 results, _ = checkin.checkin()
-ui_results = [r for r in results if r.account_id in checkin.UI_IDLE_ACCOUNTS]
+# never_auto 账户（如 Qoder CN）虽在共享组名单里，也不会进入本轮 UI 闸门；
+# 它们按策略 skipped 是正确的，不能拿来断言「按 N 后全部 pending」。
+due_ui_ids = {
+    a["id"] for a in checkin.accounts()
+    if a["id"] in checkin.UI_IDLE_ACCOUNTS
+    and a.get("claim_policy") not in ("never_auto", "monthly")
+    and a.get("claim_mode") != "never"
+}
+ui_results = [r for r in results if r.account_id in due_ui_ids]
 check("N：UI 组全部 pending", {r.status for r in ui_results}, {"pending"})
 check("N：原因写明跳过", all("主人按 N" in r.detail for r in ui_results), True)
 minimax = next(r for r in results if r.account_id == "minimax")
@@ -139,7 +147,7 @@ check("N：last_gate 保留", checkin.last_gate.action, "skip_ui")
 checkin.run_gate = lambda *a, **k: gate.Decision("start", "key", 15)
 checkin.ui_claim = lambda account_id: (True, f"{account_id} 模拟 [granted] 100")
 results, _ = checkin.checkin()
-ui_results = [r for r in results if r.account_id in checkin.UI_IDLE_ACCOUNTS]
+ui_results = [r for r in results if r.account_id in due_ui_ids]
 # monkeycode_credit 在 b9dfcd9 后 claim_mode=external，测试环境 SKIP_EXTERNAL
 # 会把它挡成 pending。它留在 UI 组是产品语义正确的——playwright 真开 Edge
 # 窗口，照样要等主人空闲——所以断言按 claim_mode 分流：ui 成员必须 ok，

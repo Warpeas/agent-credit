@@ -93,6 +93,11 @@ LAUNCH_CANDIDATES: dict[str, list[Path]] = {
     "xiaohuanxiong": [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "raccoon-ai" / "商汤小浣熊.exe",
     ],
+    # MonkeyCode 是 per-user Tauri 安装，不在 Programs 目录；2026-11-29 复核
+    # 注册表 InstallLocation 与 exe 均确认存在，别再误报「本机未装」。
+    "monkeycode_credit": [
+        Path(LOCAL_PROGRAMS).parent / "MonkeyCode" / "monkeycode-desktop.exe",
+    ],
 }
 
 

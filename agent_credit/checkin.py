@@ -27,7 +27,10 @@ SYNC_SKIP_ENV = "AGENT_CREDIT_SKIP_SYNC"
 SYNC_DEFERRED_EXIT = 4
 # UI 签到组只共享一次用户空闲闸门：通过后 Qoder/MonkeyCode 的内部等待跳过。
 # Trae/AutoClaw/LobsterAI 本来没有重复等待，但同属这组，活跃时一起留 pending。
-UI_IDLE_ACCOUNTS = {"trae", "autoclaw", "lobsterai", "qodercn", "monkeycode_credit"}
+UI_IDLE_ACCOUNTS = {
+    "trae", "autoclaw", "lobsterai", "qodercn", "monkeycode_credit",
+    "xiaohuanxiong",
+}
 # 兼容旧调用：checkin 内部已改用 interaction 的空闲闸门，这两个常量仅保留给
 # 历史脚本/测试引用，不再参与判定。
 SHARED_UI_IDLE_WAIT_SEC = 300
@@ -348,12 +351,17 @@ def checkin(
                 results.append(_grant_success(acc, data, on, detail,
                                               override=_parse_granted(detail)))
                 continue
-            hint = (
-                f"{detail}。请在 {acc['name']} 里手动签到 {acc.get('daily_amount') or 0}，"
-                f"然后执行: credit record {acc['id']} claimed {acc.get('daily_amount') or 0}"
-            )
-            status = "failed" if "超时" in detail else "pending"
-            results.append(CheckinResult(acc["id"], acc["name"], status, hint))
+            if acc.get("failure_is_error"):
+                results.append(CheckinResult(
+                    acc["id"], acc["name"], "failed",
+                    f"网页与客户端兜底均失败：{detail}"))
+            else:
+                hint = (
+                    f"{detail}。请在 {acc['name']} 里手动签到 {acc.get('daily_amount') or 0}，"
+                    f"然后执行: credit record {acc['id']} claimed {acc.get('daily_amount') or 0}"
+                )
+                status = "failed" if "超时" in detail else "pending"
+                results.append(CheckinResult(acc["id"], acc["name"], status, hint))
             continue
 
         if mode == "manual":

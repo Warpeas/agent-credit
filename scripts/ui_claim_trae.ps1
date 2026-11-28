@@ -370,6 +370,7 @@ function Find-TargetWindow {
             $w = $r.Right - $r.Left
             $hh = $r.Bottom - $r.Top
             $vis = [Cap32]::IsWindowVisible($h)
+            $iconic = [Cap32]::IsIconic($h)
             $cls = Get-WinClass $h
             $title = Get-WinTitle $h
             $big = ($w -gt 500 -and $hh -gt 400)
@@ -378,16 +379,17 @@ function Find-TargetWindow {
                     ([int]$h), $vis, $cls, $title, $w, $hh))
             }
             # 三条硬条件，缺一不可。黑窗/推广浮层因此永远不入选。
-            if ($vis -and $big -and $cls -ne 'Chrome_WidgetWin_0' -and $title -and $title.Trim()) {
+            if ($vis -and -not $iconic -and $big -and $cls -ne 'Chrome_WidgetWin_0' -and $title -and $title.Trim()) {
                 [void]$script:MainCandidates.Add([pscustomobject]@{ H = $h; Area = ($w * $hh) })
                 if (($w * $hh) -gt $script:BestArea) {
                     $script:BestHwnd = $h
                     $script:BestArea = $w * $hh
                 }
             }
-            # 2026-10-29：关到托盘时主窗口是隐藏的（WS_VISIBLE=off），但 rect/标题
-            # 都在。单独记下来，找不到可见窗口时由 Restore-HiddenTraeWindow 还原。
-            if ((-not $vis) -and $big -and $cls -eq 'Chrome_WidgetWin_1' -and $title -and $title.Trim()) {
+            # 2026-10-29：关到托盘时主窗口是隐藏的（WS_VISIBLE=off），rect/标题
+            # 都在。2026-11-29：最小化窗口的 rect 会缩成 -32000,-32000 314x50，
+            # 不能再要求 $big；否则托盘/最小化实例会被误等 60s 后报 notfound。
+            if ($cls -eq 'Chrome_WidgetWin_1' -and $title -and $title.Trim() -and ((-not $vis) -or $iconic)) {
                 [void]$script:HiddenCands.Add([pscustomobject]@{
                     H = $h; Title = $title; Area = ($w * $hh); W = $w; HH = $hh })
             }
@@ -401,12 +403,21 @@ function Find-TargetWindow {
 
 function Restore-HiddenTraeWindow {
     # 关到托盘后主窗口 WS_VISIBLE=off，旧逻辑只认可见窗口，于是白等 60 秒。
-    # 这里把刚枚举到的最大隐藏主窗口 SW_RESTORE 回来，再让调用方重新枚举。
+    # 每次只还原一个尚未处理的隐藏窗口；调用方随后重新枚举，把可见候选并入队列。
     if (-not $script:HiddenCands -or $script:HiddenCands.Count -eq 0) { return [IntPtr]::Zero }
-    $best = $script:HiddenCands | Sort-Object Area -Descending | Select-Object -First 1
-    # ShowWindow(9) 会把最大化窗口变成还原态；记下来，收尾时最大化回去。
-    if ([Cap32]::IsZoomed($best.H)) { $script:WasZoomed = $true }
-    Log ("main window hidden (tray?); restoring hwnd=" + $best.H + " title='" + $best.Title + "'")
+    if ($null -eq $script:RestoredHiddenHandles) { $script:RestoredHiddenHandles = @{} }
+    if ($null -eq $script:HiddenOriginalState) { $script:HiddenOriginalState = @{} }
+    $best = $script:HiddenCands | Sort-Object Area -Descending | Where-Object {
+        -not $script:RestoredHiddenHandles.ContainsKey([string]$_.H)
+    } | Select-Object -First 1
+    if (-not $best) { return [IntPtr]::Zero }
+    # ShowWindow(9) 会把最大化窗口变成还原态；按句柄保存，避免多窗口互相污染。
+    $script:HiddenOriginalState[[string]$best.H] = [pscustomobject]@{
+        WasZoomed = [Cap32]::IsZoomed($best.H)
+        WasMinimized = [Cap32]::IsIconic($best.H)
+    }
+    $script:RestoredHiddenHandles[[string]$best.H] = $true
+    [void](Log ("main window hidden (tray?); restoring hwnd=" + $best.H + " title='" + $best.Title + "'"))
     [Cap32]::ShowWindow($best.H, 9) | Out-Null   # SW_RESTORE
     Start-Sleep -Milliseconds 900
     return $best.H
@@ -559,17 +570,6 @@ if ($hwnd -eq [IntPtr]::Zero) {
     if ($hwnd -eq [IntPtr]::Zero) { Out-Json "notfound" "$ProcessName 启动后 60s 内未出现主窗口（本环境冷启动该客户端会失败，请手动打开后重跑）" }
 }
 
-# 2026-11-03：多窗口（Agent + IDE）甄别。冷启动刚出窗时内容可能未画完，
-# 给 3s 让首帧渲染，再对每个候选窗口做轻量 OCR 选 Agent 窗口（主流程目标）。
-if ($script:MainCandidates -and $script:MainCandidates.Count -gt 1) {
-    if ($script:LaunchedByUs) { Start-Sleep -Seconds 3 }
-    $picked = Select-CodeModeWindow
-    if ($picked -ne [IntPtr]::Zero -and $picked -ne $hwnd) {
-        Log ("multi-window: switching from hwnd=" + $hwnd + " to agent-window hwnd=" + $picked)
-        $hwnd = $picked
-    }
-}
-
 # Foreground helpers: OCR is only trustworthy when $ProcessName is really in front.
 # 用户正在操作电脑时会把窗口挤到后台，单靠 SetForegroundWindow 常常切不回来
 # （Windows 会拒绝非前台进程的切换请求）。逐级加码：还原 → Alt 技巧 → 绑输入队列强切。
@@ -648,46 +648,8 @@ function Reset-WindowRect {
     return $true
 }
 
-$rect = New-Object Cap32+RECT
-[Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
-if (Reset-WindowRect -h $hwnd) {
-    [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
-    Write-Host ("rect was off-screen, clamped to {0},{1} {2}x{3} (screen {4}x{5})" -f `
-        $rect.Left, $rect.Top, ($rect.Right - $rect.Left), ($rect.Bottom - $rect.Top), $sw, $sh)
-}
-$winW = $rect.Right - $rect.Left
-$winH = $rect.Bottom - $rect.Top
-$winX = $rect.Left
-$winY = $rect.Top
-
-# --- 方案甲 M1：窗口整窗停到主屏左界外，识别全后台化 -------------------------
-# 窗口仍在默认桌面（DWM 正常合成，PrintWindow 可用），只是不可见、绝不激活。
-# 原 rect（已被 Reset-WindowRect 钳回屏内）存入 $script:OriginalRect，
-# Out-Json 收尾前恢复（M4）；$winX/$winY 保持原位语义，供移回点击用。
-$script:OriginalRect = $null
-# $script:WasZoomed 可能已在 Restore-HiddenTraeWindow 里置位（托盘还原前是最大化）；
-# 这里不能再无条件清零，否则收尾不会最大化回去。
-if ($null -eq $script:WasZoomed) { $script:WasZoomed = $false }
-if ($Offscreen) {
-    # 2026-10-29：最大化窗口 SetWindowPos 移不动。当天 01:36 的失败就是它——
-    # rect 是 -13,-13 3866x2090（最大化），「停到屏外」后整窗仍在屏幕内，
-    # bringback 在 -13,-13 / 0,0 都判成被遮挡，账户条点不开、报「未找到签到入口」。
-    # 先 SW_RESTORE 再停，收尾时按原状态最大化回去（与 Qoder 同一套处理）。
-    if ([Cap32]::IsZoomed($hwnd)) {
-        $script:WasZoomed = $true
-        [Cap32]::ShowWindow($hwnd, 9) | Out-Null
-        Start-Sleep -Milliseconds 2000
-        [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
-        $winW = $rect.Right - $rect.Left
-        $winH = $rect.Bottom - $rect.Top
-        $winX = $rect.Left
-        $winY = $rect.Top
-        Log ("window was maximized; restored for offscreen flow rect=$winX,$winY ${winW}x${winH}")
-    }
-    $script:OriginalRect = $rect
-    Move-OffscreenNow
-    Log ("step: 窗口已停到屏外（原 rect " + $winX + "," + $winY + " " + $winW + "x" + $winH + "）")
-}
+# 每个候选窗口的 rect 快照、屏外停放和恢复都在 Invoke-TraeWindowClaim 内完成；
+# 这里不再提前改动窗口，避免后续候选继承上一个窗口的坐标/最大化状态。
 
 function Test-Blank($bmp) {
     $first = $bmp.GetPixel([int]($winW / 2), [int]($winH / 2))
@@ -727,7 +689,7 @@ function Get-OcrLines {
         }
         $g.Dispose()
         if ($tryN -lt $maxTry) {
-            if ($tryN -eq 1) { Log "step: 屏外捕获空白帧，2s 间隔重试（backgroundThrottling 容忍）" }
+            if ($tryN -eq 1) { [void](Log "step: 屏外捕获空白帧，2s 间隔重试（backgroundThrottling 容忍）") }
             $bmp.Dispose()
             Start-Sleep -Seconds 2
         }
@@ -1295,29 +1257,152 @@ function Click-At([int]$ax, [int]$ay, [switch]$SkipSynth) {
     [Cap32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
 }
 
-# Dismiss possible ad/popup overlays: ESC, then click visible close labels.
-function Close-AdOverlays {
-    # 屏外模式下 SendKeys 的 ESC 会落到用户的前台窗口（方案甲：绝不打扰），
-    # 改用合成 ESC 直投客户端消息队列。
-    if ($Offscreen) {
-        try { Send-SynthEsc; Start-Sleep -Milliseconds 800 } catch { }
-    } else {
-        try {
-            Add-Type -AssemblyName System.Windows.Forms
-            [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
-            Start-Sleep -Milliseconds 800
-        } catch { }
+# 广告层必须同时有「明确推广标记」和「明确关闭控件」才成立。单独的关闭按钮
+# 可能是编辑器标签/窗口按钮，绝不能盲点；单独出现的会员文案也只是普通业务卡片。
+function Find-AdMarker($lines) {
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        # 只用强广告文案。「升级会员/立即升级」也是已签后的常驻推广卡，
+        # 不能仅凭它判断有弹窗，否则会把窗口/侧栏的关闭控件误当广告关闭。
+        if ($l.text -match '会员首月立减|限时优惠|促销活动|专属优惠') { return $l }
     }
-    try {
-        $adLines = Get-OcrLines
-        foreach ($kw in @("关闭", "跳过", "我知道了", "以后再说", "稍后再说")) {
-            $cl = Find-Line $adLines $kw
-            if ($cl) {
-                Click-At ($cl.x + [int]($cl.w / 2)) ($cl.y + [int]($cl.h / 2))
-                Start-Sleep -Milliseconds 800
+    return $null
+}
+
+function Find-AdPixelClose($marker) {
+    # 广告卡的小 x 常被 OCR 整帧漏掉。只在强广告标题所在的左侧卡片内找暗像素
+    # 连通团，绝不扫描全窗/猜窗口关闭按钮；点击后仍由新 OCR 验证广告是否消失。
+    if (-not $marker -or -not $script:ShotBmp) { return $null }
+    $bmp = $script:ShotBmp
+    # 标题只占卡片宽度的一小半，x 在标题右侧约 170px；卡片宽度随窗口缩放。
+    $x1 = [Math]::Max(0, [int]($marker.x + $marker.w + 20))
+    $x2 = [Math]::Min($bmp.Width - 1, [int]($marker.x + [Math]::Max($marker.w + 300, $winW * 0.24)))
+    $y1 = [Math]::Max(0, [int]($marker.y - 16))
+    $y2 = [Math]::Min($bmp.Height - 1, [int]($marker.y + $marker.h + 24))
+    if ($x2 -le $x1 -or $y2 -le $y1) { return $null }
+
+    # 找 4 邻域连通团。小 x 是约 10x10 的独立部件；文字笔画要么太小，要么
+    # 宽/高超过 24px。比「取 22px 暗像素最多的方框」更不容易选中标点。
+    $remaining = New-Object 'System.Collections.Generic.HashSet[int]'
+    for ($y = $y1; $y -le $y2; $y++) {
+        for ($x = $x1; $x -le $x2; $x++) {
+            $c = $bmp.GetPixel($x, $y)
+            if ([Math]::Max($c.R, [Math]::Max($c.G, $c.B)) -lt 190) {
+                [void]$remaining.Add(($y * $bmp.Width + $x))
             }
         }
-    } catch { }
+    }
+    $best = $null; $bestScore = 0
+    while ($remaining.Count -gt 0) {
+        $seed = [System.Linq.Enumerable]::First($remaining)
+        [void]$remaining.Remove($seed)
+        $queue = New-Object 'System.Collections.Generic.Queue[int]'
+        $queue.Enqueue($seed)
+        $count = 0; $minX = $x2; $maxX = $x1; $minY = $y2; $maxY = $y1
+        while ($queue.Count -gt 0) {
+            $key = $queue.Dequeue(); $count++
+            $px = $key % $bmp.Width; $py = [int]($key / $bmp.Width)
+            if ($px -lt $minX) { $minX = $px }; if ($px -gt $maxX) { $maxX = $px }
+            if ($py -lt $minY) { $minY = $py }; if ($py -gt $maxY) { $maxY = $py }
+            foreach ($nkey in @(($key - 1), ($key + 1), ($key - $bmp.Width), ($key + $bmp.Width))) {
+                if ($remaining.Contains($nkey)) { [void]$remaining.Remove($nkey); $queue.Enqueue($nkey) }
+            }
+        }
+        $cw = $maxX - $minX + 1; $ch = $maxY - $minY + 1
+        if ($count -lt 6 -or $count -gt 180 -or $cw -lt 5 -or $cw -gt 24 -or $ch -lt 5 -or $ch -gt 24) { continue }
+        $cx = $minX + [int]($cw / 2); $cy = $minY + [int]($ch / 2)
+        # 关闭键应贴近卡片右上角；同区域有多个候选时取最靠右且最靠上的。
+        $score = ($cx * 10) - $cy
+        if ($score -gt $bestScore) {
+            $bestScore = $score
+            $best = @{ x = $cx; y = $cy; w = 1; h = 1; pixels = $count }
+        }
+    }
+    return $best
+}
+
+function Find-AdCloseControl($lines, $marker) {
+    if (-not $marker) { return $null }
+    # 小 x 优先，但必须位于广告卡右上角。历史上全窗最近邻误选过聊天区
+    # 1528,782 的关闭图标，连点三次广告仍在。这里用广告标题锚定局部边界。
+    $smallX = @()
+    $xMin = [int]($marker.x + $marker.w + 20)
+    $xMax = [int]($marker.x + [Math]::Max($marker.w + 300, $winW * 0.24))
+    $yMin = [int]($marker.y - 16)
+    $yMax = [int]($marker.y + $marker.h + 24)
+    foreach ($l in $lines) {
+        if (-not $l.text) { continue }
+        if ($l.words) {
+            foreach ($w in $l.words) {
+                $cx = $w.x + [int]($w.w / 2); $cy = $w.y + [int]($w.h / 2)
+                if ($w.text -match '^[×xX✕✖]$' -and $w.w -le 48 -and $w.h -le 48 -and
+                    $cx -ge $xMin -and $cx -le $xMax -and $cy -ge $yMin -and $cy -le $yMax) { $smallX += $w }
+            }
+        }
+        $cx = $l.x + [int]($l.w / 2); $cy = $l.y + [int]($l.h / 2)
+        if ($l.text -match '^[×xX✕✖]$' -and $l.w -le 48 -and $l.h -le 48 -and
+            $cx -ge $xMin -and $cx -le $xMax -and $cy -ge $yMin -and $cy -le $yMax) { $smallX += $l }
+    }
+    if ($smallX.Count -gt 0) {
+        $mx = $xMax; $my = $yMin
+        $closest = $smallX | Sort-Object @{ Expression = {
+            [Math]::Sqrt([Math]::Pow(($_.x + [int]($_.w / 2) - $mx), 2) + [Math]::Pow(($_.y + [int]($_.h / 2) - $my), 2))
+        } } | Select-Object -First 1
+        return @{ Close = $closest; Kind = 'small-x' }
+    }
+    $pixelClose = Find-AdPixelClose $marker
+    if ($pixelClose) { return @{ Close = $pixelClose; Kind = 'small-x-pixel' } }
+
+    # 只认独立短控件，不能把「关闭侧边栏」等泛化文案当广告关闭按钮。
+    foreach ($kw in @("关闭", "跳过", "我知道了", "以后再说", "稍后再说")) {
+        foreach ($l in $lines) {
+            if (-not $l.text) { continue }
+            $norm = $l.text -replace '[\s，。！!,.…]', ''
+            if ($norm -eq $kw -or $norm -eq ($kw + '广告')) { return @{ Close = $l; Kind = $kw } }
+            if ($l.words) {
+                foreach ($w in $l.words) {
+                    if ($w.text -eq $kw) { return @{ Close = $w; Kind = $kw } }
+                }
+            }
+        }
+    }
+    return $null
+}
+
+function Find-AdLayer($lines) {
+    $marker = Find-AdMarker $lines
+    if (-not $marker) { return $null }
+    $closeInfo = Find-AdCloseControl $lines $marker
+    if (-not $closeInfo) { return $null }
+    return @{ Marker = $marker; Close = $closeInfo.Close; Kind = $closeInfo.Kind }
+}
+
+function Close-AdOverlays {
+    # 没有广告时只读一帧并立即返回，不发送无关 ESC/点击。每处理一层都重新 OCR，
+    # 绝不复用旧帧连续点多个控件；最多只确认并处理三个明确广告层。
+    $adSeen = $false
+    for ($layer = 1; $layer -le 3; $layer++) {
+        $adLines = @(Get-OcrLines)
+        $marker = Find-AdMarker $adLines
+        if (-not $marker) {
+            # 广告文案消失就是关闭成功；此时 $marker 为 null，绝不能拿全窗其它 x
+            # 继续要求「关闭控件也消失」，否则会被无关控件误判为广告仍在。
+            return $true
+        }
+        $info = Find-AdLayer $adLines
+        if (-not $info) { return $false }
+        $adSeen = $true
+        $cl = $info.Close
+        [void](Log ("ad-overlay: layer=" + $layer + " marker='" + $info.Marker.text + "' close=" + $info.Kind + " @" + ($cl.x + [int]($cl.w / 2)) + "," + ($cl.y + [int]($cl.h / 2))))
+        # 广告卡是 Web 内容，SendMessage 常返回 true 却不触发 DOM 点击；跳过合成
+        # 消息，强制 UIA Invoke，失败再移回屏内做一次真实点击。
+        [void](Click-At ($cl.x + [int]($cl.w / 2)) ($cl.y + [int]($cl.h / 2)) -SkipSynth)
+        Start-Sleep -Milliseconds 800
+    }
+    $adLines = @(Get-OcrLines)
+    $marker = Find-AdMarker $adLines
+    if (-not $marker) { return $true }
+    return (-not (Find-AdCloseControl $adLines $marker))
 }
 
 
@@ -1412,24 +1497,80 @@ function Find-EntryWord($lines, [string[]]$needles) {
     return $null
 }
 
-# 窗口查找与冷启动尝试在骨架（head）里已经做过一次：找不到会直接 notfound 退出。
-# 这里只做兜底，避免重复启动客户端。
-if (-not $hwnd -or $hwnd -eq [IntPtr]::Zero) {
-    Out-Json "pending" ("找不到 " + $ProcessName + " 窗口，请手动打开客户端后重跑")
+function New-TraeClaimResult([string]$Status, [string]$Detail, [int]$Amount = 0) {
+    return [pscustomobject]@{ Status = $Status; Detail = $Detail; Amount = $Amount }
 }
 
-$rect = New-Object Cap32+RECT
-[Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
-$winW = $rect.Right - $rect.Left
-$winH = $rect.Bottom - $rect.Top
-try { if (-not $Offscreen) { Ensure-Foreground | Out-Null } } catch { }
+# 单窗口签到主流程。函数只返回一个结果对象；Out-Json/exit 由最外层候选循环统一收尾。
+function Invoke-TraeWindowClaim {
+    param([IntPtr]$TargetHandle)
+    $hwnd = $TargetHandle
+    if ($hwnd -eq [IntPtr]::Zero) {
+        return New-TraeClaimResult 'failed' '候选窗口句柄为空'
+    }
 
-Log "step: 窗口已定位，等 8s 让广告浮层冒头后清理"
-# 启动后的广告/弹窗会盖住主界面：等它出现再关，别一上来就清
-Start-Sleep -Seconds 8
-Close-AdOverlays
-Start-Sleep -Seconds 2
-Log "step: OCR 首页"
+    # 每个候选独立保存/恢复，不能把上一个窗口的屏外 rect 或最大化状态带过来。
+    $script:OriginalRect = $null
+    $script:WasZoomed = $false
+    $script:WasMinimized = $false
+    try {
+        $rect = New-Object Cap32+RECT
+        if (-not [Cap32]::GetWindowRect($hwnd, [ref]$rect)) {
+            return New-TraeClaimResult 'failed' 'GetWindowRect 失败，候选窗口可能已关闭'
+        }
+        $script:WasZoomed = [Cap32]::IsZoomed($hwnd)
+        $script:WasMinimized = [Cap32]::IsIconic($hwnd)
+        $hiddenKey = [string]$hwnd
+        if ($script:HiddenOriginalState -and $script:HiddenOriginalState.ContainsKey($hiddenKey)) {
+            # 隐藏窗口刚被 SW_RESTORE 出来，当前 IsZoomed 已为 false，要沿用还原前状态。
+            $script:WasZoomed = $script:WasZoomed -or $script:HiddenOriginalState[$hiddenKey].WasZoomed
+            $script:WasMinimized = $script:WasMinimized -or $script:HiddenOriginalState[$hiddenKey].WasMinimized
+        }
+        # 必须复制一份：后续 GetWindowRect 会原地修改 $rect，不能污染恢复快照。
+        $savedRect = New-Object Cap32+RECT
+        $savedRect.Left = $rect.Left; $savedRect.Top = $rect.Top
+        $savedRect.Right = $rect.Right; $savedRect.Bottom = $rect.Bottom
+        $script:OriginalRect = $savedRect
+
+        # 先按窗口尺寸钳 rect，再刷新本候选的坐标/尺寸；屏外停放前若处于最大化需 SW_RESTORE。
+        [void](Reset-WindowRect $hwnd)
+        [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+        $winW = $rect.Right - $rect.Left
+        $winH = $rect.Bottom - $rect.Top
+        $winX = $rect.Left
+        $winY = $rect.Top
+        if ($winW -le 0 -or $winH -le 0) {
+            return New-TraeClaimResult 'failed' '候选窗口尺寸无效'
+        }
+        if ($Offscreen -and [Cap32]::IsZoomed($hwnd)) {
+            [Cap32]::ShowWindow($hwnd, 9) | Out-Null
+            Start-Sleep -Milliseconds 2000
+            [Cap32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+            $winW = $rect.Right - $rect.Left
+            $winH = $rect.Bottom - $rect.Top
+            $winX = $rect.Left
+            $winY = $rect.Top
+        }
+        try { if (-not $Offscreen) { [void](Ensure-Foreground) } } catch { }
+        if ($Offscreen) {
+            Move-OffscreenNow
+            [void](Log ("step: 窗口已停到屏外（原 rect " + $winX + "," + $winY + " " + $winW + "x" + $winH + "）"))
+        }
+
+        [void](Log "step: 窗口已定位，等 8s 让广告浮层冒头后清理")
+        # 启动后的广告/弹窗会盖住主界面：等它出现再关，别一上来就清。
+        Start-Sleep -Seconds 8
+        $adsClosed = Close-AdOverlays
+        if (-not $adsClosed) {
+            $lines = @(Get-OcrLines)
+            Dump-Ocr $lines "trae-ad-unresolved"
+            Save-Shot "00-ad-unresolved"
+            $detail = '检测到明确广告层，但关闭后广告标记/关闭控件仍未消失；未继续点击签到相关控件'
+            if ($Explore) { return New-TraeClaimResult 'explore' $detail }
+            return New-TraeClaimResult 'pending' $detail
+        }
+        Start-Sleep -Seconds 2
+        [void](Log "step: OCR 首页")
 
 $lines = Get-OcrLines
 Dump-Ocr $lines "trae-home"
@@ -1514,13 +1655,13 @@ if (-not $entry) {
     $ci = 0
     # 菜单是 toggle：重复点击同一个区域会把刚打开的菜单关掉。
     # 所以每个候选点只点一次，点完连续检测几轮；没检测到就 ESC 收掉再换下一个点。
-    Log ("step: 首页无入口，试账户条候选点 " + $candidates.Count + " 个")
+    [void](Log ("step: 首页无入口，试账户条候选点 " + $candidates.Count + " 个"))
     foreach ($cand in $candidates) {
-        Log ("step: 点候选 #" + $ci + " @" + $cand.x + "," + $cand.y)
+        [void](Log ("step: 点候选 #" + $ci + " @" + $cand.x + "," + $cand.y))
         # 2026-10-25：账户条这里原来走合成消息，10-25 00:55 实测 msg-ok 但菜单没开，
         # 4s 后就放弃 → 「未找到签到入口」。账户菜单是动作入口，和签到按钮同口径：
         # 直接 UIA → BringBack 真实点击（屏外窗口已 TOPMOST，不会被前台窗口盖住）。
-        Click-At $cand.x $cand.y -SkipSynth
+        [void](Click-At $cand.x $cand.y -SkipSynth)
         foreach ($sub in 1..2) {
             Start-Sleep -Seconds 2
             $lines = Get-OcrLines
@@ -1553,8 +1694,8 @@ if (-not $entry) {
 if (-not $entry -and -not (Test-MenuOpen $lines)) {
     $tx = $winW - 245
     $ty = 20
-    Log ("step: 左下账户条未开菜单，兜底点上栏头像 @$tx,$ty（IDE 窗口上栏头像入口）")
-    Click-At $tx $ty -SkipSynth
+    [void](Log ("step: 左下账户条未开菜单，兜底点上栏头像 @$tx,$ty（IDE 窗口上栏头像入口）"))
+    [void](Click-At $tx $ty -SkipSynth)
     foreach ($sub in 1..2) {
         Start-Sleep -Seconds 2
         $lines = Get-OcrLines
@@ -1589,13 +1730,13 @@ if (-not $entry -and -not $claimed) {
     }
     $peek = ($lines | Select-Object -First 10 | ForEach-Object { $_.text }) -join "/"
     $msg = ("未找到签到入口；相关词: " + ($diag -join " | ") + "；页面: " + $peek)
-    if ($Explore) { Out-Json "explore" $msg }
-    Out-Json "pending" $msg
+    if ($Explore) { return New-TraeClaimResult 'explore' $msg }
+    return New-TraeClaimResult 'pending' $msg
 }
 
 # 探索模式到此为止：菜单词级布局已进 dump 与截图，签到按钮绝不碰
 if ($Explore) {
-    Out-Json "explore" ("菜单已抓取，入口候选: " + $entry.text + " @ " + ($entry.x + [int]($entry.w / 2)) + "," + ($entry.y + [int]($entry.h / 2)))
+    return New-TraeClaimResult 'explore' ("菜单已抓取，入口候选: " + $entry.text + " @ " + ($entry.x + [int]($entry.w / 2)) + "," + ($entry.y + [int]($entry.h / 2)))
 }
 
 if ($claimed -and -not $entry) {
@@ -1606,7 +1747,7 @@ if ($claimed -and -not $entry) {
     # 新口径：有入口就必须点（点完用 granted/余额复核到账）；没有入口只有文案时
     # 无法复核，一律降级 pending，让台账老实报「待手签」，绝不静默记一笔假的。
     $peek0 = ($lines | Select-Object -First 10 | ForEach-Object { $_.text }) -join "/"
-    Out-Json "pending" ("页面显示「" + $claimed.text + "」但找不到可点的签到入口，无法复核是否到账，按待手签处理；页面: " + $peek0)
+    return New-TraeClaimResult 'pending' ("页面显示「" + $claimed.text + "」但找不到可点的签到入口，无法复核是否到账，按待手签处理；页面: " + $peek0)
 }
 
 # 点击前页面上已经有的「已签到」文案（可能就是跨天残留）。点击后它还挂在原处，
@@ -1617,7 +1758,7 @@ if ($claimed) { $claimedBefore = [string]$claimed.text }
 $bx = $entry.x
 $by = $entry.y + [int]($entry.h / 2)
 if ($DryRun) {
-    Out-Json "dryrun" ("将点击签到入口: " + $entry.text + " @ " + $bx + "," + $by)
+    return New-TraeClaimResult 'dryrun' ("将点击签到入口: " + $entry.text + " @ " + $bx + "," + $by)
 }
 
 # 「每日领150积分」只是说明文字，真正的签到按钮是它右侧的黑色「签到」。
@@ -1680,7 +1821,7 @@ if ($btnLine) {
     $bx = $btnLine.x + [int]($btnLine.w / 2)
     $by = $btnLine.y + [int]($btnLine.h / 2)
     $offsets = @(0)
-    Log ("step: 签到按钮按 OCR 定位 @" + $bx + "," + $by)
+    [void](Log ("step: 签到按钮按 OCR 定位 @" + $bx + "," + $by))
     try {
         $ln = "$(Get-Date -Format HH:mm:ss) btnOcr x=$bx y=$by text=$($btnLine.text) offer=$offer bal0=$bal0`n"
         [System.IO.File]::AppendAllText("$PSScriptRoot\..\logs\_clickmode.txt", $ln)
@@ -1705,11 +1846,11 @@ else {
         } catch { }
     }
 }
-Log ("step: 入口已找到 " + $entry.text + "（可领 " + $offer + "），准备点签到按钮")
+[void](Log ("step: 入口已找到 " + $entry.text + "（可领 " + $offer + "），准备点签到按钮"))
 for ($i = 0; $i -lt $offsets.Count; $i++) {
-    Log ("step: 点击 offset=" + $offsets[$i] + " @" + ($bx + $offsets[$i]) + "," + $by)
+    [void](Log ("step: 点击 offset=" + $offsets[$i] + " @" + ($bx + $offsets[$i]) + "," + $by))
     # -SkipSynth：合成消息对「签到」黑按钮无效是实证事实，直接 UIA → 移回真实点击
-    Click-At ($bx + $offsets[$i]) $by -SkipSynth
+    [void](Click-At ($bx + $offsets[$i]) $by -SkipSynth)
     foreach ($sub in 1..2) {
         Start-Sleep -Seconds 3
         $lines = Get-OcrLines
@@ -1722,15 +1863,15 @@ for ($i = 0; $i -lt $offsets.Count; $i++) {
         #    就从 150 变成 100），catalog 的 daily_amount 只作预估。
         $g = Find-Granted $lines
         if ($g -gt 0) {
-            Out-Json "ok" ("签到成功（已获得 " + $g + " 积分）[granted] " + $g) $g
+            return New-TraeClaimResult 'ok' ("签到成功（已获得 " + $g + " 积分）[granted] " + $g) $g
         }
 
         # ② 备用判据：余额差。新 UI 已无余额（bal0 恒 -1），保留以兼容再次改版。
         $bal1 = Find-Balance $lines
-        Log ("step: 复核 granted=" + $g + " 余额 " + $bal0 + " -> " + $bal1)
+        [void](Log ("step: 复核 granted=" + $g + " 余额 " + $bal0 + " -> " + $bal1))
         if ($bal0 -ge 0 -and $bal1 -ge 0 -and $bal1 -gt $bal0) {
             $delta = $bal1 - $bal0
-            Out-Json "ok" ("签到成功（余额 $bal0 -> $bal1）[granted] $delta") $delta
+            return New-TraeClaimResult 'ok' ("签到成功（余额 $bal0 -> $bal1）[granted] $delta") $delta
         }
 
         # ③ 兜底判据：文案。弱——「今日已签」只在刚领的那次菜单会话里出现，
@@ -1738,12 +1879,12 @@ for ($i = 0; $i -lt $offsets.Count; $i++) {
         #    的 daily_amount）。仅在上两条都失效时使用。
         $c = Find-AnyLine $lines $claimWords ([int]($winW * 0.3))
         if ($c -and $claimedBefore -and [string]$c.text -eq $claimedBefore) {
-            Log ("step: 弱判据被排除（点击前后都是同一句「" + $c.text + "」，不是本次到账证据）")
+            [void](Log ("step: 弱判据被排除（点击前后都是同一句「" + $c.text + "」，不是本次到账证据）"))
             $c = $null
         }
         if ($c) {
-            Log ("step: 弱判据命中（未读到「已获得N积分」）: " + $c.text)
-            Out-Json "ok" ("签到成功（点击后新出现: " + $c.text + "）")
+            [void](Log ("step: 弱判据命中（未读到「已获得N积分」）: " + $c.text))
+            return New-TraeClaimResult 'ok' ("签到成功（点击后新出现: " + $c.text + "）")
         }
     }
 }
@@ -1755,7 +1896,87 @@ $peek2 = ($lines | Select-Object -First 10 | ForEach-Object { $_.text }) -join "
 # 已实锤漏签）。既然已经点过却复核不到到账，就不该替主人下「已签」的结论：
 # 一律报 pending，让他按一下或者手动 record，台账永远只记有证据的那一笔。
 if (Test-AlreadyCard $lines) {
-    Log "step: 卡片为会员推广态，但本轮到账复核失败，不报 already"
+    [void](Log "step: 卡片为会员推广态，但本轮到账复核失败，不报 already")
 }
-Out-Json "pending" ("已点击签到入口但未检测到到账（granted 未出现，余额 $bal0）；页面: " + $peek2)
-Out-Json "pending" ("点击各候选位置后均未出现已签状态，页面: " + $peek2)
+# clicked-only 不能判 ok；没有 granted/余额增加/点击后新出现的已签状态，一律 pending。
+return New-TraeClaimResult 'pending' ("已点击签到入口但未检测到到账（granted 未出现，余额 $bal0）；页面: " + $peek2)
+    } catch {
+        return New-TraeClaimResult 'failed' ('窗口处理异常: ' + $_.Exception.Message)
+    } finally {
+        # 无论 ok/pending/failed/Explore/DryRun，离开当前候选前都先恢复它自己的 rect。
+        try { if ($script:OriginalRect) { [void](Restore-OriginalRect) } } catch { }
+        $script:OriginalRect = $null
+        $script:WasZoomed = $false
+        $script:WasMinimized = $false
+        if ($script:ShotBmp) { try { $script:ShotBmp.Dispose() } catch { }; $script:ShotBmp = $null }
+    }
+}
+
+# ── 多窗口外层：OCR 选中者优先，其余按面积；隐藏窗口还原后重新枚举入队 ─────────
+if (-not $hwnd -or $hwnd -eq [IntPtr]::Zero) {
+    Out-Json "pending" ("找不到 " + $ProcessName + " 窗口，请手动打开客户端后重跑")
+}
+if ($script:MainCandidates -and $script:MainCandidates.Count -gt 1 -and $script:LaunchedByUs) {
+    Start-Sleep -Seconds 3
+}
+$selectedHwnd = Select-CodeModeWindow
+$claimQueue = New-Object System.Collections.ArrayList
+$queuedHandles = @{}
+$processedHandles = @{}
+$candidateIndex = 0
+$lastDetail = ''
+
+# 选中的窗口固定排第一；其余候选按面积降序。新还原的隐藏窗口也会走同一入队规则。
+$selectedCand = $script:MainCandidates | Where-Object { $_.H -eq $selectedHwnd } | Select-Object -First 1
+if ($selectedCand) {
+    [void]$claimQueue.Add($selectedCand)
+    $queuedHandles[[string]$selectedCand.H] = $true
+}
+foreach ($cand in @($script:MainCandidates | Sort-Object Area -Descending)) {
+    if (-not $cand -or $queuedHandles.ContainsKey([string]$cand.H)) { continue }
+    [void]$claimQueue.Add($cand)
+    $queuedHandles[[string]$cand.H] = $true
+}
+
+while ($true) {
+    if ($claimQueue.Count -eq 0) {
+        # 可见候选都失败后再逐个还原隐藏窗口；每次还原都重新枚举，纳入新可见结果。
+        $restoredHidden = Restore-HiddenTraeWindow
+        if ($restoredHidden -eq [IntPtr]::Zero) { break }
+        [void](Find-TargetWindow)
+        foreach ($cand in @($script:MainCandidates | Sort-Object Area -Descending)) {
+            if (-not $cand -or $queuedHandles.ContainsKey([string]$cand.H)) { continue }
+            [void]$claimQueue.Add($cand)
+            $queuedHandles[[string]$cand.H] = $true
+        }
+        if ($claimQueue.Count -eq 0) { continue }
+    }
+
+    $cand = $claimQueue[0]
+    $claimQueue.RemoveAt(0)
+    $handleKey = [string]$cand.H
+    if ($processedHandles.ContainsKey($handleKey)) { continue }
+    $processedHandles[$handleKey] = $true
+    $candidateIndex++
+    [void](Log ("multi-window: candidate=$candidateIndex handle=$($cand.H) area=$($cand.Area)"))
+
+    # Log 会走 Write-Output；这里用数组收口并校验，绝不把日志误当成 Status/Detail。
+    $claimOutput = @(Invoke-TraeWindowClaim $cand.H)
+    if ($claimOutput.Count -ne 1 -or $claimOutput[0] -isnot [pscustomobject] -or -not $claimOutput[0].PSObject.Properties['Status']) {
+        $result = New-TraeClaimResult 'failed' 'Invoke-TraeWindowClaim 返回值污染或缺失'
+    } else {
+        $result = $claimOutput[0]
+    }
+    [void](Log ("multi-window: candidate=$candidateIndex handle=$($cand.H) status=$($result.Status) detail=" + $result.Detail))
+
+    # 终态直接统一收尾；Out-Json 内部 exit，因此成功后不会再处理其他窗口。
+    if (@('ok', 'already', 'dryrun', 'explore') -contains $result.Status) {
+        Out-Json $result.Status $result.Detail $result.Amount
+    }
+    if (-not [string]::IsNullOrWhiteSpace($result.Detail)) {
+        $lastDetail = "candidate=$candidateIndex handle=$($cand.H) area=$($cand.Area)；" + $result.Detail
+    }
+    # pending/failed：Invoke 的 finally 已恢复本窗口 rect，这里才继续下一个候选。
+}
+if ([string]::IsNullOrWhiteSpace($lastDetail)) { $lastDetail = '没有可处理的 Trae 主窗口候选' }
+Out-Json "pending" ("所有候选窗口均未确认到账；最后诊断: " + $lastDetail)

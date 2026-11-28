@@ -8,8 +8,8 @@
   确认今天 00:00 发放的 +300 条目存在 → [granted] 300 交台账入账。
 
 登录态：data/webprofiles/xiaohuanxiong/（Edge 自己保管 cookie，本脚本不读
-不导出——research/SAFETY.md 规则 1）。登录态失效时 exit 2 报 pending，
-主人在弹出窗口里人工登录一次即可恢复。
+不导出——research/SAFETY.md 规则 1）。登录态失效时 exit 3 报 NEED_LOGIN，
+由 checkin 尝试桌面客户端兜底；兜底也失败则记为 failed，不等待人工登录。
 
 失效条件：
   - account-card-points 按钮类名改版
@@ -17,7 +17,7 @@
   - 发放/有效期规则变更（面板原话与 catalog 注释对照）
 
 跑法：python scripts/web_claim_xiaohuanxiong.py
-退出码：0=完成  2=待人工（登录态失效/页面异常）  其它=失败
+退出码：0=完成  2=待人工（页面异常）  3=未登录（转客户端兜底）  其它=失败
 """
 from __future__ import annotations
 
@@ -58,8 +58,8 @@ def main() -> int:
             if not page.query_selector("button.account-card-points"):
                 log("登录态失效：account-card-points 不存在（未登录）")
                 page.screenshot(path=str(OUT / f"nologin_{today}.png"))
-                print("NEED_LOGIN: 请在弹出窗口登录小浣熊后重跑", flush=True)
-                return 2
+                print("NEED_LOGIN: 网页登录态失效，转桌面客户端兜底", flush=True)
+                return 3
 
             log(f"登录态有效，打开积分面板（今日 {today}）")
             # 2026-11-19：页面顶部公告弹窗（radix Dialog，Esc 可关）+ 左下角

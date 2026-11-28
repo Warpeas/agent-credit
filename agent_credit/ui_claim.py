@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,8 @@ SCRIPT_MINIMAX_OCR = ROOT / "scripts" / "ui_claim_minimax.ps1"
 SCRIPT_LOBSTERAI_OCR = ROOT / "scripts" / "ui_claim_lobsterai.ps1"
 SCRIPT_TRAE_OCR = ROOT / "scripts" / "ui_claim_trae.ps1"
 SCRIPT_QODERCN_OCR = ROOT / "scripts" / "ui_claim_qodercn.ps1"
+SCRIPT_XIAOHUANXIONG_DETAILS = ROOT / "scripts" / "ui_claim_xiaohuanxiong.ps1"
+SCRIPT_MONKEYCODE_UI = ROOT / "scripts" / "ui_claim_monkeycode.py"
 TASK_TRAE_LAUNCHER = ROOT / "scripts" / "_task_trae.ps1"
 # 2026-10-11：TRAE SOLO CN（Trae）已合并进 Trae CN，旧安装目录只剩 debug.log。
 # 两个产品向来共用同一个积分账户，所以台账继续只用 `trae` 一条，不新增账户。
@@ -43,6 +46,12 @@ RECIPES: dict[str, dict[str, Any]] = {
     "trae": {"process": ["TRAE", "Trae"], "sendkeys": ""},
     "autoclaw": {"process": ["AutoClaw"], "sendkeys": ""},
     "lobsterai": {"process": ["LobsterAI", "Lobster"], "sendkeys": ""},
+    # 网页登录态失效时的小浣熊桌面客户端兜底。成功仍以界面明确状态为准，
+    # 不在 generic ui_claim.ps1 里凭「点击过」直接记签到。
+    "xiaohuanxiong": {
+        "process": ["商汤小浣熊", "小浣熊", "raccoon", "XiaoHuanXiong"],
+        "sendkeys": "",
+    },
 }
 
 
@@ -595,7 +604,62 @@ def _claim_lobsterai() -> tuple[bool, str]:
     return _run_elevated_ps1(SCRIPT_LOBSTERAI_OCR, LOG_DIR / "lobsterai_claim.json")
 
 
-UI_ROUTE_IDS = ("autoclaw", "minimax", "lobsterai", "trae", "qodercn")
+def _claim_xiaohuanxiong() -> tuple[bool, str]:
+    """Open client, then verify today's grant and extended expiry in points details.
+
+    This product has no sign-in button: opening a signed-in desktop client is
+    the daily grant. A click or a balance alone is not evidence, so the helper
+    requires today's dated +300 entry, the corresponding seven-day expiry, and
+    the client's displayed extension rule before returning success.
+    """
+    if not SCRIPT_XIAOHUANXIONG_DETAILS.is_file():
+        return False, f"缺少 {SCRIPT_XIAOHUANXIONG_DETAILS}"
+    if find_exe("xiaohuanxiong") is None:
+        return False, "未找到小浣熊客户端"
+    recipe = RECIPES["xiaohuanxiong"]
+    launched = False
+    if not _has_main_window(recipe["process"]):
+        launch("xiaohuanxiong")
+        launched = True
+        time.sleep(2)
+    result_path = LOG_DIR / "xiaohuanxiong_claim.json"
+    cmd = PS + [
+        "-WindowStyle", "Hidden", "-File", str(SCRIPT_XIAOHUANXIONG_DETAILS),
+        "-OutFile", str(result_path),
+        "-ProcessMatch", "|".join(recipe["process"]),
+        "-ExpectedAmount", "300", "-WaitSeconds", "45",
+    ]
+    rc, _ = trace.stream(cmd, label="xiaohuanxiong_details", timeout=90, cwd=str(ROOT))
+    if rc is None:
+        return False, "小浣熊积分详情核对超时"
+    ok, detail = _read_result(result_path)
+    return ok, (f"已启动客户端；{detail}" if launched else detail)
+
+
+def _claim_monkeycode() -> tuple[bool, str]:
+    """Run the installed Tauri client's UIA flow after the web login expires.
+
+    The helper performs its own read-only API pre-check, refuses login pages and
+    blind clicks, and confirms checked_in=true before reporting success.
+    """
+    if not SCRIPT_MONKEYCODE_UI.is_file():
+        return False, f"缺少 {SCRIPT_MONKEYCODE_UI}"
+    if find_exe("monkeycode_credit") is None:
+        return False, "未找到 MonkeyCode 客户端"
+    result_path = LOG_DIR / "monkeycode_claim.json"
+    if result_path.exists():
+        result_path.unlink()
+    cmd = [
+        sys.executable, "-u", str(SCRIPT_MONKEYCODE_UI),
+        "--settle", "20", "--no-idle-gate",
+    ]
+    rc, _ = trace.stream(cmd, label="monkeycode_client", timeout=180, cwd=str(ROOT))
+    if rc is None:
+        return False, "MonkeyCode 客户端签到核对超时"
+    return _read_result(result_path)
+
+
+UI_ROUTE_IDS = ("autoclaw", "minimax", "lobsterai", "trae", "qodercn", "monkeycode_credit")
 
 
 def has_ui_route(account_id: str) -> bool:
@@ -621,6 +685,10 @@ def claim(account_id: str) -> tuple[bool, str]:
         return _claim_trae()
     if account_id == "qodercn":
         return _claim_qodercn()
+    if account_id == "xiaohuanxiong":
+        return _claim_xiaohuanxiong()
+    if account_id == "monkeycode_credit":
+        return _claim_monkeycode()
     recipe = RECIPES.get(account_id)
     if recipe is None:
         return False, "无 UI 配方"

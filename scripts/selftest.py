@@ -18,6 +18,10 @@ from agent_credit.catalog import accounts, find_account, load_catalog  # noqa: E
 from agent_credit import ledger, checkin  # noqa: E402
 from agent_credit.recommend import recommend  # noqa: E402
 
+# 自测使用临时账本，也不能把真实计划任务心跳写成 running_ui；否则 status
+# 会在测试结束后 15 分钟内误报「后台 UI 签到执行中」（2026-11-29 实测）。
+checkin._chain_state = lambda *_args, **_kwargs: None
+
 
 def main() -> None:
     cat = load_catalog()
@@ -58,14 +62,14 @@ def main() -> None:
     assert checkin._parse_granted("签到成功（余额 3427 -> 3527）") is None
     assert checkin._parse_granted("") is None
 
-    # 有 UI 配方的账户才允许「外部失败 → 回落 UI」；没有配方的（MonkeyCode 这种
-    # 声明了 claim_mode=ui 但走 command: 的）必须如实上报外部失败，
-    # 否则报出来的是「无 UI 配方」，把真实原因盖掉（10-11 踩过）。
+    # 有 UI 配方的账户才允许「外部失败 → 回落 UI」；没有配方的账户必须如实
+    # 上报外部失败，避免「无 UI 配方」盖掉真实原因。MonkeyCode 客户端已安装，
+    # 2026-11-29 起网页未登录必须回落到它的专用 UIA 脚本。
     from agent_credit import ui_claim as _uic
     assert _uic.has_ui_route("trae") is True
     assert _uic.has_ui_route("autoclaw") is True
     assert _uic.has_ui_route("lobsterai") is True
-    assert _uic.has_ui_route("monkeycode_credit") is False
+    assert _uic.has_ui_route("monkeycode_credit") is True
     assert _uic.has_ui_route("workbuddy") is True   # 在 RECIPES 里
 
     data = ledger.load()
